@@ -1,0 +1,24 @@
+{
+  "name": "codex-ilink",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ilink": "./src/cli/ilink.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "ilink": "node --experimental-strip-types src/cli/ilink.ts",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "probe:lease": "node --experimental-strip-types src/probes/lease-arbitration.ts",
+    "probe:resume": "node --experimental-strip-types src/probes/resume-thread.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

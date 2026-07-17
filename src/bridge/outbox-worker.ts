@@ -1,0 +1,153 @@
+import {
+  SqliteState,
+  type NotificationRoute,
+  type OutboxItem,
+} from "./sqlite-state.ts";
+import type { ILinkSender } from "./bridge.ts";
+import type { ILinkSession } from "../ilink/protocol.ts";
+
+export type OutboxDrainResult = {
+  confirmed: number;
+  deferred: number;
+  failed: number;
+};
+
+export type OutboxWorkerOptions = {
+  ilink: ILinkSender;
+  maxAttempts?: number;
+  now: () => number;
+  onConfirmed?: (
+    item: Pick<
+      OutboxItem,
+      "body" | "clientId" | "contextToken" | "targetUserId"
+    >,
+    confirmedAtMs: number,
+  ) => void;
+  routeOnConfirmed?: (
+    item: Pick<OutboxItem, "clientId">,
+    confirmedAtMs: number,
+  ) => NotificationRoute | null;
+  session: ILinkSession;
+  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  state: SqliteState;
+};
+
+/** Replays durable pending sends with one stable iLink client_id. */
+export class OutboxWorker {
+  readonly #failedForRun = new Set<string>();
+  readonly #ilink: ILinkSender;
+  readonly #maxAttempts: number;
+  readonly #now: () => number;
+  readonly #onConfirmed: OutboxWorkerOptions["onConfirmed"];
+  readonly #routeOnConfirmed: OutboxWorkerOptions["routeOnConfirmed"];
+  readonly #session: ILinkSession;
+  readonly #sleep: NonNullable<OutboxWorkerOptions["sleep"]>;
+  readonly #state: SqliteState;
+  #draining: Promise<OutboxDrainResult> | undefined;
+
+  constructor(options: OutboxWorkerOptions) {
+    this.#ilink = options.ilink;
+    this.#maxAttempts = options.maxAttempts ?? 3;
+    this.#now = options.now;
+    this.#onConfirmed = options.onConfirmed;
+    this.#routeOnConfirmed = options.routeOnConfirmed;
+    this.#session = options.session;
+    this.#sleep = options.sleep ?? abortableSleep;
+    this.#state = options.state;
+    if (!Number.isSafeInteger(this.#maxAttempts) || this.#maxAttempts < 1) {
+      throw new Error("E_OUTBOX_ATTEMPTS");
+    }
+  }
+
+  drain(signal?: AbortSignal): Promise<OutboxDrainResult> {
+    if (this.#draining) return this.#draining;
+    const draining = this.#drain(signal).finally(() => {
+      if (this.#draining === draining) this.#draining = undefined;
+    });
+    this.#draining = draining;
+    return draining;
+  }
+
+  /** Allows one new bounded retry cycle after genuine controller activity. */
+  resetDeferred(): number {
+    const count = this.#failedForRun.size;
+    this.#failedForRun.clear();
+    return count;
+  }
+
+  async #drain(signal?: AbortSignal): Promise<OutboxDrainResult> {
+    const result: OutboxDrainResult = { confirmed: 0, deferred: 0, failed: 0 };
+    for (const item of this.#state.listPendingOutbox()) {
+      if (signal?.aborted) throw signal.reason;
+      const contextToken =
+        item.contextToken ||
+        this.#state.getILinkState(this.#session.botId)?.contextToken;
+      if (
+        item.body === null ||
+        !contextToken ||
+        this.#failedForRun.has(item.clientId)
+      ) {
+        result.deferred += 1;
+        continue;
+      }
+
+      let confirmed = false;
+      for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
+        try {
+          await this.#ilink.sendText({
+            clientId: item.clientId,
+            contextToken,
+            session: this.#session,
+            ...(signal ? { signal } : {}),
+            text: item.body,
+          });
+          const confirmedAtMs = this.#now();
+          const route = this.#routeOnConfirmed?.(item, confirmedAtMs) ?? undefined;
+          this.#state.confirmOutbox(item.clientId, confirmedAtMs, route);
+          try {
+            this.#onConfirmed?.(item, confirmedAtMs);
+          } catch {
+            // Delivery is already accepted and must never be retried merely
+            // because an optional local post-confirmation hook failed.
+          }
+          result.confirmed += 1;
+          confirmed = true;
+          break;
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          if (attempt < this.#maxAttempts) {
+            await this.#sleep(250 * 2 ** (attempt - 1), signal);
+          }
+        }
+      }
+      if (!confirmed) {
+        this.#failedForRun.add(item.clientId);
+        result.failed += 1;
+      }
+    }
+    return result;
+  }
+}
+
+function abortableSleep(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const finish = (): void => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    const abort = (): void => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    timer.unref();
+  });
+}

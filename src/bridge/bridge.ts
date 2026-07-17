@@ -1,0 +1,1978 @@
+import { win32 } from "node:path";
+
+import { parseInboundText, COMMAND_HELP } from "./commands.ts";
+import { ApprovalCoordinator } from "./approval-coordinator.ts";
+import {
+  parseControllerMessage,
+  type ParsedControllerMessage,
+} from "./inbound-message.ts";
+import {
+  parseDurableInboundFailure,
+  parseDurableTurnInput,
+  serializeDurableInboundFailure,
+  serializeDurableTurnInput,
+  type DurableInboundFailureCode,
+  type DurableTurnAttachment,
+  type DurableTurnInput,
+} from "./turn-input.ts";
+import {
+  SqliteState,
+  type DispatchIntent,
+  type InboundMessageInput,
+  type OutboxItem,
+  type PendingOutboxInput,
+} from "./sqlite-state.ts";
+import { formatWechatFinalReply } from "./wechat-output.ts";
+import { routeInboundText } from "../domain/route-inbound.ts";
+import {
+  SqliteTurnLeaseStore,
+  type TurnLease,
+} from "../coordination/turn-lease.ts";
+import {
+  buildThreadPreview,
+  listActiveThreads,
+  paginateThreads,
+  type ThreadPreview,
+} from "./thread-catalog.ts";
+import type {
+  ILinkSession,
+  SendTextResult,
+  WireWeixinMessage,
+} from "../ilink/protocol.ts";
+import {
+  InboundMediaError,
+  type InboundMediaCandidate,
+  type InboundMediaResolution,
+} from "../media/inbound-media.ts";
+import { CodexOutcomeUnknownError } from "../codex/protocol.ts";
+
+export type ILinkSender = {
+  sendText(input: {
+    clientId: string;
+    contextToken: string;
+    session: ILinkSession;
+    signal?: AbortSignal;
+    text: string;
+    timeoutMs?: number;
+  }): Promise<SendTextResult>;
+};
+
+export type BridgeEngineOptions = {
+  bridgeInstanceId?: string;
+  codex?: CodexTurnStarter;
+  ilink: ILinkSender;
+  inboxDirectory?: string;
+  leases?: SqliteTurnLeaseStore;
+  mainThreadId?: string;
+  newId: () => string;
+  now: () => number;
+  listProjects?: () =>
+    | Promise<readonly ProjectNavigationEntry[]>
+    | readonly ProjectNavigationEntry[];
+  media?: InboundMediaPort;
+  session: ILinkSession;
+  slowTurnNoticeAfterMs?: number;
+  state: SqliteState;
+};
+
+export type InboundMediaPort = {
+  cleanup(dedupeKey: string): Promise<void>;
+  resolve(input: {
+    candidate: InboundMediaCandidate;
+    dedupeKey: string;
+    signal?: AbortSignal;
+  }): Promise<InboundMediaResolution>;
+};
+
+export type ProjectNavigationEntry = {
+  cwd: string;
+  name: string;
+};
+
+export type CodexTurnStarter = {
+  ensureThread?(threadId: string): Promise<void>;
+  listThreads?(input: {
+    archived: boolean;
+    cursor?: string;
+  }): Promise<{ data: unknown[]; nextCursor: string | null }>;
+  readThread?(input: {
+    includeTurns: boolean;
+    threadId: string;
+  }): Promise<{ thread: Record<string, unknown> }>;
+  isServerRequestLive?(id: number | string): boolean;
+  respondToServerRequest?(
+    id: number | string,
+    result: Record<string, unknown>,
+  ): boolean | void;
+  resumeThread?(threadId: string): Promise<Record<string, unknown>>;
+  startThread?(cwd: string): Promise<{
+    thread: { id: string } & Record<string, unknown>;
+  }>;
+  unarchiveThread?(threadId: string): Promise<Record<string, unknown>>;
+  startTurn(input: {
+    attachments?: readonly DurableTurnAttachment[];
+    clientUserMessageId: string;
+    text: string;
+    threadId: string;
+  }): Promise<{ turn: { id: string } }>;
+};
+
+export type CodexEvent = {
+  id?: number | string;
+  method: string;
+  params: Record<string, unknown>;
+};
+
+type CodexTurnFailure = {
+  category: "network" | "other";
+  httpStatusCode: number | undefined;
+};
+
+const MAX_ACTIVE_BRIDGE_TURNS = 3;
+const MAX_REMEMBERED_CODEX_FAILURES = 256;
+const DEFAULT_SLOW_TURN_NOTICE_AFTER_MS = 2 * 60 * 1_000;
+const CODEX_OUTCOME_UNKNOWN_TEXT =
+  "E_CODEX_OUTCOME_UNKNOWN：提交结果未知，请在 Desktop 查看后决定是否重发。";
+const CODEX_EMPTY_REPLY_TEXT =
+  "❌ Codex 未生成回复，可能发生网络或系统错误。请稍后重试；详情请在 Codex Desktop 查看。";
+const CODEX_SUBMISSION_REJECTED_TEXT =
+  "❌ Codex 提交失败：本次输入已被明确拒绝，未创建任务。请检查附件或输入后重试；详情请在 Codex Desktop 查看。";
+const HOOK_GUARD_UNKNOWN_TEXT =
+  "E_HOOK_GUARD：并发门禁未确认，结果状态未知，请在 Desktop 查看。";
+const MISSING_THREAD_TEXT =
+  "原会话尚未写入 Codex 历史，已失效；请使用 /new 重新创建并发送。";
+const CODEX_SLOW_TURN_TEXT =
+  "⏳ Codex 任务仍在执行，已长时间没有结束；可能正在等待工具、审批或网络。任务未被取消，可用 /st 查看。";
+
+export class BridgeEngine {
+  readonly #approvals: ApprovalCoordinator | undefined;
+  readonly #ilink: ILinkSender;
+  readonly #inboxDirectory: string | undefined;
+  readonly #bridgeInstanceId: string | undefined;
+  readonly #codex: CodexTurnStarter | undefined;
+  readonly #leases: SqliteTurnLeaseStore | undefined;
+  readonly #mainThreadId: string | undefined;
+  readonly #media: InboundMediaPort | undefined;
+  readonly #listProjects: BridgeEngineOptions["listProjects"];
+  readonly #newId: () => string;
+  readonly #now: () => number;
+  readonly #session: ILinkSession;
+  readonly #shutdown = new AbortController();
+  readonly #slowTurnNoticeAfterMs: number;
+  readonly #state: SqliteState;
+  readonly #turnFailures = new Map<string, CodexTurnFailure>();
+  #closing = false;
+  #reconcilePromise: Promise<void> | undefined;
+
+  constructor(options: BridgeEngineOptions) {
+    this.#bridgeInstanceId = options.bridgeInstanceId;
+    this.#codex = options.codex;
+    this.#ilink = options.ilink;
+    this.#inboxDirectory = options.inboxDirectory;
+    this.#leases = options.leases;
+    this.#mainThreadId = options.mainThreadId;
+    this.#media = options.media;
+    this.#listProjects = options.listProjects;
+    this.#newId = options.newId;
+    this.#now = options.now;
+    this.#session = options.session;
+    this.#slowTurnNoticeAfterMs =
+      options.slowTurnNoticeAfterMs ?? DEFAULT_SLOW_TURN_NOTICE_AFTER_MS;
+    if (
+      !Number.isFinite(this.#slowTurnNoticeAfterMs) ||
+      this.#slowTurnNoticeAfterMs < 0
+    ) {
+      throw new Error("E_SLOW_TURN_NOTICE_AFTER_INVALID");
+    }
+    this.#state = options.state;
+    const isLive = options.codex?.isServerRequestLive?.bind(options.codex);
+    const respond = options.codex?.respondToServerRequest?.bind(options.codex);
+    this.#approvals = respond
+      ? new ApprovalCoordinator({
+          notify: async (text, clientId) => {
+            const contextToken = this.#state.getILinkState(
+              this.#session.botId,
+            )?.contextToken;
+            if (!contextToken) throw new Error("E_ILINK_CONTEXT_MISSING");
+            try {
+              await this.#send(contextToken, text, clientId);
+            } catch (error) {
+              this.#state.deletePendingOutbox(clientId);
+              throw error;
+            }
+          },
+          ...(isLive ? { isLive } : {}),
+          now: this.#now,
+          respond,
+        })
+      : undefined;
+  }
+
+  async ingestBatch(input: {
+    beforeAcceptedMessage?: () => Promise<void>;
+    cursor: string;
+    messages: readonly WireWeixinMessage[];
+    onAccepted?: () => Promise<void>;
+  }): Promise<{ accepted: number; sent: number }> {
+    const parsed = input.messages.map((message) =>
+      parseControllerMessage(message, this.#session.controllerUserId),
+    );
+    const knownMessageIds = new Set(
+      this.#state
+        .listInboundMessages()
+        .filter(
+          (message) =>
+            message.accountId === this.#session.botId &&
+            message.controllerUserId === this.#session.controllerUserId,
+        )
+        .map(({ messageId }) => messageId),
+    );
+    const prepared = new Map<
+      string,
+      {
+        body: string;
+        failure: DurableInboundFailureCode | null;
+        turnInput: DurableTurnInput | null;
+      }
+    >();
+    const acceptedCandidates: InboundMessageInput[] = [];
+    for (const message of parsed) {
+      if (message.kind === "ignored") continue;
+      let body = serializeDurableInboundFailure("unsupported-media");
+      if (!knownMessageIds.has(message.messageId)) {
+        const result = await this.#prepareInboundMessage(message);
+        prepared.set(message.messageId, result);
+        body = result.body;
+        knownMessageIds.add(message.messageId);
+      }
+      acceptedCandidates.push({
+        body,
+        contextToken: message.contextToken,
+        messageId: message.messageId,
+        receivedAtMs:
+          message.kind === "text" ? message.receivedAtMs : this.#now(),
+      });
+    }
+    const accepted = this.#state.acceptInboundBatch({
+      accountId: this.#session.botId,
+      controllerUserId: this.#session.controllerUserId,
+      messages: acceptedCandidates,
+      nextCursor: input.cursor,
+      updatedAtMs: this.#now(),
+    });
+    const acceptedIds = new Set(accepted.acceptedMessageIds);
+    if (acceptedIds.size > 0) await input.onAccepted?.();
+    let sent = 0;
+    const processedAcceptedIds = new Set<string>();
+
+    for (const message of parsed) {
+      if (
+        message.kind === "ignored" ||
+        !acceptedIds.has(message.messageId) ||
+        processedAcceptedIds.has(message.messageId)
+      ) {
+        continue;
+      }
+      processedAcceptedIds.add(message.messageId);
+      await input.beforeAcceptedMessage?.();
+      const preparedMessage = prepared.get(message.messageId);
+      if (!preparedMessage) throw new Error("E_INBOUND_PREPARATION_MISSING");
+      if (preparedMessage.failure) {
+        await this.#send(
+          message.contextToken,
+          inboundFailureText(preparedMessage.failure),
+          this.#inboundReplyClientId(message.messageId),
+        );
+        this.#clearInbound(message.messageId);
+        sent += 1;
+        continue;
+      }
+      if (!preparedMessage.turnInput) {
+        throw new Error("E_INBOUND_TURN_INPUT_MISSING");
+      }
+      sent += await this.#processAcceptedTurn({
+        contextToken: message.contextToken,
+        messageId: message.messageId,
+        turnInput: preparedMessage.turnInput,
+      });
+    }
+
+    return { accepted: accepted.acceptedMessageIds.length, sent };
+  }
+
+  async ingestCodexEvent(event: CodexEvent): Promise<boolean> {
+    if (event.method === "error") {
+      const threadId = stringField(event.params, "threadId");
+      const turnId = stringField(event.params, "turnId");
+      const error = objectField(event.params, "error");
+      if (!threadId || !turnId || !error || event.params.willRetry !== false) {
+        return false;
+      }
+      this.#turnFailures.set(
+        turnFailureKey(threadId, turnId),
+        sanitizeCodexTurnFailure(error),
+      );
+      if (this.#turnFailures.size > MAX_REMEMBERED_CODEX_FAILURES) {
+        const oldest = this.#turnFailures.keys().next().value;
+        if (oldest !== undefined) this.#turnFailures.delete(oldest);
+      }
+      return true;
+    }
+    if (this.#approvals && (await this.#approvals.ingest(event))) return true;
+    if (event.method !== "turn/completed") return false;
+    const threadId = stringField(event.params, "threadId");
+    const turn = objectField(event.params, "turn");
+    const turnId = stringField(turn, "id") ?? stringField(event.params, "turnId");
+    if (
+      !threadId ||
+      !turnId ||
+      !this.#codex?.readThread ||
+      !this.#leases
+    ) {
+      return false;
+    }
+
+    const dispatch = this.#state.getDispatchIntentByTurnId(turnId);
+    if (!dispatch || dispatch.status !== "accepted" || dispatch.threadId !== threadId) {
+      return false;
+    }
+    const existingFinalOutbox = this.#finalReplyOutbox(turnId);
+    if (
+      dispatch.completedAtMs !== null &&
+      existingFinalOutbox.length > 0 &&
+      existingFinalOutbox.every(({ status }) => status === "confirmed")
+    ) {
+      await this.#cleanupMedia(dispatch.dedupeKey);
+      this.#turnFailures.delete(turnFailureKey(threadId, turnId));
+      await this.#drainQueuedTurns();
+      return true;
+    }
+
+    const mustPersistFinal =
+      existingFinalOutbox.length === 0 || dispatch.completedAtMs === null;
+    const completionStatus = turn ? stringField(turn, "status") : null;
+    const completionError = turn ? objectField(turn, "error") : undefined;
+    const rememberedFailure = this.#turnFailures.get(
+      turnFailureKey(threadId, turnId),
+    );
+    const preliminaryFailureText = mustPersistFinal
+      ? formatCodexTurnFailure(
+          completionStatus,
+          completionError,
+          rememberedFailure,
+        )
+      : null;
+    const knownLease =
+      dispatch.completedAtMs === null ? this.#leases.getLease(threadId) : null;
+    const needsThreadForLeaseRelease =
+      dispatch.completedAtMs === null && knownLease === null;
+    const readThread =
+      mustPersistFinal &&
+      (!preliminaryFailureText ||
+        needsThreadForLeaseRelease ||
+        completionStatus === null)
+        ? (await this.#codex.readThread({ includeTurns: true, threadId })).thread
+        : null;
+    const persistedTurn = readThread
+      ? findThreadTurn(readThread, turnId)
+      : undefined;
+    const failureText = mustPersistFinal
+      ? formatCodexTurnFailure(
+          completionStatus ??
+            (persistedTurn ? stringField(persistedTurn, "status") : null),
+          completionError ??
+            (persistedTurn ? objectField(persistedTurn, "error") : undefined),
+          rememberedFailure,
+        )
+      : null;
+    const contextToken =
+      existingFinalOutbox[0]?.contextToken ||
+      dispatch.contextToken ||
+      this.#state.getILinkState(this.#session.botId)?.contextToken;
+    const finalOutboxInput =
+      mustPersistFinal && contextToken
+        ? this.#finalReplyInput(
+            contextToken,
+            failureText ??
+              finalAgentText(readThread ?? {}, turnId) ??
+              CODEX_EMPTY_REPLY_TEXT,
+            turnId,
+          )
+        : null;
+    if (dispatch.completedAtMs === null) {
+      const lease = knownLease ?? this.#leases.getLease(threadId);
+      if (lease) {
+        if (
+          lease.owner !== "bridge" ||
+          lease.operationId !== dispatch.operationId ||
+          lease.turnId !== turnId ||
+          !this.#leases.release(lease)
+        ) {
+          return false;
+        }
+      } else {
+        const turn = readThread ? findThreadTurn(readThread, turnId) : undefined;
+        if (
+          !readThread ||
+          !isExplicitlyIdleThread(readThread) ||
+          !isTerminalTurnStatus(turn?.status)
+        ) {
+          return false;
+        }
+      }
+      if (!contextToken) return false;
+    }
+    let finalOutbox = existingFinalOutbox;
+    if (finalOutboxInput) {
+      finalOutbox = this.#state.completeDispatchWithOutbox({
+        completedAtMs: this.#now(),
+        operationId: dispatch.operationId,
+        outbox: finalOutboxInput,
+        turnId,
+      }).outbox;
+    } else if (dispatch.completedAtMs === null) {
+      this.#state.markDispatchCompleted(dispatch.operationId, turnId, this.#now());
+    }
+    await this.#cleanupMedia(dispatch.dedupeKey);
+    this.#turnFailures.delete(turnFailureKey(threadId, turnId));
+    try {
+      await this.#sendFinalOutbox(finalOutbox);
+    } finally {
+      await this.#drainQueuedTurns();
+    }
+    return true;
+  }
+
+  close(): void {
+    this.beginShutdown();
+    if (!this.#shutdown.signal.aborted) {
+      this.#shutdown.abort(new Error("E_BRIDGE_CLOSING"));
+    }
+    this.#approvals?.close();
+  }
+
+  beginShutdown(): void {
+    this.#closing = true;
+  }
+
+  async recoverPendingWork(): Promise<void> {
+    this.#state.markPendingDispatchesUnknown(this.#now());
+    await this.#persistRecoveredUnknownDiagnostics();
+    await this.reconcilePendingWork();
+    for (const inbound of this.#state.listInboundMessages()) {
+      if (inbound.body === null) continue;
+      const dedupeKey = `${this.#session.botId}/${this.#session.controllerUserId}/${inbound.messageId}`;
+      if (this.#state.hasScheduledDedupeKey(dedupeKey)) {
+        const dispatch = this.#state.getDispatchIntentByDedupeKey(dedupeKey);
+        if (
+          dispatch?.status === "unknown" &&
+          !this.#state.getOutbox(
+            `codex-ilink:${dispatch.operationId}:unknown`,
+          )
+        ) {
+          continue;
+        }
+        this.#clearInbound(inbound.messageId);
+        continue;
+      }
+      const failure = parseDurableInboundFailure(inbound.body);
+      if (failure) {
+        await this.#send(
+          inbound.contextToken,
+          inboundFailureText(failure),
+          this.#inboundReplyClientId(inbound.messageId),
+        );
+        this.#clearInbound(inbound.messageId);
+        continue;
+      }
+      let turnInput: DurableTurnInput;
+      try {
+        turnInput = parseDurableTurnInput(inbound.body);
+      } catch {
+        await this.#send(
+          inbound.contextToken,
+          inboundFailureText("invalid-media"),
+          this.#inboundReplyClientId(inbound.messageId),
+        );
+        this.#clearInbound(inbound.messageId);
+        continue;
+      }
+      await this.#processAcceptedTurn({
+        contextToken: inbound.contextToken,
+        messageId: inbound.messageId,
+        turnInput,
+      });
+    }
+    await this.#drainQueuedTurns();
+  }
+
+  async scheduleQueuedTurns(): Promise<void> {
+    await this.#drainQueuedTurns();
+  }
+
+  async reconcilePendingWork(): Promise<void> {
+    if (this.#reconcilePromise) return this.#reconcilePromise;
+    const pending = this.#reconcileDispatchLeases();
+    this.#reconcilePromise = pending;
+    try {
+      await pending;
+    } finally {
+      if (this.#reconcilePromise === pending) this.#reconcilePromise = undefined;
+    }
+  }
+
+  async #prepareInboundMessage(
+    message: Exclude<ParsedControllerMessage, { kind: "ignored" }>,
+  ): Promise<{
+    body: string;
+    failure: DurableInboundFailureCode | null;
+    turnInput: DurableTurnInput | null;
+  }> {
+    const fail = (failure: DurableInboundFailureCode) => ({
+      body: serializeDurableInboundFailure(failure),
+      failure,
+      turnInput: null,
+    });
+    if (message.kind === "unsupportedMedia") {
+      return fail(
+        message.mediaCandidates?.some(
+          (candidate) =>
+            candidate.status === "unsupported" && candidate.kind === "voice",
+        )
+          ? "voice-transcript-missing"
+          : "unsupported-media",
+      );
+    }
+
+    const intent = parseInboundText(message.text);
+    if (intent.kind !== "message") {
+      const turnInput: DurableTurnInput = {
+        attachments: [],
+        text: message.text,
+        version: 1,
+      };
+      return {
+        body: serializeDurableTurnInput(turnInput),
+        failure: null,
+        turnInput,
+      };
+    }
+    if (message.hasUnsupportedMedia) return fail("unsupported-media");
+
+    const candidates = message.mediaCandidates ?? [];
+    if (
+      candidates.some(
+        (candidate) =>
+          candidate.status === "unsupported" && candidate.kind === "voice",
+      )
+    ) {
+      return fail("voice-transcript-missing");
+    }
+    if (candidates.length > 0 && !this.#media) {
+      return fail("unsupported-media");
+    }
+
+    const dedupeKey = this.#dedupeKey(message.messageId);
+    const attachments: DurableTurnAttachment[] = [];
+    try {
+      for (const candidate of candidates) {
+        const resolved = await this.#media?.resolve({
+          candidate,
+          dedupeKey,
+          signal: this.#shutdown.signal,
+        });
+        if (!resolved || resolved.status !== "stored") {
+          await this.#cleanupMedia(dedupeKey);
+          return fail("voice-transcript-missing");
+        }
+        attachments.push({
+          kind: resolved.kind,
+          name: resolved.displayName,
+          path: resolved.path,
+        });
+      }
+    } catch (error) {
+      await this.#cleanupMedia(dedupeKey);
+      return fail(inboundMediaFailureCode(error));
+    }
+
+    const turnInput: DurableTurnInput = {
+      attachments,
+      text: message.text,
+      version: 1,
+    };
+    try {
+      return {
+        body: serializeDurableTurnInput(turnInput),
+        failure: null,
+        turnInput,
+      };
+    } catch {
+      await this.#cleanupMedia(dedupeKey);
+      return fail("invalid-media");
+    }
+  }
+
+  async #processAcceptedTurn(input: {
+    contextToken: string;
+    messageId: string;
+    turnInput: DurableTurnInput;
+  }): Promise<number> {
+    const intent = parseInboundText(input.turnInput.text);
+    if (intent.kind !== "message") this.#touchBinding();
+    if (intent.kind === "help") {
+      return this.#replyToCommand(input.contextToken, input.messageId, COMMAND_HELP);
+    }
+    if (intent.kind === "unknownCommand") {
+      return this.#replyToCommand(
+        input.contextToken,
+        input.messageId,
+        `未知命令。\n${COMMAND_HELP}`,
+      );
+    }
+    if (intent.kind === "message") {
+      return this.#dispatchTurn({
+        contextToken: input.contextToken,
+        messageId: input.messageId,
+        turnInput: {
+          ...input.turnInput,
+          text: intent.text,
+        },
+      });
+    }
+    if (intent.kind === "projects" || intent.kind === "selectProject") {
+      try {
+        const reply =
+          intent.kind === "projects"
+            ? await this.#projectListReply()
+            : await this.#selectProjectReply(intent.index);
+        return this.#replyToCommand(input.contextToken, input.messageId, reply);
+      } catch {
+        return this.#replyToCommand(
+          input.contextToken,
+          input.messageId,
+          "项目命令执行失败，请稍后重试。",
+        );
+      }
+    }
+    if (intent.kind === "sessions" || intent.kind === "enterSession") {
+      try {
+        const reply =
+          intent.kind === "sessions"
+            ? await this.#sessionListReply(intent.page)
+            : await this.#enterSessionReply(intent.index);
+        return this.#replyToCommand(input.contextToken, input.messageId, reply);
+      } catch {
+        return this.#replyToCommand(
+          input.contextToken,
+          input.messageId,
+          "会话命令执行失败，请稍后重试。",
+        );
+      }
+    }
+    if (
+      intent.kind === "newSession" ||
+      intent.kind === "exitSession" ||
+      intent.kind === "status"
+    ) {
+      try {
+        const reply =
+          intent.kind === "newSession"
+            ? await this.#newSessionReply()
+            : intent.kind === "exitSession"
+              ? this.#exitSessionReply()
+              : await this.#statusReply();
+        return this.#replyToCommand(input.contextToken, input.messageId, reply);
+      } catch {
+        return this.#replyToCommand(
+          input.contextToken,
+          input.messageId,
+          "命令执行失败，请稍后重试。",
+        );
+      }
+    }
+
+    const decision = this.#approvals?.decide(
+      intent.index,
+      intent.kind === "approve",
+    );
+    const reply =
+      decision?.kind === "decided"
+        ? `${intent.kind === "approve" ? "Approved" : "Denied"} #${String(intent.index)}`
+        : `Approval #${String(intent.index)} 已失效或不存在。`;
+    return this.#replyToCommand(input.contextToken, input.messageId, reply);
+  }
+
+  async #send(
+    contextToken: string,
+    text: string,
+    requestedClientId?: string,
+  ): Promise<boolean> {
+    const clientId = requestedClientId ?? this.#newId();
+    if (this.#state.getOutbox(clientId)?.status === "confirmed") return false;
+    const createdAtMs = this.#now();
+    this.#state.enqueueOutbox({
+      body: text,
+      clientId,
+      contextToken,
+      createdAtMs,
+      targetUserId: this.#session.controllerUserId,
+    });
+    await this.#ilink.sendText({
+      clientId,
+      contextToken,
+      session: this.#session,
+      signal: this.#shutdown.signal,
+      text,
+    });
+    this.#state.confirmOutbox(clientId, this.#now());
+    return true;
+  }
+
+  async #persistUnknownDiagnostic(
+    contextToken: string,
+    operationId: string,
+    text: string,
+  ): Promise<void> {
+    const clientId = `codex-ilink:${operationId}:unknown`;
+    const existing = this.#state.getOutbox(clientId);
+    if (existing?.status === "confirmed") return;
+    const item =
+      existing ??
+      this.#state.enqueueOutbox({
+        body: text,
+        clientId,
+        contextToken,
+        createdAtMs: this.#now(),
+        targetUserId: this.#session.controllerUserId,
+      });
+    if (item.body === null) throw new Error("pending unknown diagnostic has no body");
+    try {
+      await this.#ilink.sendText({
+        clientId: item.clientId,
+        contextToken: item.contextToken,
+        session: this.#session,
+        signal: this.#shutdown.signal,
+        text: item.body,
+      });
+    } catch {
+      // The durable outbox owns later replay with the same client id.
+      return;
+    }
+    this.#state.confirmOutbox(item.clientId, this.#now());
+  }
+
+  async #persistRecoveredUnknownDiagnostics(): Promise<void> {
+    const inboundByDedupeKey = new Map(
+      this.#state.listInboundMessages().map((inbound) => [
+        `${inbound.accountId}/${inbound.controllerUserId}/${inbound.messageId}`,
+        inbound,
+      ]),
+    );
+    for (const dispatch of this.#state.listUnresolvedDispatchIntents()) {
+      if (dispatch.status !== "unknown") continue;
+      const inbound = inboundByDedupeKey.get(dispatch.dedupeKey);
+      const contextToken =
+        dispatch.contextToken ||
+        inbound?.contextToken ||
+        this.#state.getILinkState(this.#session.botId)?.contextToken;
+      if (!contextToken) {
+        continue;
+      }
+      await this.#persistUnknownDiagnostic(
+        contextToken,
+        dispatch.operationId,
+        CODEX_OUTCOME_UNKNOWN_TEXT,
+      );
+      if (inbound) this.#clearInbound(inbound.messageId);
+    }
+  }
+
+  #finalReplyInput(
+    contextToken: string,
+    text: string,
+    turnId: string,
+  ): PendingOutboxInput[] {
+    const messages = formatWechatFinalReply(text);
+    const baseClientId = `codex-ilink:${turnId}:final`;
+    const createdAtMs = this.#now();
+    return messages.map((body, index) => ({
+      body,
+      clientId:
+        messages.length === 1
+          ? baseClientId
+          : `${baseClientId}:part:${String(index + 1)}`,
+      contextToken,
+      createdAtMs,
+      targetUserId: this.#session.controllerUserId,
+    }));
+  }
+
+  async #sendFinalOutbox(items: readonly OutboxItem[]): Promise<void> {
+    for (const item of items) {
+      if (item.status === "confirmed") continue;
+      if (item.body === null) throw new Error("pending final reply has no body");
+      await this.#ilink.sendText({
+        clientId: item.clientId,
+        contextToken: item.contextToken,
+        session: this.#session,
+        signal: this.#shutdown.signal,
+        text: item.body,
+      });
+      this.#state.confirmOutbox(item.clientId, this.#now());
+    }
+  }
+
+  #finalReplyOutbox(turnId: string): OutboxItem[] {
+    const baseClientId = `codex-ilink:${turnId}:final`;
+    const single = this.#state.getOutbox(baseClientId);
+    if (single) return [single];
+    return Array.from({ length: 3 }, (_, index) =>
+      this.#state.getOutbox(`${baseClientId}:part:${String(index + 1)}`),
+    ).filter((item): item is OutboxItem => item !== null);
+  }
+
+  async #replyToCommand(
+    contextToken: string,
+    messageId: string,
+    text: string,
+  ): Promise<number> {
+    try {
+      return (await this.#send(
+        contextToken,
+        text,
+        this.#inboundReplyClientId(messageId),
+      ))
+        ? 1
+        : 0;
+    } finally {
+      this.#clearInbound(messageId);
+    }
+  }
+
+  #inboundReplyClientId(messageId: string): string {
+    return `codex-ilink:inbound:${this.#session.botId}:${messageId}:reply`;
+  }
+
+  async #projectListReply(): Promise<string> {
+    const projects = await this.#refreshProjectSnapshot();
+    if (projects.length === 0) {
+      return "暂无可选项目。";
+    }
+    return [
+      "项目",
+      ...projects.map(
+        (project, index) => `${String(index + 1)}. ${project.name}`,
+      ),
+      "使用 /p <n> 选择项目；编号自本列表生成起 10 分钟内有效。",
+    ].join("\n");
+  }
+
+  async #refreshProjectSnapshot(): Promise<readonly ProjectNavigationEntry[]> {
+    if (!this.#inboxDirectory || !this.#listProjects) {
+      throw new Error("project navigation is not configured");
+    }
+    const projects = [...(await this.#listProjects())].filter(
+      (project) => !sameWindowsPath(project.cwd, this.#inboxDirectory ?? ""),
+    );
+    const nowMs = this.#now();
+    this.#state.replaceProjectSnapshot({
+      createdAtMs: nowMs,
+      expiresAtMs: nowMs + 10 * 60 * 1_000,
+      projects: projects.map(({ cwd }) => cwd),
+    });
+    return projects;
+  }
+
+  async #selectProjectReply(index: number): Promise<string> {
+    let snapshot = this.#state.getProjectSnapshot(this.#now());
+    if (!snapshot) {
+      await this.#refreshProjectSnapshot();
+      snapshot = this.#state.getProjectSnapshot(this.#now());
+    }
+    if (!snapshot) throw new Error("project snapshot was not created");
+    const projectPath = snapshot.projects[index - 1];
+    if (!projectPath) return "项目编号无效，请按 /p 当前列表选择。";
+    this.#state.selectProjectForNavigation(projectPath);
+    return `已选择项目：${projectDisplayName(projectPath)}\n已退出原会话；使用 /s 查看或 /new 新建。`;
+  }
+
+  async #sessionListReply(
+    mode: "archived" | "first" | "next",
+  ): Promise<string> {
+    if (!this.#inboxDirectory) {
+      throw new Error("session navigation is not configured");
+    }
+    let archived = mode === "archived";
+    let pageNumber = 1;
+    if (mode === "next") {
+      const previous = this.#state.getSessionSnapshot(this.#now());
+      if (!previous) return "会话列表已过期，请先用 /s 或 /s arc 刷新。";
+      if (!previous.hasNext) return "当前会话列表没有下一页。";
+      archived = previous.archived;
+      pageNumber = previous.page + 1;
+    }
+    const { currentProject, page } = await this.#refreshSessionSnapshot(
+      archived,
+      pageNumber,
+    );
+    const scope = projectDisplayName(currentProject);
+    if (page.items.length === 0) {
+      return `${archived ? "归档会话" : "会话"} · ${scope}\n暂无会话。`;
+    }
+    return [
+      `${archived ? "归档会话" : "会话"} · ${scope} · 第 ${String(page.page)} 页`,
+      ...page.items.map((thread, index) => {
+        const title = thread.title ?? thread.id;
+        const status = thread.status ?? "unknown";
+        return `${String(index + 1)}. ${title} [${status}]`;
+      }),
+      ...(page.hasNext ? ["下一页：/s +"] : []),
+      "使用 /s <n> 进入会话；编号自本页生成起 10 分钟内有效。",
+    ].join("\n");
+  }
+
+  async #refreshSessionSnapshot(archived: boolean, pageNumber: number) {
+    if (!this.#inboxDirectory) {
+      throw new Error("session navigation is not configured");
+    }
+    const currentProject = this.#state.getBridgeSettings().selectedProjectPath;
+    const rawPages = await this.#listThreadPages(archived);
+    const page = paginateThreads(rawPages, {
+      archived,
+      inboxCwd: this.#inboxDirectory,
+      mainThreadId: this.#mainThreadId ?? null,
+      page: pageNumber,
+      projectCwd: currentProject,
+    });
+    const nowMs = this.#now();
+    this.#state.replaceSessionSnapshot({
+      archived,
+      createdAtMs: nowMs,
+      expiresAtMs: nowMs + 10 * 60 * 1_000,
+      hasNext: page.hasNext,
+      page: page.page,
+      projectPath: currentProject,
+      threads: page.items.map((thread) => ({
+        archived,
+        projectPath: currentProject,
+        threadId: thread.id,
+      })),
+    });
+    return { currentProject, page };
+  }
+
+  async #enterSessionReply(index: number): Promise<string> {
+    const nowMs = this.#now();
+    let snapshot = this.#state.getSessionSnapshot(nowMs);
+    if (!snapshot) {
+      await this.#refreshSessionSnapshot(false, 1);
+      snapshot = this.#state.getSessionSnapshot(this.#now());
+    }
+    if (!snapshot) throw new Error("session snapshot was not created");
+    const target = snapshot.threads[index - 1];
+    if (!target) return "会话编号无效，请按当前 /s 列表选择。";
+    if (
+      !this.#codex?.resumeThread ||
+      !this.#codex.readThread ||
+      (target.archived && !this.#codex.unarchiveThread)
+    ) {
+      throw new Error("session resume is not configured");
+    }
+    if (target.archived) {
+      await this.#codex.unarchiveThread?.(target.threadId);
+    }
+    const resumed = await this.#codex.resumeThread(target.threadId);
+    this.#state.setBindingForNavigation({
+      expiresAtMs: nowMs + 30 * 60 * 1_000,
+      projectPath: target.projectPath,
+      threadId: target.threadId,
+      updatedAtMs: nowMs,
+    });
+    let preview: ThreadPreview | null = null;
+    try {
+      const read = await this.#codex.readThread({
+        includeTurns: true,
+        threadId: target.threadId,
+      });
+      preview = buildThreadPreview(read, resumed);
+    } catch {
+      // Resume is already committed. A missing preview must not make the user
+      // believe that navigation itself failed.
+    }
+    return [
+      ...(target.archived ? ["Unarchived"] : []),
+      this.#formatThreadPreview(preview, target.threadId),
+      "30 分钟无活动后自动退出。",
+    ].join("\n");
+  }
+
+  #formatThreadPreview(preview: ThreadPreview | null, threadId: string): string {
+    if (!preview) return `已进入会话：${threadId}`;
+    return [
+      `已进入会话：${preview.title ?? preview.id}`,
+      `状态：${preview.status ?? "未知"}`,
+      `模型：${preview.model ?? "未知"}`,
+      `权限：${preview.permissionMode ?? "未知"}`,
+      `最近提问：${preview.latestUserText ?? "（无）"}`,
+      `最近回复：${preview.finalAgentText ?? "（无）"}`,
+    ].join("\n");
+  }
+
+  async #newSessionReply(): Promise<string> {
+    if (!this.#codex?.startThread || !this.#inboxDirectory) {
+      throw new Error("new session is not configured");
+    }
+    const projectPath = this.#state.getBridgeSettings().selectedProjectPath;
+    const cwd = projectPath ?? this.#inboxDirectory;
+    const started = await this.#codex.startThread(cwd);
+    const threadId = stringField(started.thread, "id");
+    if (!threadId) throw new Error("Codex did not return a thread id");
+    const nowMs = this.#now();
+    this.#state.setBindingForNavigation({
+      expiresAtMs: nowMs + 30 * 60 * 1_000,
+      projectPath,
+      threadId,
+      updatedAtMs: nowMs,
+    });
+    return `已新建并进入会话：${threadId}\n项目：${projectDisplayName(projectPath)}\n30 分钟无活动后自动退出。`;
+  }
+
+  #exitSessionReply(): string {
+    this.#state.clearNavigationRoutes();
+    return "已返回微信主会话。当前项目选择保持不变。";
+  }
+
+  async #statusReply(): Promise<string> {
+    const nowMs = this.#now();
+    const projectPath = this.#state.getBridgeSettings().selectedProjectPath;
+    const binding = this.#state.getBinding(nowMs);
+    const notificationCount = this.#state.listLiveNotificationRoutes(nowMs).length;
+    const queueCount = this.#state.countQueuedTurns();
+    const arbitrationHealthy =
+      this.#state.getBridgeRuntime()?.arbitrationEnabled === true;
+    let codexHealthy = true;
+    let active: ReturnType<typeof listActiveThreads> = [];
+    try {
+      active = listActiveThreads(await this.#listThreadPages(false));
+    } catch {
+      codexHealthy = false;
+    }
+    const knownActive = new Map(
+      active.map((thread) => [
+        thread.id,
+        { id: thread.id, title: thread.title },
+      ]),
+    );
+    const guardedThreadIds = new Set(this.#state.listGuardedThreadIds(nowMs));
+    for (const lease of this.#leases?.listLeases() ?? []) {
+      if (lease.owner === "desktop" && !guardedThreadIds.has(lease.threadId)) {
+        continue;
+      }
+      if (knownActive.has(lease.threadId)) continue;
+      knownActive.set(lease.threadId, {
+        id: lease.threadId,
+        title:
+          lease.owner === "desktop"
+            ? "Desktop 任务（租约活动，状态保守）"
+            : "微信任务（租约活动，状态保守）",
+      });
+    }
+    const knownActiveTasks = [...knownActive.values()];
+    const session = binding
+      ? `${binding.threadId}（剩余 ${String(Math.max(1, Math.ceil((binding.expiresAtMs - nowMs) / 60_000)))} 分钟）`
+      : "微信主会话";
+    return [
+      `项目：${projectDisplayName(projectPath)}`,
+      `会话：${session}`,
+      `活动任务：${String(knownActiveTasks.length)}`,
+      ...knownActiveTasks.map(
+        (thread) => `- ${thread.title ?? thread.id} (${thread.id})`,
+      ),
+      `队列：${String(queueCount)}`,
+      `通知回复窗口：${String(notificationCount)}`,
+      `待审批：${String(this.#approvals?.list().length ?? 0)}`,
+      `连接：Codex ${codexHealthy ? "正常" : "异常"}；仲裁${arbitrationHealthy ? "正常" : "关闭"}`,
+    ].join("\n");
+  }
+
+  #touchBinding(): void {
+    const nowMs = this.#now();
+    const binding = this.#state.getBinding(nowMs);
+    if (!binding) return;
+    this.#state.setBinding({
+      ...binding,
+      expiresAtMs: nowMs + 30 * 60 * 1_000,
+      updatedAtMs: nowMs,
+    });
+  }
+
+  async #listThreadPages(archived: boolean): Promise<unknown[]> {
+    const listThreads = this.#codex?.listThreads;
+    if (!listThreads) throw new Error("thread listing is not configured");
+    const pages: unknown[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await listThreads.call(this.#codex, {
+        archived,
+        ...(cursor ? { cursor } : {}),
+      });
+      pages.push(page);
+      if (!page.nextCursor) return pages;
+      if (seenCursors.has(page.nextCursor)) {
+        throw new Error("thread list cursor cycle");
+      }
+      seenCursors.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
+  }
+
+  async #dispatchTurn(input: {
+    contextToken: string;
+    messageId: string;
+    turnInput: DurableTurnInput;
+  }): Promise<number> {
+    if (
+      !this.#bridgeInstanceId ||
+      !this.#codex ||
+      !this.#leases ||
+      !this.#mainThreadId
+    ) {
+      throw new Error("Bridge Codex dispatch is not configured");
+    }
+
+    const nowMs = this.#now();
+    const serializedInput = serializeDurableTurnInput(input.turnInput);
+    const currentBinding = this.#state.getBinding(nowMs);
+    const route = routeInboundText({
+      binding: currentBinding
+        ? {
+            expiresAtMs: currentBinding.expiresAtMs,
+            threadId: currentBinding.threadId,
+          }
+        : null,
+      mainThreadId: this.#mainThreadId,
+      notificationWindows: this.#state
+        .listLiveNotificationRoutes(nowMs)
+        .map(({ expiresAtMs, threadId }) => ({ expiresAtMs, threadId })),
+      nowMs,
+      text: input.turnInput.text,
+    });
+    if (route.kind === "ambiguousNotificationRoute") {
+      await this.#send(
+        input.contextToken,
+        "有多个可回复任务，请先用 /p 选择项目，再用 /s <n> 进入目标会话。",
+      );
+      this.#clearInbound(input.messageId);
+      await this.#cleanupMedia(this.#dedupeKey(input.messageId));
+      return 1;
+    }
+    if (route.binding) {
+      this.#state.setBinding({
+        expiresAtMs: route.binding.expiresAtMs,
+        projectPath: currentBinding?.projectPath ?? null,
+        threadId: route.binding.threadId,
+        updatedAtMs: nowMs,
+      });
+    }
+
+    const dedupeKey = `${this.#session.botId}/${this.#session.controllerUserId}/${input.messageId}`;
+    if (
+      this.#state.countActiveDispatches() >= MAX_ACTIVE_BRIDGE_TURNS ||
+      this.#state.hasActiveDispatchForThread(route.threadId) ||
+      this.#state.getDesktopTurnObservation(route.threadId) !== null ||
+      this.#state.peekQueuedTurn(route.threadId) !== null
+    ) {
+      const queued = this.#state.enqueueQueuedTurn({
+        body: serializedInput,
+        contextToken: input.contextToken,
+        createdAtMs: nowMs,
+        dedupeKey,
+        threadId: route.threadId,
+      });
+      this.#clearInbound(input.messageId);
+      await this.#send(input.contextToken, `Queued #${queued.id}`);
+      return 1;
+    }
+
+    const operationId = this.#newId();
+    const lease = this.#leases.tryAcquire({
+      createdAtMs: nowMs,
+      instanceId: this.#bridgeInstanceId,
+      operationId,
+      owner: "bridge",
+      threadId: route.threadId,
+      turnId: null,
+    });
+    if (!lease.acquired) {
+      const queued = this.#state.enqueueQueuedTurn({
+        body: serializedInput,
+        contextToken: input.contextToken,
+        createdAtMs: nowMs,
+        dedupeKey,
+        threadId: route.threadId,
+      });
+      this.#clearInbound(input.messageId);
+      await this.#send(input.contextToken, `Queued #${queued.id}`);
+      return 1;
+    }
+
+    try {
+      await this.#ensureThread(route.threadId);
+    } catch (error) {
+      this.#leases.release({
+        instanceId: this.#bridgeInstanceId,
+        operationId,
+        owner: "bridge",
+        threadId: route.threadId,
+        turnId: null,
+      });
+      if (isMissingThreadError(error)) {
+        if (currentBinding?.threadId === route.threadId) {
+          this.#state.clearNavigationRoutes();
+        }
+        this.#clearInbound(input.messageId);
+        await this.#cleanupMedia(dedupeKey);
+        await this.#send(
+          input.contextToken,
+          MISSING_THREAD_TEXT,
+          this.#inboundReplyClientId(input.messageId),
+        );
+        return 1;
+      }
+      const queued = this.#state.enqueueQueuedTurn({
+        body: serializedInput,
+        contextToken: input.contextToken,
+        createdAtMs: nowMs,
+        dedupeKey,
+        threadId: route.threadId,
+      });
+      this.#clearInbound(input.messageId);
+      await this.#send(input.contextToken, `Queued #${queued.id}`);
+      return 1;
+    }
+
+    try {
+      const dispatch = this.#state.tryCreateDispatchIntent({
+        body: serializedInput,
+        contextToken: input.contextToken,
+        createdAtMs: nowMs,
+        dedupeKey,
+        maxActiveDispatches: MAX_ACTIVE_BRIDGE_TURNS,
+        operationId,
+        threadId: route.threadId,
+      });
+      if (!dispatch) {
+        this.#leases.release({
+          instanceId: this.#bridgeInstanceId,
+          operationId,
+          owner: "bridge",
+          threadId: route.threadId,
+          turnId: null,
+        });
+        const queued = this.#state.enqueueQueuedTurn({
+          body: serializedInput,
+          contextToken: input.contextToken,
+          createdAtMs: nowMs,
+          dedupeKey,
+          threadId: route.threadId,
+        });
+        this.#clearInbound(input.messageId);
+        await this.#send(input.contextToken, `Queued #${queued.id}`);
+        return 1;
+      }
+    } catch (error) {
+      this.#leases.release({
+        instanceId: this.#bridgeInstanceId,
+        operationId,
+        owner: "bridge",
+        threadId: route.threadId,
+        turnId: null,
+      });
+      throw error;
+    }
+
+    let started: { turn: { id: string } };
+    try {
+      started = await this.#codex.startTurn({
+        ...(input.turnInput.attachments.length > 0
+          ? { attachments: input.turnInput.attachments }
+          : {}),
+        clientUserMessageId: dedupeKey,
+        text: input.turnInput.text,
+        threadId: route.threadId,
+      });
+    } catch (error) {
+      if (!(error instanceof CodexOutcomeUnknownError)) {
+        await this.#completeRejectedDispatch({
+          dedupeKey,
+          lease: lease.lease,
+          operationId,
+          contextToken: input.contextToken,
+        });
+        this.#clearInbound(input.messageId);
+        await this.#drainQueuedTurns();
+        return 1;
+      }
+      this.#state.markDispatchUnknown(operationId, this.#now());
+      await this.#persistUnknownDiagnostic(
+        input.contextToken,
+        operationId,
+        CODEX_OUTCOME_UNKNOWN_TEXT,
+      );
+      this.#clearInbound(input.messageId);
+      return 1;
+    }
+    this.#leases.claimBridgeTurn({
+      instanceId: this.#bridgeInstanceId,
+      threadId: route.threadId,
+      turnId: started.turn.id,
+    });
+    if (
+      !this.#leases.isHeldBy({
+        instanceId: this.#bridgeInstanceId,
+        operationId,
+        owner: "bridge",
+        threadId: route.threadId,
+        turnId: started.turn.id,
+      })
+    ) {
+      this.#state.markDispatchUnknown(
+        operationId,
+        this.#now(),
+        started.turn.id,
+      );
+      await this.#persistUnknownDiagnostic(
+        input.contextToken,
+        operationId,
+        HOOK_GUARD_UNKNOWN_TEXT,
+      );
+      this.#clearInbound(input.messageId);
+      return 1;
+    }
+    this.#state.markDispatchAccepted(operationId, started.turn.id, this.#now());
+    this.#clearInbound(input.messageId);
+    return 0;
+  }
+
+  async #reconcileDispatchLeases(): Promise<void> {
+    if (!this.#codex?.readThread || !this.#leases) return;
+    let releasedWork = false;
+    const leasedOperations = new Set<string>();
+
+    for (const lease of this.#leases.listLeases()) {
+      if (lease.owner === "desktop") {
+        if (!lease.turnId) continue;
+        let thread: Record<string, unknown>;
+        try {
+          thread = await this.#readThreadForReconciliation(lease.threadId);
+        } catch {
+          continue;
+        }
+        const turn = findThreadTurn(thread, lease.turnId);
+        if (
+          isTerminalTurnStatus(turn?.status) &&
+          this.#leases.releaseStoppedDesktop({
+            threadId: lease.threadId,
+            turnId: lease.turnId,
+          })
+        ) {
+          releasedWork = true;
+        }
+        continue;
+      }
+      leasedOperations.add(lease.operationId);
+      const dispatch = this.#state.getDispatchIntent(lease.operationId);
+      if (!dispatch) {
+        let thread: Record<string, unknown>;
+        try {
+          thread = await this.#readThreadForReconciliation(lease.threadId);
+        } catch {
+          continue;
+        }
+        const safeToRelease = lease.turnId
+          ? isTerminalTurnStatus(findThreadTurn(thread, lease.turnId)?.status)
+          : isExplicitlyIdleThread(thread);
+        if (safeToRelease && this.#leases.release(lease)) releasedWork = true;
+        continue;
+      }
+      if (dispatch.threadId !== lease.threadId) continue;
+
+      let thread: Record<string, unknown>;
+      try {
+        thread = await this.#readThreadForReconciliation(lease.threadId);
+      } catch {
+        if (dispatch.status === "accepted") {
+          await this.#notifySlowDispatch(dispatch);
+        }
+        continue;
+      }
+
+      if (dispatch.status === "accepted") {
+        if (dispatch.turnId === null || dispatch.turnId !== lease.turnId) continue;
+        const turn = findThreadTurn(thread, dispatch.turnId);
+        if (!turn || !isTerminalTurnStatus(turn.status)) {
+          await this.#notifySlowDispatch(dispatch);
+          continue;
+        }
+        if (dispatch.completedAtMs !== null && !this.#leases.release(lease)) {
+          continue;
+        }
+        try {
+          await this.ingestCodexEvent({
+            method: "turn/completed",
+            params: {
+              threadId: lease.threadId,
+              turn,
+            },
+          });
+        } catch {
+          // Completion state and the durable final-reply outbox are reconciled
+          // independently on the next poll.
+        }
+        continue;
+      }
+
+      if (dispatch.status !== "unknown" || dispatch.completedAtMs !== null) {
+        continue;
+      }
+      if (dispatch.turnId && lease.turnId && dispatch.turnId !== lease.turnId) {
+        continue;
+      }
+      const turnId = dispatch.turnId ?? lease.turnId;
+      if (turnId) {
+        const turn = findThreadTurn(thread, turnId);
+        if (!isTerminalTurnStatus(turn?.status)) continue;
+        this.#state.markDispatchUnknown(dispatch.operationId, this.#now(), turnId);
+      } else if (!isExplicitlyIdleThread(thread)) {
+        continue;
+      }
+      if (!this.#leases.release(lease)) continue;
+      this.#state.resolveUnknownDispatch(dispatch.operationId, this.#now());
+      await this.#cleanupMedia(dispatch.dedupeKey);
+      releasedWork = true;
+    }
+
+    for (const dispatch of this.#state.listUnresolvedDispatchIntents()) {
+      if (
+        leasedOperations.has(dispatch.operationId) ||
+        this.#leases.getLease(dispatch.threadId) !== null ||
+        (dispatch.status !== "accepted" && dispatch.status !== "unknown")
+      ) {
+        continue;
+      }
+      let thread: Record<string, unknown>;
+      try {
+        thread = await this.#readThreadForReconciliation(dispatch.threadId);
+      } catch {
+        if (dispatch.status === "accepted") {
+          await this.#notifySlowDispatch(dispatch);
+        }
+        continue;
+      }
+      if (!isExplicitlyIdleThread(thread)) continue;
+
+      if (dispatch.status === "accepted") {
+        if (dispatch.turnId === null) continue;
+        const turn = findThreadTurn(thread, dispatch.turnId);
+        if (!turn || !isTerminalTurnStatus(turn.status)) {
+          await this.#notifySlowDispatch(dispatch);
+          continue;
+        }
+        try {
+          await this.ingestCodexEvent({
+            method: "turn/completed",
+            params: {
+              threadId: dispatch.threadId,
+              turn,
+            },
+          });
+        } catch {
+          // Completion state and the durable final-reply outbox are reconciled
+          // independently on the next poll.
+        }
+        continue;
+      }
+
+      if (dispatch.turnId) {
+        const turn = findThreadTurn(thread, dispatch.turnId);
+        if (!isTerminalTurnStatus(turn?.status)) continue;
+      }
+      this.#state.resolveUnknownDispatch(dispatch.operationId, this.#now());
+      await this.#cleanupMedia(dispatch.dedupeKey);
+      releasedWork = true;
+    }
+
+    for (const observation of this.#state.listStoppedDesktopTurnObservations()) {
+      let thread: Record<string, unknown>;
+      try {
+        thread = await this.#readThreadForReconciliation(observation.threadId);
+      } catch {
+        continue;
+      }
+      if (
+        isTerminalTurnStatus(findThreadTurn(thread, observation.turnId)?.status) &&
+        this.#state.releaseStoppedDesktopTurnObservation(observation)
+      ) {
+        releasedWork = true;
+      }
+    }
+
+    if (releasedWork) await this.#drainQueuedTurns();
+  }
+
+  async #drainQueuedTurns(): Promise<void> {
+    if (
+      this.#closing ||
+      !this.#bridgeInstanceId ||
+      (!this.#codex?.ensureThread && !this.#codex?.resumeThread) ||
+      !this.#leases
+    ) {
+      return;
+    }
+
+    for (const queued of this.#state.listQueuedTurns()) {
+      if (this.#state.countActiveDispatches() >= MAX_ACTIVE_BRIDGE_TURNS) return;
+      if (this.#state.hasActiveDispatchForThread(queued.threadId)) continue;
+      if (this.#state.getDesktopTurnObservation(queued.threadId)) continue;
+      const contextToken =
+        queued.contextToken ||
+        this.#state.getILinkState(this.#session.botId)?.contextToken;
+      if (!contextToken) continue;
+      let queuedInput: DurableTurnInput;
+      try {
+        queuedInput = parseDurableTurnInput(queued.body);
+      } catch {
+        this.#state.deleteQueuedTurn(queued.id);
+        await this.#cleanupMedia(queued.dedupeKey);
+        await this.#send(
+          contextToken,
+          inboundFailureText("invalid-media"),
+          `codex-ilink:queued:${String(queued.id)}:invalid-input`,
+        );
+        continue;
+      }
+
+      const operationId = this.#newId();
+      const lease = this.#leases.tryAcquire({
+        createdAtMs: this.#now(),
+        instanceId: this.#bridgeInstanceId,
+        operationId,
+        owner: "bridge",
+        threadId: queued.threadId,
+        turnId: null,
+      });
+      if (!lease.acquired) continue;
+
+      try {
+        await this.#ensureThread(queued.threadId);
+      } catch (error) {
+        this.#leases.release({
+          instanceId: this.#bridgeInstanceId,
+          operationId,
+          owner: "bridge",
+          threadId: queued.threadId,
+          turnId: null,
+        });
+        if (isMissingThreadError(error)) {
+          this.#state.deleteQueuedTurn(queued.id);
+          await this.#cleanupMedia(queued.dedupeKey);
+          const binding = this.#state.getBinding(this.#now());
+          if (binding?.threadId === queued.threadId) {
+            this.#state.clearNavigationRoutes();
+          }
+          await this.#send(
+            contextToken,
+            MISSING_THREAD_TEXT,
+            `codex-ilink:queued:${String(queued.id)}:missing-thread`,
+          );
+        }
+        continue;
+      }
+      if (this.#closing) {
+        this.#leases.release({
+          instanceId: this.#bridgeInstanceId,
+          operationId,
+          owner: "bridge",
+          threadId: queued.threadId,
+          turnId: null,
+        });
+        return;
+      }
+
+      let dispatch: NonNullable<
+        ReturnType<SqliteState["promoteQueuedTurn"]>
+      >;
+      try {
+        const promoted = this.#state.promoteQueuedTurn({
+          contextToken,
+          createdAtMs: this.#now(),
+          maxActiveDispatches: MAX_ACTIVE_BRIDGE_TURNS,
+          operationId,
+          queuedTurnId: queued.id,
+        });
+        if (!promoted) {
+          this.#leases.release({
+            instanceId: this.#bridgeInstanceId,
+            operationId,
+            owner: "bridge",
+            threadId: queued.threadId,
+            turnId: null,
+          });
+          continue;
+        }
+        dispatch = promoted;
+      } catch {
+        this.#leases.release({
+          instanceId: this.#bridgeInstanceId,
+          operationId,
+          owner: "bridge",
+          threadId: queued.threadId,
+          turnId: null,
+        });
+        continue;
+      }
+
+      let started: { turn: { id: string } };
+      try {
+        started = await this.#codex.startTurn({
+          ...(queuedInput.attachments.length > 0
+            ? { attachments: queuedInput.attachments }
+            : {}),
+          clientUserMessageId: dispatch.dedupeKey,
+          text: queuedInput.text,
+          threadId: queued.threadId,
+        });
+      } catch (error) {
+        if (!(error instanceof CodexOutcomeUnknownError)) {
+          await this.#completeRejectedDispatch({
+            dedupeKey: dispatch.dedupeKey,
+            lease: lease.lease,
+            operationId,
+            contextToken,
+          });
+          continue;
+        }
+        this.#state.markDispatchUnknown(operationId, this.#now());
+        await this.#persistUnknownDiagnostic(
+          contextToken,
+          operationId,
+          CODEX_OUTCOME_UNKNOWN_TEXT,
+        );
+        continue;
+      }
+      this.#leases.claimBridgeTurn({
+        instanceId: this.#bridgeInstanceId,
+        threadId: queued.threadId,
+        turnId: started.turn.id,
+      });
+      if (
+        !this.#leases.isHeldBy({
+          instanceId: this.#bridgeInstanceId,
+          operationId,
+          owner: "bridge",
+          threadId: queued.threadId,
+          turnId: started.turn.id,
+        })
+      ) {
+        this.#state.markDispatchUnknown(
+          operationId,
+          this.#now(),
+          started.turn.id,
+        );
+        await this.#persistUnknownDiagnostic(
+          contextToken,
+          operationId,
+          HOOK_GUARD_UNKNOWN_TEXT,
+        );
+        continue;
+      }
+      this.#state.markDispatchAccepted(
+        operationId,
+        started.turn.id,
+        this.#now(),
+      );
+    }
+  }
+
+  async #cleanupMedia(dedupeKey: string): Promise<void> {
+    try {
+      await this.#media?.cleanup(dedupeKey);
+    } catch {
+      // A later startup prune can retry orphan cleanup. Delivery state must
+      // never be rolled back because a local media deletion failed.
+    }
+  }
+
+  async #notifySlowDispatch(dispatch: DispatchIntent): Promise<void> {
+    const current = this.#state.getDispatchIntent(dispatch.operationId);
+    if (
+      current?.status !== "accepted" ||
+      current.completedAtMs !== null ||
+      current.turnId === null ||
+      current.turnId !== dispatch.turnId ||
+      this.#now() - current.updatedAtMs < this.#slowTurnNoticeAfterMs
+    ) {
+      return;
+    }
+    const contextToken =
+      current.contextToken ||
+      this.#state.getILinkState(this.#session.botId)?.contextToken;
+    if (!contextToken) return;
+    try {
+      await this.#send(
+        contextToken,
+        CODEX_SLOW_TURN_TEXT,
+        `codex-ilink:${current.turnId}:slow`,
+      );
+    } catch {
+      // The durable outbox retries the same one-time progress notice.
+    }
+  }
+
+  async #completeRejectedDispatch(input: {
+    contextToken: string;
+    dedupeKey: string;
+    lease: TurnLease;
+    operationId: string;
+  }): Promise<void> {
+    const rejectedOutbox = this.#state.rejectPendingDispatchWithOutbox({
+      operationId: input.operationId,
+      outbox: {
+        body: CODEX_SUBMISSION_REJECTED_TEXT,
+        clientId: `codex-ilink:${input.operationId}:rejected`,
+        contextToken: input.contextToken,
+        createdAtMs: this.#now(),
+        targetUserId: this.#session.controllerUserId,
+      },
+    });
+    if (!this.#leases?.release(input.lease)) {
+      throw new Error("E_BRIDGE_REJECTED_LEASE_RELEASE");
+    }
+    await this.#cleanupMedia(input.dedupeKey);
+    await this.#sendRejectedOutbox(rejectedOutbox);
+  }
+
+  async #sendRejectedOutbox(item: OutboxItem): Promise<void> {
+    if (item.status === "confirmed") return;
+    if (item.body === null) throw new Error("pending rejected reply has no body");
+    try {
+      await this.#send(item.contextToken, item.body, item.clientId);
+    } catch {
+      // The rejection and its reply are persisted atomically. The outbox
+      // worker owns replay while later FIFO work remains free to continue.
+    }
+  }
+
+  #dedupeKey(messageId: string): string {
+    return `${this.#session.botId}/${this.#session.controllerUserId}/${messageId}`;
+  }
+
+  #clearInbound(messageId: string): void {
+    this.#state.clearInboundBody(
+      this.#session.botId,
+      this.#session.controllerUserId,
+      messageId,
+    );
+  }
+
+  async #ensureThread(threadId: string): Promise<void> {
+    if (this.#codex?.ensureThread) {
+      await this.#codex.ensureThread(threadId);
+      return;
+    }
+    if (!this.#codex?.resumeThread) {
+      throw new Error("Codex thread resume is not configured");
+    }
+    await this.#codex.resumeThread(threadId);
+  }
+
+  async #readThreadForReconciliation(
+    threadId: string,
+  ): Promise<Record<string, unknown>> {
+    if (!this.#codex?.readThread) {
+      throw new Error("Codex thread reading is not configured");
+    }
+    if (this.#codex.ensureThread) await this.#codex.ensureThread(threadId);
+    return (
+      await this.#codex.readThread({ includeTurns: true, threadId })
+    ).thread;
+  }
+}
+
+function inboundMediaFailureCode(error: unknown): DurableInboundFailureCode {
+  if (!(error instanceof InboundMediaError)) return "download-failed";
+  if (error.code === "TOO_LARGE") return "too-large";
+  if (
+    error.code === "CANCELLED" ||
+    error.code === "DOWNLOAD_FAILED" ||
+    error.code === "HTTP_ERROR" ||
+    error.code === "REDIRECT_ERROR" ||
+    error.code === "TIMEOUT"
+  ) {
+    return "download-failed";
+  }
+  return "invalid-media";
+}
+
+function inboundFailureText(code: DurableInboundFailureCode): string {
+  switch (code) {
+    case "download-failed":
+      return "❌ 微信附件下载失败（网络或 CDN 异常），请稍后重发。";
+    case "invalid-media":
+      return "❌ 微信附件无效、解密或本地保存失败，未发送给 Codex。";
+    case "too-large":
+      return "❌ 微信附件超过 100 MB，未发送给 Codex。";
+    case "voice-transcript-missing":
+      return "❌ 这条语音没有微信转写文本；当前 Codex 任务不能直接接收音频，请开启语音转文字后重发。";
+    case "unsupported-media":
+      return "❌ 此消息包含当前不支持或不完整的媒体，未发送给 Codex。";
+  }
+}
+
+function finalAgentText(
+  thread: Record<string, unknown>,
+  turnId: string,
+): string | null {
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  const turn = turns
+    .map(asObject)
+    .find((candidate) => stringField(candidate, "id") === turnId);
+  const items = turn && Array.isArray(turn.items) ? turn.items : [];
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = asObject(items[index]);
+    if (item?.type === "agentMessage" && item.phase === "final_answer") {
+      const text = stringField(item, "text");
+      if (text) return text;
+    }
+  }
+  return null;
+}
+
+function formatCodexTurnFailure(
+  status: unknown,
+  completionError: Record<string, unknown> | undefined,
+  remembered: CodexTurnFailure | undefined,
+): string | null {
+  const failure = completionError
+    ? sanitizeCodexTurnFailure(completionError)
+    : remembered;
+  if (failure?.category === "network") {
+    if (failure.httpStatusCode === 403) {
+      return "❌ Codex 网络请求失败：上游服务拒绝访问（HTTP 403）。请稍后重试。";
+    }
+    return failure.httpStatusCode === undefined
+      ? "❌ Codex 网络连接失败。请检查网络后重试。"
+      : `❌ Codex 网络请求失败（HTTP ${String(failure.httpStatusCode)}）。请稍后重试。`;
+  }
+  if (status === "interrupted") {
+    return "❌ Codex 任务已中断，未生成最终结果。请重试；详情请在 Codex Desktop 查看。";
+  }
+  if (status === "failed" || failure) {
+    return "❌ Codex 执行失败。请稍后重试；详情请在 Codex Desktop 查看。";
+  }
+  return null;
+}
+
+function sanitizeCodexTurnFailure(
+  error: Record<string, unknown>,
+): CodexTurnFailure {
+  const info = objectField(error, "codexErrorInfo");
+  const httpStatusCode = codexHttpStatusCode(error);
+  const networkVariants = new Set([
+    "httpConnectionFailed",
+    "responseStreamConnectionFailed",
+    "responseStreamDisconnected",
+    "responseTooManyFailedAttempts",
+  ]);
+  return {
+    category:
+      httpStatusCode !== undefined ||
+      (info && Object.keys(info).some((key) => networkVariants.has(key)))
+        ? "network"
+        : "other",
+    httpStatusCode,
+  };
+}
+
+function codexHttpStatusCode(
+  error: Record<string, unknown>,
+): number | undefined {
+  const info = objectField(error, "codexErrorInfo");
+  const value = info
+    ? Object.values(info)
+        .map(asObject)
+        .find((value) => typeof value?.httpStatusCode === "number")
+        ?.httpStatusCode
+    : undefined;
+  return typeof value === "number" ? value : undefined;
+}
+
+function turnFailureKey(threadId: string, turnId: string): string {
+  return JSON.stringify([threadId, turnId]);
+}
+
+function isMissingThreadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no rollout found for thread id/iu.test(message);
+}
+
+function findThreadTurn(
+  thread: Record<string, unknown>,
+  turnId: string,
+): Record<string, unknown> | undefined {
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  return turns
+    .map(asObject)
+    .find((candidate) => stringField(candidate, "id") === turnId);
+}
+
+function isTerminalTurnStatus(value: unknown): boolean {
+  return value === "completed" || value === "failed" || value === "interrupted";
+}
+
+function isExplicitlyIdleThread(thread: Record<string, unknown>): boolean {
+  if (thread.status === "idle") return true;
+  const status = asObject(thread.status);
+  return status?.type === "idle";
+}
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function objectField(
+  value: Record<string, unknown>,
+  name: string,
+): Record<string, unknown> | undefined {
+  return asObject(value[name]);
+}
+
+function stringField(
+  value: Record<string, unknown> | undefined,
+  name: string,
+): string | undefined {
+  const field = value?.[name];
+  return typeof field === "string" ? field : undefined;
+}
+
+function projectDisplayName(projectPath: string | null): string {
+  if (projectPath === null) return "无项目";
+  const normalized = win32.normalize(projectPath);
+  return win32.basename(normalized) || normalized;
+}
+
+function sameWindowsPath(left: string, right: string): boolean {
+  return windowsPathKey(left) === windowsPathKey(right);
+}
+
+function windowsPathKey(path: string): string {
+  const normalized = win32.normalize(path);
+  const root = win32.parse(normalized).root;
+  const withoutTrailing =
+    normalized === root ? normalized : normalized.replace(/[\\/]+$/u, "");
+  return withoutTrailing.toLocaleLowerCase("en-US");
+}

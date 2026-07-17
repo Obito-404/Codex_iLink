@@ -1,9 +1,11 @@
 export type SessionBinding = {
   expiresAtMs: number;
   threadId: string;
+  updatedAtMs: number;
 };
 
 export type NotificationWindow = {
+  deliveredAtMs: number;
   expiresAtMs: number;
   threadId: string;
 };
@@ -17,7 +19,7 @@ export type RouteInboundTextInput = {
 };
 
 export type TurnRouteDecision = {
-  binding: SessionBinding | null;
+  binding: Omit<SessionBinding, "updatedAtMs"> | null;
   kind: "turn";
   route: "binding" | "main" | "notification";
   text: string;
@@ -34,41 +36,47 @@ const BINDING_IDLE_TIMEOUT_MS = 30 * 60 * 1_000;
 export function routeInboundText(
   input: RouteInboundTextInput,
 ): AmbiguousNotificationRouteDecision | TurnRouteDecision {
-  if (input.binding && input.binding.expiresAtMs > input.nowMs) {
+  const activeBinding =
+    input.binding && input.binding.expiresAtMs > input.nowMs
+      ? input.binding
+      : null;
+  const liveNotificationWindows = input.notificationWindows.filter(
+    (window) => window.expiresAtMs > input.nowMs,
+  );
+  const bindingSupersedesNotifications =
+    activeBinding &&
+    liveNotificationWindows.every(
+      (window) => window.deliveredAtMs <= activeBinding.updatedAtMs,
+    );
+  if (bindingSupersedesNotifications) {
     return {
       binding: {
         expiresAtMs: input.nowMs + BINDING_IDLE_TIMEOUT_MS,
-        threadId: input.binding.threadId,
+        threadId: activeBinding.threadId,
       },
       kind: "turn",
       route: "binding",
       text: input.text,
-      threadId: input.binding.threadId,
-    };
-  }
-
-  const liveNotificationWindows = input.notificationWindows.filter(
-    (window) => window.expiresAtMs > input.nowMs,
-  );
-  if (liveNotificationWindows.length === 1) {
-    const [window] = liveNotificationWindows;
-    if (!window) throw new Error("live notification window disappeared");
-
-    return {
-      binding: {
-        expiresAtMs: input.nowMs + BINDING_IDLE_TIMEOUT_MS,
-        threadId: window.threadId,
-      },
-      kind: "turn",
-      route: "notification",
-      text: input.text,
-      threadId: window.threadId,
+      threadId: activeBinding.threadId,
     };
   }
   if (liveNotificationWindows.length > 1) {
     return {
       kind: "ambiguousNotificationRoute",
       threadIds: liveNotificationWindows.map((window) => window.threadId),
+    };
+  }
+  const [notificationWindow] = liveNotificationWindows;
+  if (notificationWindow) {
+    return {
+      binding: {
+        expiresAtMs: input.nowMs + BINDING_IDLE_TIMEOUT_MS,
+        threadId: notificationWindow.threadId,
+      },
+      kind: "turn",
+      route: "notification",
+      text: input.text,
+      threadId: notificationWindow.threadId,
     };
   }
 

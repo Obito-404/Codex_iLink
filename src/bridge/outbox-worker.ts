@@ -5,7 +5,9 @@ import {
 } from "./sqlite-state.ts";
 import type { ILinkSender } from "./bridge.ts";
 import type { ILinkSession } from "../ilink/protocol.ts";
+import { parseDesktopNotificationClientId } from "./desktop-notification-identity.ts";
 import { dispatchOutboxItem } from "./outbox-delivery.ts";
+import { WECHAT_FINAL_MAX_MESSAGES } from "./wechat-output.ts";
 
 export type OutboxDrainResult = {
   confirmed: number;
@@ -139,13 +141,20 @@ export class OutboxWorker {
 }
 
 function finalReplyGroup(clientId: string): string | null {
-  const bridge = /^(codex-ilink:[^:]+:final)(?::part:[1-3])?$/u.exec(clientId);
-  if (bridge?.[1]) return bridge[1];
-  const desktop =
-    /^(codex-ilink:desktop:[^:]+:[^:]+:final)(?::part:[1-3])?$/u.exec(
-      clientId,
-    );
-  return desktop?.[1] ?? null;
+  const bridge = /^(codex-ilink:[^:]+:final)(?::part:(\d+))?$/u.exec(clientId);
+  const baseClientId = bridge?.[1];
+  const part = bridge?.[2];
+  const partNumber = part === undefined ? null : Number(part);
+  if (
+    baseClientId &&
+    (partNumber === null ||
+      (Number.isSafeInteger(partNumber) &&
+        partNumber >= 1 &&
+        partNumber <= WECHAT_FINAL_MAX_MESSAGES))
+  ) {
+    return baseClientId;
+  }
+  return parseDesktopNotificationClientId(clientId)?.baseClientId ?? null;
 }
 
 function abortableSleep(

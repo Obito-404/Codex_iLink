@@ -39,7 +39,7 @@ pnpm ilink login
 pnpm ilink start
 ```
 
-插件安装或版本变化后，请在 Codex Desktop 审核并信任 Hooks。信任页显示内部 ID `codex-ilink-probe`，插件显示名为 `Codex iLink Guard`，二者是同一个插件。Bridge 运行时，只对微信主任务、微信当前进入的任务以及仍有微信排队/执行工作的任务启用 fail-closed 租约。当前微信所选项目中的其他任务只留下最小活动 turn 观察，用于稍后通过 `s<n>` 进入时避免双写；其他 Desktop 项目始终放行且不记录观察，即使状态库正被瞬时写锁占用也不会停止或写入这些项目。观察无法直接入库时先写入本机 Spool，Bridge 会在每条同批微信消息执行前恢复它。观察不会显示为微信活动任务、不会触发系统保活，也不会成为门禁；精确 Stop 后保留 7 天最小 tombstone，防止迟到的重复 Prompt 重新制造永久 `Queued`。
+插件安装或版本变化后，请在 Codex Desktop 审核并信任 Hooks。信任页显示内部 ID `codex-ilink-probe`，插件显示名为 `Codex iLink Guard`，二者是同一个插件。Bridge 运行时，只对微信主任务、微信当前进入的任务以及仍有微信排队/执行工作的任务启用 fail-closed 租约。当前微信所选项目中的其他任务只留下最小活动 turn 观察，用于稍后通过 `s<n>` 进入时避免双写；其他 Desktop 项目始终放行且不记录活动观察，即使状态库正被瞬时写锁占用也不会停止或写入这些项目。所有经 App Server 确认为 `source=vscode` 的 Desktop 项目 Stop 完成事件仍通过独立的 fail-open 生命周期通道上报，仅用于用户锁屏或空闲时的完成通知；CLI 任务不会推送。项目选择、并发门禁和系统保活不受影响。活动观察无法直接入库时先写入本机 Spool，Bridge 会在每条同批微信消息执行前恢复它。观察不会显示为微信活动任务、不会触发系统保活，也不会成为门禁；精确 Stop 后保留 7 天最小 tombstone，防止迟到的重复 Prompt 重新制造永久 `Queued`。
 
 关闭插件后，微信仍可通过 App Server 执行任务，但 Desktop 回合不再参与租约、Desktop 生命周期通知也会丢失；此时如果 Desktop 与微信同时写同一个共享任务，可能发生并发错组。因此仅在排障或确认不会双端同时操作时临时关闭，并且必须在关闭前确认没有正在运行的 Desktop 回合。若在 Desktop 回合中途关闭，精确 `Stop` 会丢失，已有消息会保守保持 `Queued`，不能仅凭独立 App Server 的 `interrupted` 状态自动解锁。
 

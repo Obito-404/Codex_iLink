@@ -744,7 +744,7 @@ test("daemon reconciles a spooled Desktop Stop during startup", async () => {
   }
 });
 
-test("an unmatched stale Stop is acknowledged without reopening its thread", async () => {
+test("an unmatched CLI Stop is inspected once and still suppresses a late Prompt", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-stale-stop-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -759,7 +759,10 @@ test("an unmatched stale Stop is acknowledged without reopening its thread", asy
       async readThread() {
         reads += 1;
         return {
-          thread: { turns: [{ id: "stale-turn", status: "completed" }] },
+          thread: {
+            source: "cli",
+            turns: [{ id: "stale-turn", status: "completed" }],
+          },
         };
       },
       async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
@@ -780,6 +783,7 @@ test("an unmatched stale Stop is acknowledged without reopening its thread", asy
     leases,
     newId: () => "unused",
     now: () => 1,
+    presence: async () => "away",
     session,
     state,
   });
@@ -792,7 +796,8 @@ test("an unmatched stale Stop is acknowledged without reopening its thread", asy
       sessionId: "stale-thread",
       turnId: "stale-turn",
     });
-    assert.equal(reads, 0);
+    assert.equal(reads, 1);
+    assert.deepEqual(state.listPendingOutbox(), []);
     await daemon.ingestHookEvent(
       desktopPromptEvent("stale-thread", "stale-turn"),
     );
@@ -801,6 +806,117 @@ test("an unmatched stale Stop is acknowledged without reopening its thread", asy
       null,
       "a Prompt drained after its Stop must stay completed",
     );
+    await daemon.stop();
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("an away Desktop completion from an unselected project is sent without changing navigation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-global-notify-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const sent: Array<{ clientId: string; text: string }> = [];
+  state.setMainThreadId("thread-main");
+  state.setSelectedProjectPath("D:\\Selected");
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  state.acceptInboundBatch({
+    accountId: "bot-a",
+    controllerUserId: "controller-a",
+    messages: [
+      {
+        body: "help",
+        contextToken: "ctx-global-notify",
+        messageId: "seed-global-notify",
+        receivedAtMs: 1,
+      },
+    ],
+    nextCursor: "cursor-global-notify",
+    updatedAtMs: 1,
+  });
+  state.clearInboundBody("bot-a", "controller-a", "seed-global-notify");
+
+  const daemon = new BridgeDaemon({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      close() {},
+      onEvent() { return () => undefined; },
+      async readThread(input) {
+        assert.equal(input.threadId, "other-project-thread");
+        return {
+          thread: {
+            cwd: "D:\\Other",
+            name: "跨项目后台任务",
+            source: "vscode",
+            turns: [
+              {
+                id: "other-project-turn",
+                items: [
+                  {
+                    content: [{ text: "完成跨项目测试", type: "text" }],
+                    type: "userMessage",
+                  },
+                  {
+                    phase: "final_answer",
+                    text: "跨项目通知已完成。",
+                    type: "agentMessage",
+                  },
+                ],
+                status: "completed",
+              },
+            ],
+          },
+        };
+      },
+      async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
+      async setThreadName() { return {}; },
+      async startThread() { assert.fail("main thread already exists"); },
+      async startTurn() { assert.fail("no inbound messages"); },
+    },
+    hookReceiver: {
+      async close() {}, async drainSpool() { return 0; }, async start() {},
+    },
+    ilink: {
+      async getUpdates() {
+        return { cursor: "cursor-global-notify", kind: "timeout" as const };
+      },
+      async sendText(input) {
+        sent.push(input);
+        return { accepted: true as const, clientId: input.clientId };
+      },
+    },
+    inboxDirectory: join(directory, "Inbox"),
+    leases,
+    newId: () => "unused",
+    now: () => 30_000,
+    presence: async () => "away",
+    session,
+    state,
+  });
+
+  try {
+    await daemon.start();
+    await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      capturedAtMs: 29_000,
+      cwd: "D:\\Other",
+      sessionId: "other-project-thread",
+      turnId: "other-project-turn",
+    });
+    await waitFor(() => sent.length === 1);
+    assert.match(
+      sent[0]?.text ?? "",
+      /项目：Other[\s\S]*会话：跨项目后台任务[\s\S]*Codex：跨项目通知已完成/u,
+    );
+    assert.equal(
+      state.getBridgeSettings().selectedProjectPath,
+      "D:\\Selected",
+    );
+    assert.equal(state.getDesktopTurnObservation("other-project-thread"), null);
+    assert.equal(leases.getLease("other-project-thread"), null);
     await daemon.stop();
   } finally {
     leases.close();
@@ -931,7 +1047,7 @@ test("periodic reconciliation requires Stop evidence before releasing a terminal
   }
 });
 
-test("an away Desktop Stop opens its reply route only after durable delivery", async () => {
+test("an away Desktop Stop opens its reply route after delivery without replacing an active binding", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-notify-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -1043,7 +1159,12 @@ test("an away Desktop Stop opens its reply route only after durable delivery", a
         threadId: "thread-desktop",
       },
     ]);
-    assert.equal(state.getBinding(nowMs), null);
+    assert.deepEqual(state.getBinding(nowMs), {
+      expiresAtMs: 60_000,
+      projectPath: "D:\\Other",
+      threadId: "thread-existing-binding",
+      updatedAtMs: 1,
+    });
     await daemon.stop();
   } finally {
     leases.close();
@@ -1058,6 +1179,7 @@ test("a recently active Desktop completion is sent after five idle minutes witho
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
   const sent: Array<{ clientId: string; text: string }> = [];
+  let failLastPart = true;
   let nowMs = 300_000;
   let idleMilliseconds = 60_000;
   state.setMainThreadId("thread-main");
@@ -1089,7 +1211,7 @@ test("a recently active Desktop completion is sent after five idle minutes witho
     true,
   );
 
-  const daemon = new BridgeDaemon({
+  const createDaemon = () => new BridgeDaemon({
     bridgeInstanceId: "bridge-instance",
     codex: {
       close() {},
@@ -1132,6 +1254,9 @@ test("a recently active Desktop completion is sent after five idle minutes witho
         return { cursor: "cursor-presence", kind: "timeout" as const };
       },
       async sendText(input) {
+        if (failLastPart && input.clientId.endsWith(":part:2")) {
+          throw new Error("second part offline");
+        }
         sent.push(input);
         return { accepted: true as const, clientId: input.clientId };
       },
@@ -1149,6 +1274,7 @@ test("a recently active Desktop completion is sent after five idle minutes witho
     session,
     state,
   });
+  let daemon = createDaemon();
 
   try {
     await daemon.start();
@@ -1161,6 +1287,13 @@ test("a recently active Desktop completion is sent after five idle minutes witho
     nowMs += 4 * 60 * 1_000;
     idleMilliseconds = 5 * 60 * 1_000;
     await daemon.pollOnce();
+    assert.equal(sent.length, 1);
+    assert.deepEqual(state.listLiveNotificationRoutes(nowMs), []);
+
+    await daemon.stop();
+    failLastPart = false;
+    daemon = createDaemon();
+    await daemon.start();
     assert.equal(sent.length, 2);
     assert.match(
       sent.map(({ text }) => text).join(""),
@@ -1182,7 +1315,7 @@ test("a recently active Desktop completion is sent after five idle minutes witho
   }
 });
 
-test("daemon startup sends a durable Desktop completion that became away while stopped", async () => {
+test("daemon startup cancels a completion followed by input and sends the unseen completion", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-presence-restart-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -1211,6 +1344,13 @@ test("daemon startup sends a durable Desktop completion that became away while s
     status: "completed",
     threadId: "thread-desktop",
     turnId: "desktop-turn",
+  });
+  state.putPendingDesktopNotification({
+    completedAtMs: 40_000,
+    cwd: "D:\\Seen",
+    status: "completed",
+    threadId: "thread-seen-after-completion",
+    turnId: "seen-turn",
   });
 
   const daemon = new BridgeDaemon({

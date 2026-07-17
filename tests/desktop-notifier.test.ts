@@ -205,7 +205,7 @@ test("an away Desktop completion is durably queued once without opening a route"
     assert.equal(await notifier.notifyTerminal(stopEvent, "completed"), "queued");
     assert.match(
       state.listPendingOutbox()[0]?.body ?? "",
-      /Codex Desktop 任务已完成[\s\S]*后台任务[\s\S]*你问：请检查登录问题并给出修复方案。[\s\S]*Codex：已经修复登录状态过期后无法重新认证的问题。[\s\S]*直接回复即可继续这个会话[\s\S]*重启 Codex App/u,
+      /Codex Desktop 任务已完成[\s\S]*后台任务[\s\S]*你问：请检查登录问题并给出修复方案。[\s\S]*Codex：已经修复登录状态过期后无法重新认证的问题。[\s\S]*只有一条新通知时，直接回复即可继续这个会话；多条通知请先选择。[\s\S]*重启 Codex App/u,
     );
     assert.deepEqual(state.listLiveNotificationRoutes(10_001), []);
     assert.equal(

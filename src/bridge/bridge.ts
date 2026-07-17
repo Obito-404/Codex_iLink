@@ -1748,12 +1748,17 @@ export class BridgeEngine {
         ? {
             expiresAtMs: currentBinding.expiresAtMs,
             threadId: currentBinding.threadId,
+            updatedAtMs: currentBinding.updatedAtMs,
           }
         : null,
       mainThreadId: this.#mainThreadId,
       notificationWindows: this.#state
         .listLiveNotificationRoutes(nowMs)
-        .map(({ expiresAtMs, threadId }) => ({ expiresAtMs, threadId })),
+        .map(({ deliveredAtMs, expiresAtMs, threadId }) => ({
+          deliveredAtMs,
+          expiresAtMs,
+          threadId,
+        })),
       nowMs,
       text: input.turnInput.text,
     });
@@ -1769,7 +1774,8 @@ export class BridgeEngine {
     if (route.binding) {
       this.#state.setBinding({
         expiresAtMs: route.binding.expiresAtMs,
-        projectPath: currentBinding?.projectPath ?? null,
+        projectPath:
+          route.route === "binding" ? currentBinding?.projectPath ?? null : null,
         threadId: route.binding.threadId,
         updatedAtMs: nowMs,
       });

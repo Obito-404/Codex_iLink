@@ -6,6 +6,11 @@ import {
   type NotificationRoute,
 } from "../bridge/sqlite-state.ts";
 import {
+  desktopNotificationCandidateClientIds,
+  desktopNotificationClientId,
+  desktopNotificationMessageClientIds,
+} from "../bridge/desktop-notification-identity.ts";
+import {
   extractWechatLocalFileReferences,
   formatWechatFinalReply,
 } from "../bridge/wechat-output.ts";
@@ -58,7 +63,11 @@ export class DesktopNotifier {
     context: DesktopNotificationContext = {},
   ): Promise<DesktopNotificationResult> {
     if (!event.turnId) return Promise.resolve("already-sent");
-    const clientId = desktopNotificationClientId(event.sessionId, event.turnId);
+    const clientId = desktopNotificationClientId(
+      event.sessionId,
+      event.turnId,
+      status !== "interrupted",
+    );
     const current = this.#inFlight.get(clientId);
     if (current) return current;
     const notification = this.#notify(event, status, clientId, context).finally(() => {
@@ -162,13 +171,14 @@ export class DesktopNotifier {
     const messages = formatWechatFinalReply(safeText);
     const contextToken =
       this.#state.getILinkState(this.#session.botId)?.contextToken ?? "";
+    const clientIds = desktopNotificationMessageClientIds(
+      clientId,
+      messages.length,
+    );
     this.#state.enqueueOutboxBatch(
       messages.map((body, index) => ({
         body,
-        clientId:
-          messages.length === 1
-            ? clientId
-            : `${clientId}:part:${String(index + 1)}`,
+        clientId: clientIds[index] ?? clientId,
         contextToken,
         createdAtMs: nowMs,
         targetUserId: this.#session.controllerUserId,
@@ -179,35 +189,15 @@ export class DesktopNotifier {
 }
 
 function hasDesktopNotification(state: SqliteState, baseClientId: string): boolean {
-  if (state.getOutbox(baseClientId)) return true;
-  return Array.from({ length: 3 }, (_, index) =>
-    state.getOutbox(`${baseClientId}:part:${String(index + 1)}`),
-  ).some(Boolean);
-}
-
-export function desktopNotificationClientId(
-  threadId: string,
-  turnId: string,
-): string {
-  return `codex-ilink:desktop:${threadId}:${turnId}:final`;
+  return desktopNotificationCandidateClientIds(baseClientId).some((clientId) =>
+    Boolean(state.getOutbox(clientId)),
+  );
 }
 
 export function desktopPermissionClientId(event: HookEvent): string {
   const identity = `${event.sessionId}\0${event.turnId ?? ""}`;
   const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 16);
   return `codex-ilink:desktop:${event.sessionId}:permission:${suffix}`;
-}
-
-export function parseDesktopNotificationClientId(
-  clientId: string,
-): { threadId: string; turnId: string } | null {
-  const match =
-    /^codex-ilink:desktop:([A-Za-z0-9-]+):([A-Za-z0-9-]+):final(?::part:[1-3])?$/u.exec(
-      clientId,
-    );
-  return match?.[1] && match[2]
-    ? { threadId: match[1], turnId: match[2] }
-    : null;
 }
 
 export function markDesktopNotificationDelivered(
@@ -264,7 +254,7 @@ function formatDesktopNotification(
   }
   result.push(
     "",
-    "直接回复即可继续这个会话。",
+    "只有一条新通知时，直接回复即可继续这个会话；多条通知请先选择。",
     "⚠️ 通过微信继续的新对话，需要重启 Codex App 后才能在桌面端看到。",
   );
   return result.join("\n");

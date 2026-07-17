@@ -14,16 +14,21 @@ import { SqliteTurnLeaseStore } from "../coordination/turn-lease.ts";
 import {
   DesktopNotifier,
   desktopNotificationRoute,
-  parseDesktopNotificationClientId,
   type DesktopTerminalStatus,
 } from "./desktop-notifier.ts";
+import {
+  isFinalDesktopNotificationPart,
+  parseDesktopNotificationClientId,
+} from "../bridge/desktop-notification-identity.ts";
 import type { HookEvent } from "../hooks/hook-receiver.ts";
 import type {
   GetUpdatesResult,
   ILinkSession,
 } from "../ilink/protocol.ts";
-import type { PresenceState } from "../windows/presence.ts";
-import type { PresenceObservation } from "../windows/presence.ts";
+import type {
+  PresenceObservation,
+  PresenceState,
+} from "../windows/presence.ts";
 
 export type DaemonCodexPort = CodexTurnStarter & {
   close(): void;
@@ -158,7 +163,10 @@ export class BridgeDaemon {
       now: this.#options.now,
       routeOnConfirmed: (item, confirmedAtMs) => {
         const source = parseDesktopNotificationClientId(item.clientId);
-        return source
+        return source?.replyable &&
+          isFinalDesktopNotificationPart(item.clientId, (clientId) =>
+            Boolean(this.#options.state.getOutbox(clientId)),
+          )
           ? desktopNotificationRoute(
               source.threadId,
               source.turnId,
@@ -288,6 +296,11 @@ export class BridgeDaemon {
         threadId: event.sessionId,
         turnId: event.turnId,
       });
+      await this.#reconcileDesktopStop(
+        { ...event, turnId: event.turnId },
+        0,
+        true,
+      );
       return;
     }
     await this.#reconcileDesktopStop({ ...event, turnId: event.turnId }, 0);
@@ -372,6 +385,7 @@ export class BridgeDaemon {
   async #reconcileDesktopStop(
     event: HookEvent & { turnId: string },
     attempt: number,
+    requireDesktopSource = false,
   ): Promise<void> {
     const threadId = event.sessionId;
     const turnId = event.turnId;
@@ -395,6 +409,7 @@ export class BridgeDaemon {
           .find((value) => value.id === turnId);
         const status = desktopTerminalStatus(turn?.status);
         if (status) {
+          if (requireDesktopSource && read.thread.source !== "vscode") return;
           await this.#notifyDesktopTerminalOnce(event, status, read.thread);
           const releasedLease = this.#options.leases.releaseStoppedDesktop({
             threadId,
@@ -448,25 +463,13 @@ export class BridgeDaemon {
       try {
         observation = await observePresence();
       } catch {
-        this.#options.state.putPendingDesktopNotification({
-          completedAtMs: event.capturedAtMs,
-          cwd: event.cwd,
-          status,
-          threadId: event.sessionId,
-          turnId: event.turnId,
-        });
+        this.#deferDesktopNotification(event, status);
         return;
       }
       const lastInputAtMs = this.#options.now() - observation.idleMilliseconds;
       if (lastInputAtMs > event.capturedAtMs) return;
       if (observation.state === "present") {
-        this.#options.state.putPendingDesktopNotification({
-          completedAtMs: event.capturedAtMs,
-          cwd: event.cwd,
-          status,
-          threadId: event.sessionId,
-          turnId: event.turnId,
-        });
+        this.#deferDesktopNotification(event, status);
         return;
       }
       confirmedAway = true;
@@ -476,6 +479,19 @@ export class BridgeDaemon {
       thread,
     });
     if (result !== "present") void this.#outbox?.drain().catch(() => undefined);
+  }
+
+  #deferDesktopNotification(
+    event: HookEvent & { turnId: string },
+    status: DesktopTerminalStatus,
+  ): void {
+    this.#options.state.putPendingDesktopNotification({
+      completedAtMs: event.capturedAtMs,
+      cwd: event.cwd,
+      status,
+      threadId: event.sessionId,
+      turnId: event.turnId,
+    });
   }
 
   async #reconcilePendingDesktopNotifications(): Promise<void> {

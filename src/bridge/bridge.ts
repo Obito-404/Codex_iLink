@@ -123,6 +123,10 @@ export type CodexTurnStarter = {
   startThread?(cwd: string): Promise<Record<string, unknown> & {
     thread: { id: string } & Record<string, unknown>;
   }>;
+  updateThreadPermissions?(
+    threadId: string,
+    permissions: string,
+  ): Promise<Record<string, unknown>>;
   unarchiveThread?(threadId: string): Promise<Record<string, unknown>>;
   startTurn(input: {
     attachments?: readonly DurableTurnAttachment[];
@@ -1143,6 +1147,7 @@ export class BridgeEngine {
     if (
       !this.#codex?.resumeThread ||
       !this.#codex.listPermissionProfiles ||
+      !this.#codex.updateThreadPermissions ||
       !this.#mainThreadId
     ) {
       throw new Error("permission profiles are not configured");
@@ -1163,9 +1168,10 @@ export class BridgeEngine {
       if (!selected.allowed) {
         return `权限 ${selected.id} 受 Codex 配置限制，当前不可切换。`;
       }
-      const changed = await this.#codex.resumeThread(threadId, {
-        permissions: selected.id,
-      });
+      const changed = await this.#codex.updateThreadPermissions(
+        threadId,
+        selected.id,
+      );
       const activeId = activePermissionProfileId(changed);
       if (activeId !== selected.id) {
         throw new Error("Codex did not activate the selected permission profile");

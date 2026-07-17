@@ -561,27 +561,31 @@ test("native permission profiles are listed and selected through App Server", as
   }
 });
 
-test("ensureThread reapplies a changed native permission profile exactly once", async (t) => {
+test("a loaded thread changes permission through thread/settings/update", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-runtime-permissions-"));
   t.after(() => rmSync(directory, { force: true, recursive: true }));
-  const resumeCountPath = join(directory, "thread-resume.count");
+  const updateCountPath = join(directory, "thread-settings-update.count");
   const runtime = await CodexRuntime.create({
     bridgeInstanceId: "bridge-instance-permission-reapply",
     command: [
       process.execPath,
       fakeRuntime,
       "--count-method",
-      "thread/resume",
-      resumeCountPath,
+      "thread/settings/update",
+      updateCountPath,
     ],
   });
 
   try {
     await runtime.resumeThread("thread-existing", { permissions: ":workspace" });
-    await runtime.ensureThread("thread-existing", { permissions: ":workspace" });
+    const changed = await runtime.updateThreadPermissions(
+      "thread-existing",
+      ":read-only",
+    );
     await runtime.ensureThread("thread-existing", { permissions: ":read-only" });
 
-    assert.equal(Number(readFileSync(resumeCountPath, "utf8")), 2);
+    assert.deepEqual(changed.activePermissionProfile, { id: ":read-only" });
+    assert.equal(Number(readFileSync(updateCountPath, "utf8")), 1);
   } finally {
     runtime.close();
   }

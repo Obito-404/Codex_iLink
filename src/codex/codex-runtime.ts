@@ -121,6 +121,32 @@ export class CodexRuntime {
     return result;
   }
 
+  async updateThreadPermissions(
+    threadId: string,
+    permissions: string,
+  ): Promise<ThreadResumeResult> {
+    if (
+      this.#connection.isTerminated() ||
+      this.#reconnectRequired === this.#connection
+    ) {
+      await this.#reconnect(this.#connection);
+    }
+    if (!this.#loadedThreadIds.has(threadId)) {
+      return this.resumeThread(threadId, { permissions });
+    }
+    if (this.#loadedPermissionProfileIds.get(threadId) !== permissions) {
+      await this.#requestSafely("thread/settings/update", {
+        permissions,
+        threadId,
+      });
+    }
+    const result = await this.resumeThread(threadId);
+    if (permissionProfileId(result.activePermissionProfile) !== permissions) {
+      throw new Error("Codex did not activate the requested permission profile");
+    }
+    return result;
+  }
+
   async startThread(cwd: string): Promise<ThreadStartResult> {
     const result = (await this.#requestOnceWithUnknownOutcome("thread/start", {
       cwd,
@@ -145,9 +171,13 @@ export class CodexRuntime {
     }
     if (
       this.#loadedThreadIds.has(threadId) &&
-      (!options.permissions ||
-        this.#loadedPermissionProfileIds.get(threadId) === options.permissions)
+      options.permissions &&
+      this.#loadedPermissionProfileIds.get(threadId) !== options.permissions
     ) {
+      await this.updateThreadPermissions(threadId, options.permissions);
+      return;
+    }
+    if (this.#loadedThreadIds.has(threadId)) {
       return;
     }
     await this.resumeThread(threadId, options);

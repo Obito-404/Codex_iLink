@@ -677,6 +677,30 @@ class FakeNavigationCodex implements CodexTurnStarter {
     return selected;
   }
 
+  async updateThreadPermissions(threadId: string, permissions: string) {
+    if (this.blockedPermissionProfiles.has(permissions)) {
+      throw new Error("permission profile is no longer allowed");
+    }
+    const current = await this.resumeThread(threadId);
+    this.permissionSelections.push({ permissions, threadId });
+    const selected = {
+      ...current,
+      activePermissionProfile: { id: permissions },
+      approvalPolicy:
+        permissions === ":danger-full-access" ? "never" : "on-request",
+      sandbox: {
+        type:
+          permissions === ":danger-full-access"
+            ? "dangerFullAccess"
+            : permissions === ":read-only"
+              ? "readOnly"
+              : "workspaceWrite",
+      },
+    };
+    this.resumes.set(threadId, selected);
+    return selected;
+  }
+
   async unarchiveThread(threadId: string) {
     this.calls.push(`unarchive:${threadId}`);
     return { thread: { id: threadId } };

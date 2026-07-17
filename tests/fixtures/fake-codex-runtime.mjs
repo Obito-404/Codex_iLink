@@ -52,6 +52,7 @@ if (recordStartIndex !== -1) {
 
 let initializeCount = 0;
 let experimentalApi = false;
+const activePermissionProfiles = new Map();
 const lines = readline.createInterface({ input: process.stdin });
 
 lines.on("line", (line) => {
@@ -206,23 +207,53 @@ lines.on("line", (line) => {
       rejectUnexpectedParams(message);
       return;
     }
+    const activePermissionProfile = activePermissionProfiles.has(
+      message.params.threadId,
+    )
+      ? activePermissionProfiles.get(message.params.threadId)
+      : (message.params.permissions ?? ":workspace");
+    activePermissionProfiles.set(
+      message.params.threadId,
+      activePermissionProfile,
+    );
     respond(message.id, {
       activePermissionProfile: {
-        id: message.params.permissions ?? ":workspace",
+        id: activePermissionProfile,
       },
       approvalPolicy:
-        message.params.permissions === ":danger-full-access"
+        activePermissionProfile === ":danger-full-access"
           ? "never"
           : "on-request",
       cwd: "D:\\Fixture",
       sandbox: {
         type:
-          message.params.permissions === ":danger-full-access"
+          activePermissionProfile === ":danger-full-access"
             ? "dangerFullAccess"
             : "workspaceWrite",
       },
       thread: { id: message.params.threadId },
     });
+    return;
+  }
+
+  if (message.method === "thread/settings/update") {
+    if (!experimentalApi) {
+      respondError(message.id, -32600, "experimentalApi capability required");
+      return;
+    }
+    if (!hasExactKeys(message.params, ["permissions", "threadId"])) {
+      rejectUnexpectedParams(message);
+      return;
+    }
+    if (!activePermissionProfiles.has(message.params.threadId)) {
+      respondError(message.id, -32602, "thread is not loaded");
+      return;
+    }
+    activePermissionProfiles.set(
+      message.params.threadId,
+      message.params.permissions,
+    );
+    respond(message.id, {});
     return;
   }
 

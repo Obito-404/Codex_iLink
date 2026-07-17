@@ -22,6 +22,7 @@
 - Codex 网络或上游请求失败时向微信返回脱敏错误及可用的 HTTP 状态；失败前的部分文本不会伪装成成功回复
 - Windows 前台 Host、单实例控制管道、串行长轮询和优雅停止
 - 官方 iLink `notifyStart/notifyStop` 生命周期，以及 64 位 `message_id` 的无损解析和稳定去重
+- 微信回合确认开始后发送“正在输入”状态并每 5 秒续期；排队期间不显示，最后一个活动微信回合结束或 Bridge 关闭时取消
 - 微信入站图片下载、解密并持久化后作为 Codex `localImage` 输入；文件和视频作为本地 `mention` 输入
 - Codex 最终回复中独占一行的 Windows 本地 Markdown 文件链接会经微信 CDN 加密上传，作为图片、视频或普通附件发送
 - 语音优先使用微信 wire 中的 `voice_item.text` 作为文本；没有转写时明确拒绝，不把 SILK 转 WAV 冒充语音识别

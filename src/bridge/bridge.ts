@@ -58,8 +58,11 @@ import {
   type InboundMediaResolution,
 } from "../media/inbound-media.ts";
 import { CodexOutcomeUnknownError } from "../codex/protocol.ts";
+import type { SendTypingInput } from "../ilink/ilink-client.ts";
 
-export type ILinkSender = OutboxILinkSender;
+export type ILinkSender = OutboxILinkSender & {
+  sendTyping?(input: SendTypingInput): Promise<boolean>;
+};
 
 export type BridgeEngineOptions = {
   bridgeInstanceId?: string;
@@ -153,6 +156,7 @@ type CodexTurnFailure = {
 const MAX_ACTIVE_BRIDGE_TURNS = 3;
 const MAX_REMEMBERED_CODEX_FAILURES = 256;
 const DEFAULT_SLOW_TURN_NOTICE_AFTER_MS = 2 * 60 * 1_000;
+const TYPING_KEEPALIVE_INTERVAL_MS = 5_000;
 const CODEX_OUTCOME_UNKNOWN_TEXT =
   "E_CODEX_OUTCOME_UNKNOWN：提交结果未知，请在 Desktop 查看后决定是否重发。";
 const CODEX_EMPTY_REPLY_TEXT =
@@ -183,9 +187,16 @@ export class BridgeEngine {
   readonly #slowTurnNoticeAfterMs: number;
   readonly #state: SqliteState;
   readonly #turnFailures = new Map<string, CodexTurnFailure>();
+  readonly #typingTurns = new Set<string>();
   #closing = false;
   #ilinkHealthy = true;
   #reconcilePromise: Promise<void> | undefined;
+  #typingContextToken: string | undefined;
+  #typingKeepalive: ReturnType<typeof setInterval> | undefined;
+  #pendingTyping:
+    | { contextToken: string; status: "cancel" | "typing" }
+    | undefined;
+  #typingPumpRunning = false;
 
   constructor(options: BridgeEngineOptions) {
     this.#bridgeInstanceId = options.bridgeInstanceId;
@@ -386,6 +397,7 @@ export class BridgeEngine {
       await this.#cleanupMedia(dispatch.dedupeKey);
       this.#turnFailures.delete(turnFailureKey(threadId, turnId));
       await this.#drainQueuedTurns();
+      this.#finishTyping(turnId);
       return true;
     }
 
@@ -479,7 +491,11 @@ export class BridgeEngine {
     try {
       await this.#sendFinalOutbox(finalOutbox);
     } finally {
-      await this.#drainQueuedTurns();
+      try {
+        await this.#drainQueuedTurns();
+      } finally {
+        this.#finishTyping(turnId);
+      }
     }
     return true;
   }
@@ -493,12 +509,15 @@ export class BridgeEngine {
   }
 
   beginShutdown(): void {
+    if (this.#closing) return;
     this.#closing = true;
+    this.#finishAllTyping();
   }
 
   async recoverPendingWork(): Promise<void> {
     this.#state.markPendingDispatchesUnknown(this.#now());
     await this.#persistRecoveredUnknownDiagnostics();
+    this.#restoreTyping();
     await this.reconcilePendingWork();
     for (const inbound of this.#state.listInboundMessages()) {
       if (inbound.body === null) continue;
@@ -1582,6 +1601,7 @@ export class BridgeEngine {
       return 1;
     }
     this.#state.markDispatchAccepted(operationId, started.turn.id, this.#now());
+    this.#beginTyping(started.turn.id, input.contextToken);
     this.#clearInbound(input.messageId);
     return 0;
   }
@@ -1923,6 +1943,94 @@ export class BridgeEngine {
         started.turn.id,
         this.#now(),
       );
+      this.#beginTyping(started.turn.id, contextToken);
+    }
+  }
+
+  #beginTyping(turnId: string, contextToken: string): void {
+    if (this.#closing || !this.#ilink.sendTyping) return;
+    const wasIdle = this.#typingTurns.size === 0;
+    this.#typingTurns.add(turnId);
+    this.#typingContextToken = contextToken;
+    if (!wasIdle) return;
+
+    this.#typingKeepalive = setInterval(() => {
+      if (this.#typingTurns.size > 0) this.#queueTyping("typing");
+    }, TYPING_KEEPALIVE_INTERVAL_MS);
+    this.#typingKeepalive.unref();
+    this.#queueTyping("typing");
+  }
+
+  #finishTyping(turnId: string): void {
+    if (!this.#typingTurns.delete(turnId) || this.#typingTurns.size > 0) return;
+    this.#clearTypingKeepalive();
+    this.#queueTyping("cancel");
+  }
+
+  #finishAllTyping(): void {
+    if (this.#typingTurns.size === 0) {
+      this.#clearTypingKeepalive();
+      return;
+    }
+    this.#typingTurns.clear();
+    this.#clearTypingKeepalive();
+    this.#queueTyping("cancel");
+  }
+
+  #restoreTyping(): void {
+    for (const dispatch of this.#state.listUnresolvedDispatchIntents()) {
+      if (
+        dispatch.status === "accepted" &&
+        dispatch.completedAtMs === null &&
+        dispatch.turnId &&
+        dispatch.contextToken
+      ) {
+        this.#beginTyping(dispatch.turnId, dispatch.contextToken);
+      }
+    }
+  }
+
+  #clearTypingKeepalive(): void {
+    if (this.#typingKeepalive === undefined) return;
+    clearInterval(this.#typingKeepalive);
+    this.#typingKeepalive = undefined;
+  }
+
+  #queueTyping(status: "cancel" | "typing"): void {
+    const contextToken = this.#typingContextToken;
+    const sendTyping = this.#ilink.sendTyping;
+    if (!contextToken || !sendTyping) return;
+
+    this.#pendingTyping = { contextToken, status };
+    if (this.#typingPumpRunning) return;
+    this.#typingPumpRunning = true;
+    void this.#pumpTyping(sendTyping);
+  }
+
+  async #pumpTyping(
+    sendTyping: NonNullable<ILinkSender["sendTyping"]>,
+  ): Promise<void> {
+    try {
+      while (this.#pendingTyping) {
+        const pending = this.#pendingTyping;
+        this.#pendingTyping = undefined;
+        if (pending.status === "typing" && this.#typingTurns.size === 0) continue;
+        try {
+          await sendTyping.call(this.#ilink, {
+            contextToken: pending.contextToken,
+            session: this.#session,
+            status: pending.status,
+          });
+        } catch {
+          // Typing is best-effort UI state and must never affect turn delivery.
+        }
+      }
+    } finally {
+      this.#typingPumpRunning = false;
+      if (this.#pendingTyping) {
+        this.#typingPumpRunning = true;
+        void this.#pumpTyping(sendTyping);
+      }
     }
   }
 

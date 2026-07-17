@@ -47,6 +47,14 @@ type LifecycleInput = {
   timeoutMs?: number;
 };
 
+export type SendTypingInput = {
+  contextToken: string;
+  session: ILinkSession;
+  signal?: AbortSignal;
+  status: "cancel" | "typing";
+  timeoutMs?: number;
+};
+
 type SendTextIdentity = {
   contextToken: string;
   targetUserId: string;
@@ -100,6 +108,7 @@ export class ILinkClient {
   readonly #fetch: ILinkFetch;
   readonly #sendMediaFlights = new Map<string, SendMediaFlight>();
   readonly #sendTextFlights = new Map<string, SendTextFlight>();
+  readonly #typingTickets = new Map<string, Promise<string | null>>();
 
   constructor(options: ILinkClientOptions = {}) {
     this.#fetch = options.fetch ?? globalThis.fetch;
@@ -303,6 +312,108 @@ export class ILinkClient {
     assertHttpSuccess(operation, response);
     const body = await readResponseObject(operation, response);
     assertApiSuccess(operation, body);
+  }
+
+  async sendTyping(input: SendTypingInput): Promise<boolean> {
+    const ticket = await this.#typingTicket(input);
+    if (!ticket) return false;
+
+    const requestSignal = createRequestSignal(input.signal, input.timeoutMs ?? 10_000);
+    let response: Response;
+    try {
+      response = await this.#fetch(
+        endpointUrl(input.session.baseUrl, "ilink/bot/sendtyping"),
+        {
+          body: JSON.stringify({
+            ilink_user_id: input.session.controllerUserId,
+            typing_ticket: ticket,
+            status: input.status === "typing" ? 1 : 2,
+            base_info: buildBaseInfo(),
+          }),
+          headers: buildPostHeaders(input.session.botToken),
+          method: "POST",
+          signal: requestSignal.signal,
+        },
+      );
+    } catch (error) {
+      if (input.signal?.aborted) {
+        throw new ILinkError({
+          cause: error,
+          kind: "cancelled",
+          message: "sendTyping cancelled",
+        });
+      }
+      throw error;
+    } finally {
+      requestSignal.cleanup();
+    }
+    assertHttpSuccess("sendTyping", response);
+    const body = await readResponseObject("sendTyping", response);
+    try {
+      assertApiSuccess("sendTyping", body);
+    } catch (error) {
+      this.#typingTickets.delete(typingTicketKey(input.session));
+      throw error;
+    }
+    return true;
+  }
+
+  async #typingTicket(input: SendTypingInput): Promise<string | null> {
+    const key = typingTicketKey(input.session);
+    const existing = this.#typingTickets.get(key);
+    if (existing) return existing;
+
+    const pending = this.#fetchTypingTicket(input);
+    this.#typingTickets.set(key, pending);
+    try {
+      const ticket = await pending;
+      if (ticket === null && this.#typingTickets.get(key) === pending) {
+        this.#typingTickets.delete(key);
+      }
+      return ticket;
+    } catch (error) {
+      if (this.#typingTickets.get(key) === pending) {
+        this.#typingTickets.delete(key);
+      }
+      throw error;
+    }
+  }
+
+  async #fetchTypingTicket(input: SendTypingInput): Promise<string | null> {
+    const requestSignal = createRequestSignal(input.signal, input.timeoutMs ?? 10_000);
+    let response: Response;
+    try {
+      response = await this.#fetch(
+        endpointUrl(input.session.baseUrl, "ilink/bot/getconfig"),
+        {
+          body: JSON.stringify({
+            ilink_user_id: input.session.controllerUserId,
+            context_token: input.contextToken,
+            base_info: buildBaseInfo(),
+          }),
+          headers: buildPostHeaders(input.session.botToken),
+          method: "POST",
+          signal: requestSignal.signal,
+        },
+      );
+    } catch (error) {
+      if (input.signal?.aborted) {
+        throw new ILinkError({
+          cause: error,
+          kind: "cancelled",
+          message: "getConfig cancelled",
+        });
+      }
+      throw error;
+    } finally {
+      requestSignal.cleanup();
+    }
+    assertHttpSuccess("getConfig", response);
+    const body = await readResponseObject("getConfig", response);
+    assertApiSuccess("getConfig", body);
+    return typeof body.typing_ticket === "string" && body.typing_ticket.length > 0
+      ? body.typing_ticket
+      : null;
   }
 
   async prepareMedia(input: PrepareMediaInput): Promise<PreparedOutboundMedia> {
@@ -536,6 +647,10 @@ export class ILinkClient {
     assertApiSuccess(input.operation, body);
     return { accepted: true, clientId: input.clientId };
   }
+}
+
+function typingTicketKey(session: ILinkSession): string {
+  return `${session.baseUrl}\u0000${session.botId}\u0000${session.controllerUserId}`;
 }
 
 function uploadMediaType(kind: LocalOutboundMedia["kind"]): number {

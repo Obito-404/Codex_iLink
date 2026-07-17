@@ -1517,6 +1517,7 @@ test("startup reconciliation preserves a sanitized network failure over a partia
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
   const sent: SendInput[] = [];
+  const typing: Array<"cancel" | "typing"> = [];
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
   state.createDispatchIntent({
     body: "recover failed request",
@@ -1580,6 +1581,10 @@ test("startup reconciliation preserves a sanitized network failure over a partia
       },
     },
     ilink: {
+      async sendTyping(input) {
+        typing.push(input.status);
+        return true;
+      },
       async sendText(input) {
         sent.push(input);
         return { accepted: true, clientId: input.clientId };
@@ -1599,6 +1604,8 @@ test("startup reconciliation preserves a sanitized network failure over a partia
     assert.deepEqual(sent.map(({ text }) => text), [
       "❌ Codex 网络请求失败（HTTP 502）。请稍后重试。",
     ]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(typing, ["typing", "cancel"]);
     assert.doesNotMatch(sent[0]?.text ?? "", /secret|partial answer/u);
   } finally {
     bridge.close();
@@ -1614,6 +1621,7 @@ test("startup reconciliation reports an interrupted turn without forwarding comm
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
   const sent: SendInput[] = [];
+  const typing: Array<"cancel" | "typing"> = [];
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
   state.createDispatchIntent({
     body: "continue",
@@ -1666,6 +1674,10 @@ test("startup reconciliation reports an interrupted turn without forwarding comm
       },
     },
     ilink: {
+      async sendTyping(input) {
+        typing.push(input.status);
+        return true;
+      },
       async sendText(input) {
         sent.push(input);
         return { accepted: true, clientId: input.clientId };
@@ -1685,6 +1697,8 @@ test("startup reconciliation reports an interrupted turn without forwarding comm
     assert.deepEqual(sent.map(({ text }) => text), [
       "❌ Codex 任务已中断，未生成最终结果。请重试；详情请在 Codex Desktop 查看。",
     ]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(typing, ["typing", "cancel"]);
     assert.doesNotMatch(sent[0]?.text ?? "", /继续查看桌面/u);
   } finally {
     bridge.close();
@@ -2955,13 +2969,15 @@ test("a standalone Codex PDF link is delivered as a WeChat file", async () => {
   }
 });
 
-test("Bridge self-claims immediate and promoted turns and sends FIFO replies without Hook events", async () => {
+test("Bridge self-claims immediate and promoted turns and sends FIFO replies without Hook events", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-fifo-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
   const started: Array<Record<string, unknown>> = [];
   const sent: SendInput[] = [];
+  const typing: Array<{ contextToken: string; status: "cancel" | "typing" }> = [];
   let nextOperation = 1;
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
 
@@ -3010,6 +3026,11 @@ test("Bridge self-claims immediate and promoted turns and sends FIFO replies wit
       },
     },
     ilink: {
+      async sendTyping(input) {
+        typing.push({ contextToken: input.contextToken, status: input.status });
+        if (typing.length === 2) throw new Error("typing keepalive unavailable");
+        return true;
+      },
       async sendText(input) {
         sent.push(input);
         return { accepted: true, clientId: input.clientId };
@@ -3035,6 +3056,14 @@ test("Bridge self-claims immediate and promoted turns and sends FIFO replies wit
     assert.equal(leases.getLease("thread-main")?.instanceId, "bridge-instance");
     assert.equal(leases.getLease("thread-main")?.turnId, "turn-1");
     assert.equal(state.getDispatchIntentByTurnId("turn-1")?.status, "accepted");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(typing, [{ contextToken: "ctx-41", status: "typing" }]);
+    t.mock.timers.tick(5_000);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(typing, [
+      { contextToken: "ctx-41", status: "typing" },
+      { contextToken: "ctx-41", status: "typing" },
+    ]);
 
     assert.deepEqual(
       await bridge.ingestBatch({
@@ -3047,6 +3076,7 @@ test("Bridge self-claims immediate and promoted turns and sends FIFO replies wit
     assert.equal(state.countQueuedTurns(), 1);
     assert.equal(sent[0]?.contextToken, "ctx-42");
     assert.match(sent[0]?.text ?? "", /^Queued #\d+$/u);
+    assert.equal(typing.length, 2);
 
     assert.equal(
       await bridge.ingestCodexEvent({
@@ -3065,6 +3095,8 @@ test("Bridge self-claims immediate and promoted turns and sends FIFO replies wit
       "ctx-42",
     );
     assert.equal(state.getDispatchIntentByTurnId("turn-2")?.status, "accepted");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(typing.length, 2);
     const firstFinal = sent.find(
       ({ clientId }) => clientId === "codex-ilink:turn-1:final",
     );
@@ -3090,6 +3122,12 @@ test("Bridge self-claims immediate and promoted turns and sends FIFO replies wit
     );
     assert.equal(leases.getLease("thread-main"), null);
     assert.equal(state.countActiveDispatches(), 0);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(typing, [
+      { contextToken: "ctx-41", status: "typing" },
+      { contextToken: "ctx-41", status: "typing" },
+      { contextToken: "ctx-42", status: "cancel" },
+    ]);
     assert.deepEqual(
       sent
         .filter(({ clientId }) => clientId.endsWith(":final"))
@@ -3125,6 +3163,7 @@ test("Bridge starts at most three turns across different shared threads", async 
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
   const startedThreads: string[] = [];
+  const typing: Array<{ contextToken: string; status: "cancel" | "typing" }> = [];
   let nextOperation = 1;
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
 
@@ -3149,6 +3188,10 @@ test("Bridge starts at most three turns across different shared threads", async 
       },
     },
     ilink: {
+      async sendTyping(input) {
+        typing.push({ contextToken: input.contextToken, status: input.status });
+        return true;
+      },
       async sendText(input) {
         return { accepted: true, clientId: input.clientId };
       },
@@ -3178,6 +3221,12 @@ test("Bridge starts at most three turns across different shared threads", async 
     assert.deepEqual(startedThreads, ["thread-1", "thread-2", "thread-3"]);
     assert.equal(state.countActiveDispatches(), 3);
     assert.equal(state.peekQueuedTurn("thread-4")?.body, turnBody("request-4"));
+    bridge.beginShutdown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(typing, [
+      { contextToken: "ctx-51", status: "typing" },
+      { contextToken: "ctx-53", status: "cancel" },
+    ]);
   } finally {
     bridge.close();
     leases.close();

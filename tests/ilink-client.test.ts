@@ -385,6 +385,121 @@ test("notifyStop announces the authenticated bot after polling ends", async () =
   });
 });
 
+test("sendTyping fetches one ticket and sends typing then cancel statuses", async () => {
+  const requests: Array<{ init?: RequestInit; url: string }> = [];
+  const client = new ILinkClient({
+    fetch: async (input, init) => {
+      const url = String(input);
+      requests.push({ ...(init ? { init } : {}), url });
+      return url.endsWith("/ilink/bot/getconfig")
+        ? Response.json({ ret: 0, typing_ticket: "typing-ticket-1" })
+        : Response.json({ ret: 0 });
+    },
+  });
+  const session = {
+    baseUrl: "https://api.weixin.qq.com/base/",
+    botId: "bot-1",
+    botToken: "secret-token",
+    controllerUserId: "controller-1",
+  };
+
+  assert.equal(
+    await client.sendTyping({
+      contextToken: "context-1",
+      session,
+      status: "typing",
+    }),
+    true,
+  );
+  assert.equal(
+    await client.sendTyping({
+      contextToken: "context-2",
+      session,
+      status: "cancel",
+    }),
+    true,
+  );
+
+  assert.deepEqual(
+    requests.map(({ init, url }) => ({
+      body: JSON.parse(String(init?.body)),
+      method: init?.method,
+      url,
+    })),
+    [
+      {
+        body: {
+          base_info: {
+            bot_agent: "Codex-iLink/0.0.0",
+            channel_version: "2.4.6",
+          },
+          context_token: "context-1",
+          ilink_user_id: "controller-1",
+        },
+        method: "POST",
+        url: "https://api.weixin.qq.com/base/ilink/bot/getconfig",
+      },
+      {
+        body: {
+          base_info: {
+            bot_agent: "Codex-iLink/0.0.0",
+            channel_version: "2.4.6",
+          },
+          ilink_user_id: "controller-1",
+          status: 1,
+          typing_ticket: "typing-ticket-1",
+        },
+        method: "POST",
+        url: "https://api.weixin.qq.com/base/ilink/bot/sendtyping",
+      },
+      {
+        body: {
+          base_info: {
+            bot_agent: "Codex-iLink/0.0.0",
+            channel_version: "2.4.6",
+          },
+          ilink_user_id: "controller-1",
+          status: 2,
+          typing_ticket: "typing-ticket-1",
+        },
+        method: "POST",
+        url: "https://api.weixin.qq.com/base/ilink/bot/sendtyping",
+      },
+    ],
+  );
+});
+
+test("sendTyping reports caller cancellation while fetching its ticket", async () => {
+  const external = new AbortController();
+  external.abort("shutdown");
+  const client = new ILinkClient({
+    fetch: async (_input, init) => {
+      assert.equal(init?.signal?.aborted, true);
+      throw new DOMException("cancelled", "AbortError");
+    },
+  });
+
+  await assert.rejects(
+    client.sendTyping({
+      contextToken: "context-1",
+      session: {
+        baseUrl: "https://api.weixin.qq.com/base/",
+        botId: "bot-1",
+        botToken: "secret-token",
+        controllerUserId: "controller-1",
+      },
+      signal: external.signal,
+      status: "typing",
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "ILinkError");
+      assert.equal((error as Error & { kind?: string }).kind, "cancelled");
+      return true;
+    },
+  );
+});
+
 test("getUpdates rejects an application ret error without advancing the cursor", async () => {
   const client = new ILinkClient({
     fetch: async () =>

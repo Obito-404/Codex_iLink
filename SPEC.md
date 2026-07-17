@@ -27,7 +27,7 @@
 - Windows `GetLastInputInfo` 已在本机验证可读取键鼠空闲时间。
 - 腾讯维护的 iLink/OpenClaw 微信插件源码提供扫码、文本收发、`message_id`、`get_updates_buf` 长轮询游标和 `context_token`；本机已完成真实扫码绑定、无上下文主动测试消息、微信文本入站及 `/st` 回复验收。真实 `message_id` 为超出 JavaScript 安全整数的 64 位数字，Bridge 已在原始 JSON 解析阶段无损保留并以精确字符串去重。
 - 入站媒体 wire、CDN 下载和 AES 行为以腾讯官方 [`Tencent/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) `v2.4.6` 的固定提交 [`cef0bfc390393f716903e16d50408118047f87e0`](https://github.com/Tencent/openclaw-weixin/commit/cef0bfc390393f716903e16d50408118047f87e0) 为参考基线；该版本的 SILK → WAV 是转码，不是语音识别。
-- 当前稳定 Codex App Server 的 `turn/start.input` 支持 `localImage` 和本地 `mention`，不支持通用 audio、video 或 binary 输入；因此图片可原生提交，文件和视频只能引用本地路径，无转写语音不能直接进入现有回合协议。
+- 当前稳定 Codex App Server 的 `turn/start.input` 支持 `localImage` 和本地 `mention`，不支持通用 audio、video 或 binary 输入；因此图片可原生提交，文件和视频使用 `mention` 并附带明确的本机路径上下文，无转写语音不能直接进入现有回合协议。
 - Codex 官方 Remote 已能从 ChatGPT 手机端继续同一台主机的任务、审批和接收通知，但它不是微信入口，而且要求 Desktop 主机保持可用。
 
 ## 3. 架构
@@ -156,7 +156,7 @@ flowchart LR
 - 每条预览最多约 800 字；不显示推理、命令输出或工具调用。
 - 预览限制只影响微信展示，Codex 仍恢复原会话上下文。
 - 图片从受信 HTTPS 微信 CDN 下载、校验并落到 `%LOCALAPPDATA%\Codex_iLink\media\inbound`，再作为 Codex `localImage` 输入提交。
-- 文件和视频下载后作为本地 `mention(name, path)` 提交；`mention` 不是通用二进制上传，Codex 能否读取取决于目标会话 Sandbox、审批策略和具体文件格式能力。
+- 文件和视频下载后作为本地 `mention(name, path)` 提交，同时加入包含种类、名称和路径的可信边界提示，避免 App Server 未展开独立 `mention` 时形成空回合；`mention` 不是通用二进制上传，Codex 能否读取仍取决于目标会话 Sandbox、审批策略和具体文件格式能力。
 - 每条消息只选择一个媒体：主消息在带 CDN 下载引用的媒体中使用官方固定优先级 `IMAGE > VIDEO > FILE > 无转写 VOICE`，只有主消息没有可下载媒体时才选择第一个引用媒体。
 - 语音优先使用 wire 中的 `voice_item.text` 作为文本；引用语音已有的转写作为引用上下文保留。没有转写时明确回复不支持且不提交回合；腾讯官方固定版本的 SILK → WAV 只是音频转码，不是 ASR，不能替代缺失的转写。
 - 单个媒体上限为 100 MiB；仅接受 HTTPS 微信 CDN 白名单地址和受限重定向。加密载荷使用 AES-128-ECB + PKCS#7，图片兼容官方允许的无密钥明文载荷；密钥格式、目标路径和文件名都必须校验。
@@ -277,7 +277,7 @@ flowchart LR
 17. 没有显式绑定时，单个通知回复窗口内的文本会继续正确来源会话；多个窗口并存时不会静默选错会话。
 18. `/p` 与 Desktop 已保存项目集合及顺序一致，只显示名称；未保存的历史任务目录和完整项目路径不会出现在回复中。
 19. 控制者单聊图片经 HTTPS 微信 CDN 下载、必要时 AES-128-ECB 解密并作为 `localImage` 提交；同一消息在可下载媒体中按官方优先级只选择一个主媒体，引用媒体仅在主消息没有可下载媒体时回退；明文或解密后的单文件超过 100 MiB 时拒绝且不留下部分文件。
-20. 文件和视频经持久化队列恢复后仍以 `mention(name, path)` 提交；不把 `mention` 宣传为通用附件上传，也不为读取附件提升目标会话权限；能否读取及失败表现以 Codex 实际结果为准。
+20. 文件和视频经持久化队列恢复后仍以 `mention(name, path)` 和明确的本机路径上下文提交；不把 `mention` 宣传为通用附件上传，也不为读取附件提升目标会话权限；能否读取及失败表现以 Codex 实际结果为准。
 21. 有 `voice_item.text` 的语音只提交转写文本，引用语音已有的转写不会丢失；无转写语音明确拒绝，不把 SILK → WAV 描述为语音识别。
 22. 媒体下载、HTTP、超时、大小、URL、解密和落盘失败都产生明确脱敏微信回复，不提交空回合；错误与日志不泄露 CDN query 或密钥。
 23. 版本化媒体 payload 能跨 `inbound_messages`、`queued_turns`、`dispatch_intents` 和进程重启恢复；媒体文件保留到回合终态或未知提交完成对账，孤儿目录可安全清理。

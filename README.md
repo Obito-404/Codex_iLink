@@ -23,7 +23,7 @@
 - Windows 前台 Host、单实例控制管道、串行长轮询和优雅停止
 - 官方 iLink `notifyStart/notifyStop` 生命周期，以及 64 位 `message_id` 的无损解析和稳定去重
 - 微信回合确认开始后发送“正在输入”状态并每 5 秒续期；排队期间不显示，最后一个活动微信回合结束或 Bridge 关闭时取消
-- 微信入站图片下载、解密并持久化后作为 Codex `localImage` 输入；文件和视频作为本地 `mention` 输入
+- 微信入站图片下载、解密并持久化后作为 Codex `localImage` 输入；文件和视频同时作为本地 `mention` 与明确的本机路径上下文输入，避免附件静默变成空回合
 - Codex 最终回复中独占一行的 Windows 本地 Markdown 文件链接会经微信 CDN 加密上传，作为图片、视频或普通附件发送
 - 语音优先使用微信 wire 中的 `voice_item.text` 作为文本；没有转写时明确拒绝，不把 SILK 转 WAV 冒充语音识别
 
@@ -83,7 +83,7 @@ Bridge 启动 App Server 时只声明 Codex 权限 Profile API 所要求的 `exp
 媒体协议、加解密与上传行为参照腾讯官方 [`Tencent/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) `v2.4.6` 的固定提交 [`cef0bfc390393f716903e16d50408118047f87e0`](https://github.com/Tencent/openclaw-weixin/commit/cef0bfc390393f716903e16d50408118047f87e0)，不是跟随远端 `main` 漂移：
 
 - 图片保存到 `%LOCALAPPDATA%\Codex_iLink\media\inbound` 后，通过 Codex App Server 的 `localImage` 输入提交。
-- 文件和视频通过本地 `mention` 提交。`mention` 只是路径引用，能否读取取决于目标任务的 Sandbox、审批策略和 Codex 对具体格式的处理能力，不承诺任意附件都能解析。
+- 文件和视频通过本地 `mention` 提交，并同时加入明确的本机路径上下文，使 Codex 即使未展开 `mention` 也能识别并按需读取附件。路径读取仍受目标任务的 Sandbox 和审批策略约束，也不承诺任意附件格式都能解析。
 - 与官方固定版本一致，每条微信消息只选择一个媒体：主消息在带 CDN 下载引用的媒体中按 `图片 > 视频 > 文件 > 无转写语音` 选择，主消息没有可下载媒体时才回退到引用媒体；不会把同一条消息里的多个附件全部提交。
 - 语音有 `voice_item.text` 时按微信提供的转写文本提交，引用语音的已有转写也会保留为引用上下文；没有转写时明确回复暂不支持。官方项目的 SILK → WAV 仅是音频转码，不是 ASR，不能产生文字。
 - 每个媒体文件最多 100 MiB；只接受 HTTPS 微信 CDN 白名单地址。加密媒体按官方格式使用 AES-128-ECB + PKCS#7 解密，图片也兼容官方允许的明文载荷。

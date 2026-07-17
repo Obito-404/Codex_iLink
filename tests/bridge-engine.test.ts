@@ -2873,7 +2873,7 @@ test("a standalone Codex PDF link is delivered as a WeChat file", async () => {
                 items: [
                   {
                     phase: "final_answer",
-                    text: `已发给你。\n[报销单.pdf](<${markdownPath}>)`,
+                    text: `已发给你。\n[下载 v1.0](<${markdownPath}>)`,
                     type: "agentMessage",
                   },
                 ],
@@ -2945,7 +2945,7 @@ test("a standalone Codex PDF link is delivered as a WeChat file", async () => {
       }),
       true,
     );
-    assert.deepEqual(order, ["media:报销单.pdf", "text:已发给你。"]);
+    assert.deepEqual(order, ["media:下载 v1.0.pdf", "text:已发给你。"]);
     assert.equal(state.listPendingOutbox().length, 0);
   } finally {
     bridge.close();

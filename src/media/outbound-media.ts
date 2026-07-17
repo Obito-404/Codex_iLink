@@ -146,7 +146,17 @@ export function outboundMediaKind(path: string): OutboundMediaKind {
 
 function sanitizeMediaName(label: string, fallback: string): string {
   const candidate = win32.basename(label.trim()) || fallback;
-  return candidate.replace(/[\u0000-\u001f<>:"/\\|?*]/gu, "_").slice(0, 240) || fallback;
+  const sanitized = candidate.replace(/[\u0000-\u001f<>:"/\\|?*]/gu, "_") || fallback;
+  const sourceExtension = win32.extname(fallback);
+  if (!sourceExtension) return sanitized.slice(0, 240);
+  const preservedExtension = sourceExtension.slice(0, 239);
+  const labelHasSourceExtension = sanitized
+    .toLowerCase()
+    .endsWith(sourceExtension.toLowerCase());
+  const stem = labelHasSourceExtension
+    ? sanitized.slice(0, -sourceExtension.length)
+    : sanitized;
+  return `${stem.slice(0, 240 - preservedExtension.length)}${preservedExtension}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

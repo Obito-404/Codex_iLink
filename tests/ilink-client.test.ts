@@ -937,6 +937,79 @@ test("media follows the official encrypted CDN upload and structured item flow",
   assert.equal(image.mid_size, 32);
 });
 
+test("a local PDF follows the complete ordinary file upload flow", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-outbound-pdf-"));
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const filePath = join(directory, "报销单.pdf");
+  const plaintext = Buffer.from("%PDF-1.4\n% fixture");
+  writeFileSync(filePath, plaintext);
+  let uploadRequest: Record<string, unknown> | undefined;
+  let sendRequest: Record<string, unknown> | undefined;
+  const client = new ILinkClient({
+    fetch: async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/ilink/bot/getuploadurl")) {
+        uploadRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({
+          upload_full_url:
+            "https://novac2c.cdn.weixin.qq.com/c2c/upload?ticket=pdf",
+        });
+      }
+      if (url.includes("novac2c.cdn.weixin.qq.com/c2c/upload")) {
+        return new Response(null, {
+          headers: { "x-encrypted-param": "pdf-download-param" },
+          status: 200,
+        });
+      }
+      if (url.endsWith("/ilink/bot/sendmessage")) {
+        sendRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ ret: 0 });
+      }
+      throw new Error(`unexpected request ${url}`);
+    },
+  });
+  const session = {
+    baseUrl: "https://api.weixin.qq.com/",
+    botId: "bot-1",
+    botToken: "secret-token",
+    controllerUserId: "controller-1",
+  };
+
+  const prepared = await client.prepareMedia({
+    media: {
+      kind: "file",
+      name: "报销单.pdf",
+      path: filePath,
+      type: "local-media",
+      v: 1,
+    },
+    session,
+  });
+  await client.sendMedia({
+    clientId: "codex-ilink:pdf-1",
+    contextToken: "ctx-pdf",
+    media: prepared,
+    session,
+  });
+
+  assert.equal(uploadRequest?.media_type, 3);
+  assert.equal(uploadRequest?.rawsize, plaintext.length);
+  const message = sendRequest?.msg as Record<string, unknown>;
+  const item = (message.item_list as Array<Record<string, unknown>>)[0];
+  assert.deepEqual(item, {
+    file_item: {
+      file_name: "报销单.pdf",
+      len: String(plaintext.length),
+      media: {
+        aes_key: prepared.aesKeyBase64,
+        encrypt_query_param: "pdf-download-param",
+        encrypt_type: 1,
+      },
+    },
+    type: 4,
+  });
+});
+
 test("prepared videos and ordinary attachments use the official item fields", async () => {
   const requests: Array<Record<string, unknown>> = [];
   const client = new ILinkClient({

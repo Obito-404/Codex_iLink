@@ -3486,7 +3486,7 @@ test("a live Bridge approval can be decided once from WeChat", async () => {
       messages: [textMessage(31, "ok")],
     });
     assert.deepEqual(responses, [{ id: 77, result: { decision: "accept" } }]);
-    assert.equal(sent.at(-1)?.text, "已批准。" );
+    assert.equal(sent.length, 1);
 
     for (const [id, itemId, command] of [
       [78, "item-multiple-a", "pnpm test"],
@@ -3523,7 +3523,7 @@ test("a live Bridge approval can be decided once from WeChat", async () => {
       id: 78,
       result: { decision: "accept" },
     });
-    assert.equal(sent.at(-1)?.text, "已批准。" );
+    assert.equal(sent.at(-1)?.text, ambiguous);
   } finally {
     bridge.close();
     state.close();

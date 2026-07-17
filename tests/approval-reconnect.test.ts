@@ -107,11 +107,11 @@ test("an approval remains approvable when only the turn start response times out
     const status = sent.find((text) => text.includes("待审批：")) ?? "";
     assert.deepEqual(
       {
-        approvalReply: sent.at(-1),
+        approvalReply: sent.find((text) => text === "已批准。"),
         pendingCount: /待审批：(\d+)/u.exec(status)?.[1],
       },
       {
-        approvalReply: "已批准。",
+        approvalReply: undefined,
         pendingCount: "1",
       },
     );

@@ -758,11 +758,13 @@ export class BridgeEngine {
       intent.code,
       intent.kind === "approve",
     );
+    if (decision?.kind === "decided" && intent.kind === "approve") {
+      this.#clearInbound(input.messageId);
+      return 0;
+    }
     const reply =
       decision?.kind === "decided"
-        ? intent.kind === "approve"
-          ? "已批准。"
-          : "已拒绝。"
+        ? "已拒绝。"
         : decision?.kind === "ambiguous"
           ? formatAmbiguousApprovals(decision.approvals)
           : intent.code

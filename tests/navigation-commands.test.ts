@@ -411,13 +411,26 @@ test("stop interrupts the active WeChat turn in the current session", async () =
       threadId: "thread-running",
     });
     state.markDispatchAccepted("operation-running", "turn-running", 901);
+    codex.onInterrupt = async ({ threadId, turnId }) => {
+      await bridge.ingestCodexEvent({
+        method: "turn/completed",
+        params: {
+          threadId,
+          turn: { id: turnId, status: "interrupted" },
+        },
+      });
+    };
 
     await ingest(bridge, 41, "stop");
 
     assert.deepEqual(codex.interruptedTurns, [
       { threadId: "thread-running", turnId: "turn-running" },
     ]);
-    assert.equal(sent[0]?.text, "已请求停止当前任务。");
+    assert.deepEqual(sent.map(({ text }) => text), ["已请求停止当前任务。"]);
+    assert.equal(
+      state.getDispatchIntent("operation-running")?.completedAtMs,
+      1_000,
+    );
   });
 });
 
@@ -982,6 +995,9 @@ class FakeNavigationCodex implements CodexTurnStarter {
   compactError: Error | undefined;
   interruptedTurns: Array<{ threadId: string; turnId: string }> = [];
   interruptError: Error | undefined;
+  onInterrupt:
+    | ((input: { threadId: string; turnId: string }) => Promise<void> | void)
+    | undefined;
   startedCwds: string[] = [];
   startedTurns: Array<{ text: string; threadId: string }> = [];
   readonly loadedThreadIds = new Set<string>();
@@ -1023,6 +1039,7 @@ class FakeNavigationCodex implements CodexTurnStarter {
   }): Promise<Record<string, unknown>> {
     if (this.interruptError) throw this.interruptError;
     this.interruptedTurns.push(input);
+    await this.onInterrupt?.(input);
     return {};
   }
 

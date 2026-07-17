@@ -192,6 +192,7 @@ export class BridgeEngine {
   readonly #slowTurnNoticeAfterMs: number;
   readonly #state: SqliteState;
   readonly #turnFailures = new Map<string, CodexTurnFailure>();
+  readonly #userStoppedTurns = new Set<string>();
   readonly #clearOperations = new Map<string, string>();
   readonly #compactOperations = new Map<
     string,
@@ -453,6 +454,7 @@ export class BridgeEngine {
     if (!dispatch || dispatch.status !== "accepted" || dispatch.threadId !== threadId) {
       return false;
     }
+    const stoppedTurnKey = turnFailureKey(threadId, turnId);
     const existingFinalOutbox = this.#finalReplyOutbox(turnId);
     if (
       dispatch.completedAtMs !== null &&
@@ -461,6 +463,7 @@ export class BridgeEngine {
     ) {
       await this.#cleanupMedia(dispatch.dedupeKey);
       this.#turnFailures.delete(turnFailureKey(threadId, turnId));
+      this.#userStoppedTurns.delete(stoppedTurnKey);
       await this.#drainQueuedTurns();
       this.#finishTyping(turnId);
       return true;
@@ -494,10 +497,15 @@ export class BridgeEngine {
     const persistedTurn = readThread
       ? findThreadTurn(readThread, turnId)
       : undefined;
+    const effectiveCompletionStatus =
+      completionStatus ??
+      (persistedTurn ? stringField(persistedTurn, "status") : null);
+    const suppressInterruptedFinal =
+      effectiveCompletionStatus === "interrupted" &&
+      this.#userStoppedTurns.has(stoppedTurnKey);
     const failureText = mustPersistFinal
       ? formatCodexTurnFailure(
-          completionStatus ??
-            (persistedTurn ? stringField(persistedTurn, "status") : null),
+          effectiveCompletionStatus,
           completionError ??
             (persistedTurn ? objectField(persistedTurn, "error") : undefined),
           rememberedFailure,
@@ -508,7 +516,7 @@ export class BridgeEngine {
       dispatch.contextToken ||
       this.#state.getILinkState(this.#session.botId)?.contextToken;
     const finalOutboxInput =
-      mustPersistFinal && contextToken
+      mustPersistFinal && contextToken && !suppressInterruptedFinal
         ? this.#finalReplyInput(
             contextToken,
             failureText ??
@@ -553,6 +561,7 @@ export class BridgeEngine {
     }
     await this.#cleanupMedia(dispatch.dedupeKey);
     this.#turnFailures.delete(turnFailureKey(threadId, turnId));
+    this.#userStoppedTurns.delete(stoppedTurnKey);
     try {
       await this.#sendFinalOutbox(finalOutbox);
     } finally {
@@ -1423,12 +1432,19 @@ export class BridgeEngine {
       }
       return "当前会话没有正在执行的微信任务。";
     }
+    const stoppedTurnKey = turnFailureKey(threadId, turnId);
+    this.#userStoppedTurns.add(stoppedTurnKey);
+    if (this.#userStoppedTurns.size > MAX_REMEMBERED_CODEX_FAILURES) {
+      const oldest = this.#userStoppedTurns.values().next().value;
+      if (oldest !== undefined) this.#userStoppedTurns.delete(oldest);
+    }
     try {
       await this.#codex.interruptTurn({ threadId, turnId });
     } catch (error) {
       if (error instanceof CodexOutcomeUnknownError) {
         return "停止请求结果未知，请在 Desktop 查看当前任务状态。";
       }
+      this.#userStoppedTurns.delete(stoppedTurnKey);
       throw error;
     }
     return "已请求停止当前任务。";

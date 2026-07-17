@@ -3525,6 +3525,16 @@ test("live Bridge approvals are decided silently from WeChat", async () => {
       result: { decision: "accept" },
     });
     assert.equal(sent.at(-1)?.text, ambiguous);
+
+    await bridge.ingestBatch({
+      cursor: "cursor-denied-approval",
+      messages: [textMessage(34, "no")],
+    });
+    assert.deepEqual(responses.at(-1), {
+      id: 79,
+      result: { decision: "decline" },
+    });
+    assert.equal(sent.at(-1)?.text, ambiguous);
   } finally {
     bridge.close();
     state.close();

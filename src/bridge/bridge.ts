@@ -758,18 +758,16 @@ export class BridgeEngine {
       intent.code,
       intent.kind === "approve",
     );
-    if (decision?.kind === "decided" && intent.kind === "approve") {
+    if (decision?.kind === "decided") {
       this.#clearInbound(input.messageId);
       return 0;
     }
     const reply =
-      decision?.kind === "decided"
-        ? "已拒绝。"
-        : decision?.kind === "ambiguous"
-          ? formatAmbiguousApprovals(decision.approvals)
-          : intent.code
-            ? `审批 ${intent.code} 已失效或不存在。`
-            : "当前没有待审批。";
+      decision?.kind === "ambiguous"
+        ? formatAmbiguousApprovals(decision.approvals)
+        : intent.code
+          ? `审批 ${intent.code} 已失效或不存在。`
+          : "当前没有待审批。";
     return this.#replyToCommand(input.contextToken, input.messageId, reply);
   }
 

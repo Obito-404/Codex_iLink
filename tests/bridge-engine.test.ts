@@ -2873,7 +2873,7 @@ test("a standalone Codex PDF link is delivered as a WeChat file", async () => {
                 items: [
                   {
                     phase: "final_answer",
-                    text: `已发给你。\n[下载 v1.0](<${markdownPath}>)`,
+                    text: `已发给你。\n[下载 v1.0](<${markdownPath}>) 📄`,
                     type: "agentMessage",
                   },
                 ],

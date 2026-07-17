@@ -15,7 +15,7 @@ test("controller identity and database configuration survive reopening", () => {
     const first = new SqliteState(path);
     assert.deepEqual(first.storageDiagnostics(), {
       journalMode: "wal",
-      schemaVersion: 8,
+      schemaVersion: 9,
       synchronous: "full",
     });
     assert.deepEqual(
@@ -609,6 +609,102 @@ test("dispatch intents discard message bodies after accepted or unknown outcomes
   }
 });
 
+test("outbound attachment intents survive restart and deduplicate call retries", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-attachment-"));
+  const path = join(directory, "state.db");
+  let state = new SqliteState(path);
+
+  try {
+    state.createDispatchIntent({
+      body: "send the report",
+      contextToken: "context-attachment",
+      createdAtMs: 100,
+      dedupeKey: "bot/user/attachment",
+      operationId: "dispatch-attachment",
+      threadId: "thread-attachment",
+    });
+    state.markDispatchAccepted(
+      "dispatch-attachment",
+      "turn-attachment",
+      101,
+    );
+    const input = {
+      callId: "call-attachment",
+      createdAtMs: 102,
+      kind: "file" as const,
+      name: "report.xlsx",
+      operationId: "dispatch-attachment",
+      path: "C:\\Reports\\report.xlsx",
+      threadId: "thread-attachment",
+      turnId: "turn-attachment",
+    };
+    const first = state.registerOutboundAttachmentIntent(input);
+
+    assert.deepEqual(state.registerOutboundAttachmentIntent(input), first);
+    assert.deepEqual(
+      state.registerOutboundAttachmentIntent({
+        ...input,
+        callId: "call-retry",
+      }),
+      first,
+    );
+    state.close();
+
+    state = new SqliteState(path);
+    assert.deepEqual(state.listOutboundAttachmentIntents("turn-attachment"), [
+      first,
+    ]);
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("outbound attachment intents reject call collisions and a third file", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-attachment-limit-"));
+  const state = new SqliteState(join(directory, "state.db"));
+
+  try {
+    state.createDispatchIntent({
+      body: "send files",
+      createdAtMs: 100,
+      dedupeKey: "bot/user/attachment-limit",
+      operationId: "dispatch-attachment-limit",
+      threadId: "thread-attachment-limit",
+    });
+    state.markDispatchAccepted(
+      "dispatch-attachment-limit",
+      "turn-attachment-limit",
+      101,
+    );
+    const register = (callId: string, name: string) =>
+      state.registerOutboundAttachmentIntent({
+        callId,
+        createdAtMs: 102,
+        kind: "file",
+        name,
+        operationId: "dispatch-attachment-limit",
+        path: `C:\\Reports\\${name}`,
+        threadId: "thread-attachment-limit",
+        turnId: "turn-attachment-limit",
+      });
+
+    register("call-a", "a.xlsx");
+    assert.throws(
+      () => register("call-a", "collision.xlsx"),
+      /E_OUTBOUND_ATTACHMENT_CALL_ID_COLLISION/u,
+    );
+    register("call-b", "b.xlsx");
+    assert.throws(
+      () => register("call-c", "c.xlsx"),
+      /E_OUTBOUND_ATTACHMENT_TOO_MANY_ATTACHMENTS/u,
+    );
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("dispatch completion and every final reply part commit in one transaction", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-atomic-final-"));
   const state = new SqliteState(join(directory, "state.db"));
@@ -623,6 +719,16 @@ test("dispatch completion and every final reply part commit in one transaction",
       threadId: "thread-final",
     });
     state.markDispatchAccepted("dispatch-final", "turn-final", 101);
+    state.registerOutboundAttachmentIntent({
+      callId: "call-final",
+      createdAtMs: 102,
+      kind: "file",
+      name: "report.xlsx",
+      operationId: "dispatch-final",
+      path: "C:\\Reports\\report.xlsx",
+      threadId: "thread-final",
+      turnId: "turn-final",
+    });
     state.enqueueOutbox({
       body: "collision",
       clientId: "codex-ilink:turn-final:final:part:2",
@@ -658,6 +764,7 @@ test("dispatch completion and every final reply part commit in one transaction",
     );
     assert.equal(state.getDispatchIntent("dispatch-final")?.completedAtMs, null);
     assert.equal(state.getOutbox("codex-ilink:turn-final:final:part:1"), null);
+    assert.equal(state.listOutboundAttachmentIntents("turn-final").length, 1);
   } finally {
     state.close();
     rmSync(directory, { force: true, recursive: true });
@@ -682,6 +789,16 @@ test("atomic final completion is idempotent with confirmed and pending parts", (
       "turn-final-idempotent",
       101,
     );
+    state.registerOutboundAttachmentIntent({
+      callId: "call-final-idempotent",
+      createdAtMs: 102,
+      kind: "file",
+      name: "report.xlsx",
+      operationId: "dispatch-final-idempotent",
+      path: "C:\\Reports\\report.xlsx",
+      threadId: "thread-final-idempotent",
+      turnId: "turn-final-idempotent",
+    });
     const outbox = ["part one", "part two"].map((body, index) => ({
       body,
       clientId: `codex-ilink:turn-final-idempotent:final:part:${String(index + 1)}`,
@@ -695,6 +812,10 @@ test("atomic final completion is idempotent with confirmed and pending parts", (
       outbox,
       turnId: "turn-final-idempotent",
     });
+    assert.deepEqual(
+      state.listOutboundAttachmentIntents("turn-final-idempotent"),
+      [],
+    );
     state.confirmOutbox(outbox[0]!.clientId, 103);
 
     const repeated = state.completeDispatchWithOutbox({
@@ -870,7 +991,7 @@ test("schema v6 deletes legacy plain-text scheduler payloads", () => {
     database.close();
 
     const state = new SqliteState(path);
-    assert.equal(state.storageDiagnostics().schemaVersion, 8);
+    assert.equal(state.storageDiagnostics().schemaVersion, 9);
     assert.deepEqual(state.listQueuedTurns(), []);
     assert.equal(state.getDispatchIntent("legacy-operation"), null);
     assert.equal(state.countActiveDispatches(), 0);

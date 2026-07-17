@@ -1464,6 +1464,16 @@ test("an upstream HTTP failure is reported instead of looking like a normal comp
       cursor: "cursor-http-403",
       messages: [textMessage(21, "测试网络错误")],
     });
+    state.registerOutboundAttachmentIntent({
+      callId: "call-http-403",
+      createdAtMs: 3_500,
+      kind: "file",
+      name: "must-not-send.txt",
+      operationId: "dispatch-http-403",
+      path: "C:\\Reports\\must-not-send.txt",
+      threadId: "thread-main",
+      turnId: "turn-http-403",
+    });
     assert.equal(
       await bridge.ingestCodexEvent({
         method: "error",
@@ -1515,6 +1525,10 @@ test("an upstream HTTP failure is reported instead of looking like a normal comp
     );
     assert.doesNotMatch(sent[0]?.text ?? "", /任务已结束/u);
     assert.doesNotMatch(sent[0]?.text ?? "", /secret/u);
+    assert.deepEqual(
+      state.listOutboundAttachmentIntents("turn-http-403"),
+      [],
+    );
   } finally {
     bridge.close();
     leases.close();
@@ -1644,6 +1658,16 @@ test("startup reconciliation reports an interrupted turn without forwarding comm
     threadId: "thread-interrupted",
   });
   state.markDispatchAccepted("interrupted-operation", "turn-interrupted", 101);
+  state.registerOutboundAttachmentIntent({
+    callId: "call-interrupted",
+    createdAtMs: 102,
+    kind: "file",
+    name: "must-not-send.txt",
+    operationId: "interrupted-operation",
+    path: "C:\\Reports\\must-not-send.txt",
+    threadId: "thread-interrupted",
+    turnId: "turn-interrupted",
+  });
   leases.tryAcquire({
     createdAtMs: 100,
     instanceId: "old-instance",
@@ -1712,6 +1736,10 @@ test("startup reconciliation reports an interrupted turn without forwarding comm
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.deepEqual(typing, ["typing", "cancel"]);
     assert.doesNotMatch(sent[0]?.text ?? "", /继续查看桌面/u);
+    assert.deepEqual(
+      state.listOutboundAttachmentIntents("turn-interrupted"),
+      [],
+    );
   } finally {
     bridge.close();
     leases.close();
@@ -2973,6 +3001,434 @@ test("a standalone Codex PDF link is delivered as a WeChat file", async () => {
     );
     assert.deepEqual(order, ["media:下载 v1.0.pdf", "text:已发给你。"]);
     assert.equal(state.listPendingOutbox().length, 0);
+  } finally {
+    bridge.close();
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("send_file registers and delivers one attachment for the accepted Bridge turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-send-file-"));
+  const databasePath = join(directory, "state.sqlite");
+  const filePath = join(directory, "report.xlsx");
+  const markdownPath = filePath.replaceAll("\\", "/");
+  const vanishingPath = join(directory, "vanishing.pdf");
+  writeFileSync(filePath, "fixture workbook");
+  writeFileSync(vanishingPath, "%PDF fixture");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const responses: Array<{
+    id: number | string;
+    result: Record<string, unknown>;
+  }> = [];
+  const delivered: string[] = [];
+  state.createDispatchIntent({
+    body: "send the report",
+    contextToken: "context-send-file",
+    createdAtMs: 100,
+    dedupeKey: "bot/user/send-file",
+    operationId: "operation-send-file",
+    threadId: "thread-send-file",
+  });
+  state.markDispatchAccepted("operation-send-file", "turn-send-file", 101);
+  assert.equal(
+    leases.tryAcquire({
+      createdAtMs: 100,
+      instanceId: "bridge-instance",
+      operationId: "operation-send-file",
+      owner: "bridge",
+      threadId: "thread-send-file",
+      turnId: "turn-send-file",
+    }).acquired,
+    true,
+  );
+  const bridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      async readThread() {
+        return {
+          thread: {
+            turns: [
+              {
+                id: "turn-send-file",
+                items: [
+                  {
+                    phase: "final_answer",
+                    text: `已发给你。\n[重复下载](<${markdownPath}>)`,
+                    type: "agentMessage",
+                  },
+                ],
+                status: "completed",
+              },
+            ],
+          },
+        };
+      },
+      respondToServerRequest(id, result) {
+        responses.push({ id, result });
+        return true;
+      },
+      async startTurn() {
+        assert.fail("tool calls must not start a turn");
+      },
+    },
+    ilink: {
+      async prepareMedia(input) {
+        assert.equal(input.media.path, filePath);
+        return {
+          aesKeyBase64: "YWVzLWtleQ==",
+          ciphertextSize: 16,
+          encryptedQueryParam: "send-file-param",
+          kind: input.media.kind,
+          name: input.media.name,
+          plaintextSize: 10,
+          type: "prepared-media",
+          v: 1,
+        };
+      },
+      async sendMedia(input) {
+        delivered.push(`media:${input.media.name}`);
+        return { accepted: true, clientId: input.clientId };
+      },
+      async sendText(input) {
+        delivered.push(`text:${input.text}`);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases,
+    newId: () => "unused",
+    now: () => 102,
+    session,
+    state,
+  });
+
+  try {
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        id: "request-send-file",
+        method: "item/tool/call",
+        params: {
+          arguments: { path: filePath },
+          callId: "call-send-file",
+          namespace: null,
+          threadId: "thread-send-file",
+          tool: "send_file",
+          turnId: "turn-send-file",
+        },
+      }),
+      true,
+    );
+    assert.deepEqual(responses, [
+      {
+        id: "request-send-file",
+        result: {
+          contentItems: [
+            {
+              text: "附件已登记，将随最终回复发送；不要再输出本地路径。",
+              type: "inputText",
+            },
+          ],
+          success: true,
+        },
+      },
+    ]);
+    assert.deepEqual(
+      state.listOutboundAttachmentIntents("turn-send-file").map(
+        ({ callId, kind, name, path }) => ({ callId, kind, name, path }),
+      ),
+      [
+        {
+          callId: "call-send-file",
+          kind: "file",
+          name: "report.xlsx",
+          path: filePath,
+        },
+      ],
+    );
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        id: "request-send-file-retry",
+        method: "item/tool/call",
+        params: {
+          arguments: { path: filePath },
+          callId: "call-send-file-retry",
+          namespace: null,
+          threadId: "thread-send-file",
+          tool: "send_file",
+          turnId: "turn-send-file",
+        },
+      }),
+      true,
+    );
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        id: "request-send-file-missing",
+        method: "item/tool/call",
+        params: {
+          arguments: { path: join(directory, "missing.xlsx") },
+          callId: "call-send-file-missing",
+          namespace: null,
+          threadId: "thread-send-file",
+          tool: "send_file",
+          turnId: "turn-send-file",
+        },
+      }),
+      true,
+    );
+    assert.equal(responses.at(-2)?.result.success, true);
+    assert.equal(responses.at(-1)?.result.success, false);
+    assert.match(
+      String(
+        (
+          responses.at(-1)?.result.contentItems as
+            | Array<{ text?: unknown }>
+            | undefined
+        )?.[0]?.text,
+      ),
+      /路径不存在或不是文件/u,
+    );
+    assert.equal(
+      state.listOutboundAttachmentIntents("turn-send-file").length,
+      1,
+    );
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        id: "request-send-file-vanishing",
+        method: "item/tool/call",
+        params: {
+          arguments: { path: vanishingPath },
+          callId: "call-send-file-vanishing",
+          namespace: null,
+          threadId: "thread-send-file",
+          tool: "send_file",
+          turnId: "turn-send-file",
+        },
+      }),
+      true,
+    );
+    assert.equal(responses.at(-1)?.result.success, true);
+    rmSync(vanishingPath);
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-send-file",
+          turn: { id: "turn-send-file" },
+        },
+      }),
+      true,
+    );
+    assert.equal(delivered[0], "media:report.xlsx");
+    assert.match(
+      delivered[1] ?? "",
+      /^text:已发给你。[\s\S]*vanishing\.pdf[\s\S]*路径不存在或不是文件/u,
+    );
+    assert.deepEqual(state.listOutboundAttachmentIntents("turn-send-file"), []);
+  } finally {
+    bridge.close();
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("send_file refuses a turn not owned by this Bridge instance", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-send-file-owner-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const responses: Array<Record<string, unknown>> = [];
+  state.createDispatchIntent({
+    body: "send a file",
+    createdAtMs: 100,
+    dedupeKey: "bot/user/send-file-owner",
+    operationId: "operation-send-file-owner",
+    threadId: "thread-send-file-owner",
+  });
+  state.markDispatchAccepted(
+    "operation-send-file-owner",
+    "turn-send-file-owner",
+    101,
+  );
+  leases.tryAcquire({
+    createdAtMs: 100,
+    instanceId: "desktop-instance",
+    operationId: "turn-send-file-owner",
+    owner: "desktop",
+    threadId: "thread-send-file-owner",
+    turnId: "turn-send-file-owner",
+  });
+  const bridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      respondToServerRequest(_id, result) {
+        responses.push(result);
+        return true;
+      },
+      async startTurn() {
+        assert.fail("tool calls must not start a turn");
+      },
+    },
+    ilink: {
+      async sendText(input) {
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases,
+    newId: () => "unused",
+    now: () => 102,
+    session,
+    state,
+  });
+
+  try {
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        id: "request-send-file-owner",
+        method: "item/tool/call",
+        params: {
+          arguments: { path: "C:\\Users\\controller\\secret.txt" },
+          callId: "call-send-file-owner",
+          namespace: null,
+          threadId: "thread-send-file-owner",
+          tool: "send_file",
+          turnId: "turn-send-file-owner",
+        },
+      }),
+      true,
+    );
+    assert.equal(responses[0]?.success, false);
+    assert.deepEqual(
+      state.listOutboundAttachmentIntents("turn-send-file-owner"),
+      [],
+    );
+  } finally {
+    bridge.close();
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a registered send_file attachment survives Bridge restart", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-send-file-restart-"));
+  const databasePath = join(directory, "state.sqlite");
+  const filePath = join(directory, "restart.pdf");
+  writeFileSync(filePath, "%PDF fixture");
+  let state = new SqliteState(databasePath);
+  let leases = new SqliteTurnLeaseStore(databasePath);
+  state.createDispatchIntent({
+    body: "send after restart",
+    contextToken: "context-send-file-restart",
+    createdAtMs: 100,
+    dedupeKey: "bot/user/send-file-restart",
+    operationId: "operation-send-file-restart",
+    threadId: "thread-send-file-restart",
+  });
+  state.markDispatchAccepted(
+    "operation-send-file-restart",
+    "turn-send-file-restart",
+    101,
+  );
+  leases.tryAcquire({
+    createdAtMs: 100,
+    instanceId: "bridge-instance",
+    operationId: "operation-send-file-restart",
+    owner: "bridge",
+    threadId: "thread-send-file-restart",
+    turnId: "turn-send-file-restart",
+  });
+  state.registerOutboundAttachmentIntent({
+    callId: "call-send-file-restart",
+    createdAtMs: 102,
+    kind: "file",
+    name: "restart.pdf",
+    operationId: "operation-send-file-restart",
+    path: filePath,
+    threadId: "thread-send-file-restart",
+    turnId: "turn-send-file-restart",
+  });
+  leases.close();
+  state.close();
+  state = new SqliteState(databasePath);
+  leases = new SqliteTurnLeaseStore(databasePath);
+  const delivered: string[] = [];
+  const bridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      async readThread() {
+        return {
+          thread: {
+            turns: [
+              {
+                id: "turn-send-file-restart",
+                items: [
+                  {
+                    phase: "final_answer",
+                    text: "重启后发送完成。",
+                    type: "agentMessage",
+                  },
+                ],
+                status: "completed",
+              },
+            ],
+          },
+        };
+      },
+      async startTurn() {
+        assert.fail("recovery must not start a duplicate turn");
+      },
+    },
+    ilink: {
+      async prepareMedia(input) {
+        return {
+          aesKeyBase64: "YWVzLWtleQ==",
+          ciphertextSize: 16,
+          encryptedQueryParam: "restart-param",
+          kind: input.media.kind,
+          name: input.media.name,
+          plaintextSize: 10,
+          type: "prepared-media",
+          v: 1,
+        };
+      },
+      async sendMedia(input) {
+        delivered.push(`media:${input.media.name}`);
+        return { accepted: true, clientId: input.clientId };
+      },
+      async sendText(input) {
+        delivered.push(`text:${input.text}`);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases,
+    newId: () => "unused",
+    now: () => 103,
+    session,
+    state,
+  });
+
+  try {
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-send-file-restart",
+          turn: { id: "turn-send-file-restart" },
+        },
+      }),
+      true,
+    );
+    assert.deepEqual(delivered, [
+      "media:restart.pdf",
+      "text:重启后发送完成。",
+    ]);
+    assert.deepEqual(
+      state.listOutboundAttachmentIntents("turn-send-file-restart"),
+      [],
+    );
   } finally {
     bridge.close();
     leases.close();

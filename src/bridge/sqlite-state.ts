@@ -3,6 +3,8 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import { outboundMediaPathKey } from "../media/outbound-media.ts";
+
 export type Controller = {
   accountId: string;
   boundAtMs: number;
@@ -75,6 +77,28 @@ export type DispatchIntent = {
   turnId: string | null;
   updatedAtMs: number;
 };
+
+export type OutboundAttachmentIntent = {
+  callId: string;
+  createdAtMs: number;
+  kind: "file" | "image" | "video";
+  name: string;
+  operationId: string;
+  path: string;
+  pathKey: string;
+  threadId: string;
+  turnId: string;
+};
+
+export class OutboundAttachmentIntentError extends Error {
+  readonly code: "CALL_ID_COLLISION" | "TOO_MANY_ATTACHMENTS";
+
+  constructor(code: OutboundAttachmentIntentError["code"]) {
+    super(`E_OUTBOUND_ATTACHMENT_${code}`);
+    this.name = "OutboundAttachmentIntentError";
+    this.code = code;
+  }
+}
 
 export type OutboxItem = {
   body: string | null;
@@ -1033,7 +1057,10 @@ export class SqliteState {
       if (current.status !== "accepted" || current.turnId !== turnId) {
         throw new Error("only the accepted turn can complete a dispatch");
       }
-      if (current.completedAtMs !== null) return current;
+      if (current.completedAtMs !== null) {
+        this.#deleteOutboundAttachmentIntents(operationId, turnId);
+        return current;
+      }
       this.#database
         .prepare(
           `UPDATE dispatch_intents
@@ -1042,8 +1069,90 @@ export class SqliteState {
              AND turn_id = ? AND completed_at_ms IS NULL`,
         )
         .run(completedAtMs, completedAtMs, operationId, turnId);
+      this.#deleteOutboundAttachmentIntents(operationId, turnId);
       return this.#requireDispatchIntent(operationId);
     });
+  }
+
+  registerOutboundAttachmentIntent(
+    input: Omit<OutboundAttachmentIntent, "pathKey">,
+  ): OutboundAttachmentIntent {
+    return this.#transaction(() => {
+      const pathKey = outboundMediaPathKey(input.path);
+      const dispatch = this.#requireDispatchIntent(input.operationId);
+      if (
+        dispatch.status !== "accepted" ||
+        dispatch.completedAtMs !== null ||
+        dispatch.threadId !== input.threadId ||
+        dispatch.turnId !== input.turnId
+      ) {
+        throw new Error("only the accepted turn can register an attachment");
+      }
+      const existingCall = this.#getOutboundAttachmentIntentByCall(
+        input.turnId,
+        input.callId,
+      );
+      if (existingCall) {
+        if (
+          existingCall.operationId !== input.operationId ||
+          existingCall.threadId !== input.threadId ||
+          existingCall.pathKey !== pathKey
+        ) {
+          throw new OutboundAttachmentIntentError("CALL_ID_COLLISION");
+        }
+        return existingCall;
+      }
+      const existingPath = this.#getOutboundAttachmentIntentByPath(
+        input.turnId,
+        pathKey,
+      );
+      if (existingPath) return existingPath;
+      const row = this.#database
+        .prepare(
+          `SELECT COUNT(*) AS count
+           FROM outbound_attachment_intents
+           WHERE turn_id = ?`,
+        )
+        .get(input.turnId) as { count: number } | undefined;
+      if ((row?.count ?? 0) >= 2) {
+        throw new OutboundAttachmentIntentError("TOO_MANY_ATTACHMENTS");
+      }
+      this.#database
+        .prepare(
+          `INSERT INTO outbound_attachment_intents
+            (operation_id, thread_id, turn_id, call_id, path, path_key,
+             name, kind, created_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.operationId,
+          input.threadId,
+          input.turnId,
+          input.callId,
+          input.path,
+          pathKey,
+          input.name,
+          input.kind,
+          input.createdAtMs,
+        );
+      return this.#getOutboundAttachmentIntentByCall(
+        input.turnId,
+        input.callId,
+      )!;
+    });
+  }
+
+  listOutboundAttachmentIntents(turnId: string): OutboundAttachmentIntent[] {
+    const rows = this.#database
+      .prepare(
+        `SELECT operation_id, thread_id, turn_id, call_id, path, path_key,
+                name, kind, created_at_ms
+         FROM outbound_attachment_intents
+         WHERE turn_id = ?
+         ORDER BY created_at_ms, call_id`,
+      )
+      .all(turnId) as OutboundAttachmentIntentRow[];
+    return rows.map(outboundAttachmentIntentFromRow);
   }
 
   completeDispatchWithOutbox(input: {
@@ -1076,6 +1185,7 @@ export class SqliteState {
             input.turnId,
           );
       }
+      this.#deleteOutboundAttachmentIntents(input.operationId, input.turnId);
       return {
         dispatch: this.#requireDispatchIntent(input.operationId),
         outbox,
@@ -1542,7 +1652,7 @@ export class SqliteState {
       | { user_version: number }
       | undefined;
     let version = current?.user_version ?? 0;
-    if (version < 0 || version > 8) {
+    if (version < 0 || version > 9) {
       throw new Error(`unsupported schema version ${String(version)}`);
     }
     const migrations = [
@@ -1554,6 +1664,7 @@ export class SqliteState {
       "./migrations/006-durable-turn-input.sql",
       "./migrations/007-thread-permission-profiles.sql",
       "./migrations/008-pending-desktop-notifications.sql",
+      "./migrations/009-outbound-attachment-intents.sql",
     ];
     while (version < migrations.length) {
       const nextVersion = version + 1;
@@ -1591,6 +1702,48 @@ export class SqliteState {
     return intent;
   }
 
+  #deleteOutboundAttachmentIntents(
+    operationId: string,
+    turnId: string,
+  ): void {
+    this.#database
+      .prepare(
+        `DELETE FROM outbound_attachment_intents
+         WHERE operation_id = ? AND turn_id = ?`,
+      )
+      .run(operationId, turnId);
+  }
+
+  #getOutboundAttachmentIntentByCall(
+    turnId: string,
+    callId: string,
+  ): OutboundAttachmentIntent | null {
+    const row = this.#database
+      .prepare(
+        `SELECT operation_id, thread_id, turn_id, call_id, path, path_key,
+                name, kind, created_at_ms
+         FROM outbound_attachment_intents
+         WHERE turn_id = ? AND call_id = ?`,
+      )
+      .get(turnId, callId) as OutboundAttachmentIntentRow | undefined;
+    return row ? outboundAttachmentIntentFromRow(row) : null;
+  }
+
+  #getOutboundAttachmentIntentByPath(
+    turnId: string,
+    pathKey: string,
+  ): OutboundAttachmentIntent | null {
+    const row = this.#database
+      .prepare(
+        `SELECT operation_id, thread_id, turn_id, call_id, path, path_key,
+                name, kind, created_at_ms
+         FROM outbound_attachment_intents
+         WHERE turn_id = ? AND path_key = ?`,
+      )
+      .get(turnId, pathKey) as OutboundAttachmentIntentRow | undefined;
+    return row ? outboundAttachmentIntentFromRow(row) : null;
+  }
+
   #getOutboxRow(clientId: string): OutboxRow | undefined {
     return this.#database
       .prepare(
@@ -1625,6 +1778,18 @@ type DispatchIntentRow = {
   thread_id: string;
   turn_id: string | null;
   updated_at_ms: number;
+};
+
+type OutboundAttachmentIntentRow = {
+  call_id: string;
+  created_at_ms: number;
+  kind: "file" | "image" | "video";
+  name: string;
+  operation_id: string;
+  path: string;
+  path_key: string;
+  thread_id: string;
+  turn_id: string;
 };
 
 type DesktopTurnObservationRow = {
@@ -1677,6 +1842,22 @@ function dispatchIntentFromRow(row: DispatchIntentRow): DispatchIntent {
     threadId: row.thread_id,
     turnId: row.turn_id,
     updatedAtMs: row.updated_at_ms,
+  };
+}
+
+function outboundAttachmentIntentFromRow(
+  row: OutboundAttachmentIntentRow,
+): OutboundAttachmentIntent {
+  return {
+    callId: row.call_id,
+    createdAtMs: row.created_at_ms,
+    kind: row.kind,
+    name: row.name,
+    operationId: row.operation_id,
+    path: row.path,
+    pathKey: row.path_key,
+    threadId: row.thread_id,
+    turnId: row.turn_id,
   };
 }
 

@@ -98,7 +98,9 @@ export function localOutboundMedia(input: {
   label: string;
   path: string;
 }): LocalOutboundMedia {
-  const normalizedPath = normalizeWindowsMarkdownPath(input.path);
+  const normalizedPath = win32.normalize(
+    normalizeWindowsMarkdownPath(input.path),
+  );
   if (!win32.isAbsolute(normalizedPath)) {
     throw new Error("E_OUTBOUND_MEDIA_PATH");
   }
@@ -115,6 +117,12 @@ export function localOutboundMedia(input: {
     type: "local-media",
     v: 1,
   };
+}
+
+export function outboundMediaPathKey(path: string): string {
+  return win32
+    .normalize(normalizeWindowsMarkdownPath(path))
+    .toLowerCase();
 }
 
 export function normalizeWindowsMarkdownPath(path: string): string {

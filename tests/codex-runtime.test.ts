@@ -663,6 +663,49 @@ test("existing threads inherit settings and new threads override only cwd", asyn
   }
 });
 
+test("iLink threads receive the explicit file-send contract", async () => {
+  const runtime = await CodexRuntime.create({
+    bridgeInstanceId: "bridge-instance-file-tool",
+    command: [process.execPath, fakeRuntime],
+  });
+
+  try {
+    const resumed = await runtime.resumeThread("thread-existing");
+    const started = await runtime.startThread("D:\\Allowed Project");
+    const resumedParams = resumed.fixtureParams as Record<string, unknown>;
+    const startedParams = started.fixtureParams as Record<string, unknown>;
+
+    assert.match(
+      String(resumedParams.developerInstructions),
+      /独占一行.*Windows.*Markdown.*本地文件链接/u,
+    );
+    assert.equal("dynamicTools" in resumedParams, false);
+    assert.match(
+      String(startedParams.developerInstructions),
+      /优先调用 send_file/u,
+    );
+    assert.deepEqual(startedParams.dynamicTools, [
+      {
+        description: "将本机文件登记为微信附件，随本轮最终回复发送。",
+        inputSchema: {
+          additionalProperties: false,
+          properties: {
+            path: {
+              description: "要发送的本机 Windows 绝对文件路径。",
+              type: "string",
+            },
+          },
+          required: ["path"],
+          type: "object",
+        },
+        name: "send_file",
+      },
+    ]);
+  } finally {
+    runtime.close();
+  }
+});
+
 test("a freshly started thread can run its first turn without an impossible resume", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-runtime-new-turn-"));
   t.after(() => rmSync(directory, { force: true, recursive: true }));

@@ -201,8 +201,12 @@ lines.on("line", (line) => {
       return;
     }
     if (
-      !hasExactKeys(message.params, ["threadId"]) &&
-      !hasExactKeys(message.params, ["permissions", "threadId"])
+      !hasExactKeys(message.params, ["developerInstructions", "threadId"]) &&
+      !hasExactKeys(message.params, [
+        "developerInstructions",
+        "permissions",
+        "threadId",
+      ])
     ) {
       rejectUnexpectedParams(message);
       return;
@@ -231,6 +235,7 @@ lines.on("line", (line) => {
             ? "dangerFullAccess"
             : "workspaceWrite",
       },
+      fixtureParams: message.params,
       thread: { id: message.params.threadId },
     });
     return;
@@ -258,11 +263,18 @@ lines.on("line", (line) => {
   }
 
   if (message.method === "thread/start") {
-    if (!hasExactKeys(message.params, ["cwd"])) {
+    if (
+      !hasExactKeys(message.params, [
+        "cwd",
+        "developerInstructions",
+        "dynamicTools",
+      ])
+    ) {
       rejectUnexpectedParams(message);
       return;
     }
     respond(message.id, {
+      fixtureParams: message.params,
       thread: { cwd: message.params.cwd, id: "thread-new" },
     });
     return;

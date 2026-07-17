@@ -20,8 +20,10 @@ import {
 } from "./turn-input.ts";
 import {
   SqliteState,
+  OutboundAttachmentIntentError,
   type DispatchIntent,
   type InboundMessageInput,
+  type OutboundAttachmentIntent,
   type OutboxItem,
   type PendingOutboxInput,
 } from "./sqlite-state.ts";
@@ -31,6 +33,7 @@ import {
 } from "./wechat-output.ts";
 import {
   localOutboundMedia,
+  outboundMediaPathKey,
   serializeOutboundPayload,
 } from "../media/outbound-media.ts";
 import {
@@ -385,6 +388,9 @@ export class BridgeEngine {
       }
       return true;
     }
+    if (event.method === "item/tool/call") {
+      return this.#handleSendFileCall(event);
+    }
     if (this.#approvals && (await this.#approvals.ingest(event))) return true;
     if (event.method === "item/started") {
       const threadId = stringField(event.params, "threadId");
@@ -523,6 +529,9 @@ export class BridgeEngine {
               finalAgentText(readThread ?? {}, turnId) ??
               CODEX_EMPTY_REPLY_TEXT,
             turnId,
+            failureText === null && effectiveCompletionStatus === "completed"
+              ? this.#state.listOutboundAttachmentIntents(turnId)
+              : [],
           )
         : null;
     if (dispatch.completedAtMs === null) {
@@ -572,6 +581,94 @@ export class BridgeEngine {
       }
     }
     return true;
+  }
+
+  #handleSendFileCall(event: CodexEvent): boolean {
+    if (stringField(event.params, "tool") !== "send_file") return false;
+    const respond = this.#codex?.respondToServerRequest;
+    if (event.id === undefined || !respond) return false;
+    const failure = (text: string): boolean =>
+      respond.call(this.#codex, event.id!, {
+        contentItems: [{ text, type: "inputText" }],
+        success: false,
+      }) !== false;
+    const threadId = stringField(event.params, "threadId");
+    const turnId = stringField(event.params, "turnId");
+    const callId = stringField(event.params, "callId");
+    const argumentsValue = objectField(event.params, "arguments");
+    const path = argumentsValue
+      ? stringField(argumentsValue, "path")
+      : undefined;
+    if (
+      !threadId ||
+      !turnId ||
+      !callId ||
+      event.params.namespace !== null ||
+      !argumentsValue ||
+      Object.keys(argumentsValue).length !== 1 ||
+      !path
+    ) {
+      return failure(
+        "参数无效：path 必须是要发送的本机 Windows 绝对文件路径。",
+      );
+    }
+    const dispatch = this.#state.getDispatchIntentByTurnId(turnId);
+    if (
+      !dispatch ||
+      dispatch.status !== "accepted" ||
+      dispatch.completedAtMs !== null ||
+      dispatch.threadId !== threadId ||
+      !this.#leases?.isHeldBy({
+        instanceId: this.#bridgeInstanceId ?? "",
+        operationId: dispatch.operationId,
+        owner: "bridge",
+        threadId,
+        turnId,
+      })
+    ) {
+      return failure("当前回合不属于微信入口，不能登记附件。");
+    }
+    try {
+      const media = localOutboundMedia({
+        label: win32.basename(path.trim()),
+        path,
+      });
+      this.#state.registerOutboundAttachmentIntent({
+        callId,
+        createdAtMs: this.#now(),
+        kind: media.kind,
+        name: media.name,
+        operationId: dispatch.operationId,
+        path: media.path,
+        threadId,
+        turnId,
+      });
+    } catch (error) {
+      if (
+        error instanceof OutboundAttachmentIntentError &&
+        error.code === "TOO_MANY_ATTACHMENTS"
+      ) {
+        return failure("单次回复最多发送 2 个附件。");
+      }
+      if (
+        error instanceof OutboundAttachmentIntentError &&
+        error.code === "CALL_ID_COLLISION"
+      ) {
+        return failure("附件调用冲突，请重新调用。");
+      }
+      return failure(`附件未登记：${outboundMediaFailureText(error)}。`);
+    }
+    return (
+      respond.call(this.#codex, event.id, {
+        contentItems: [
+          {
+            text: "附件已登记，将随最终回复发送；不要再输出本地路径。",
+            type: "inputText",
+          },
+        ],
+        success: true,
+      }) !== false
+    );
   }
 
   close(): void {
@@ -992,11 +1089,29 @@ export class BridgeEngine {
     contextToken: string,
     text: string,
     turnId: string,
+    registeredAttachments: readonly OutboundAttachmentIntent[],
   ): PendingOutboxInput[] {
     const extracted = extractWechatLocalFileReferences(text);
     const mediaBodies: string[] = [];
     const mediaFailures: string[] = [];
-    for (const reference of extracted.references.slice(0, 2)) {
+    const uniqueReferences: Array<{ label: string; path: string }> = [];
+    const seenPaths = new Set<string>();
+    for (const reference of [
+      ...registeredAttachments.map((attachment) => ({
+        label: attachment.name,
+        path: attachment.path,
+        pathKey: attachment.pathKey,
+      })),
+      ...extracted.references.map((reference) => ({
+        ...reference,
+        pathKey: outboundMediaPathKey(reference.path),
+      })),
+    ]) {
+      if (seenPaths.has(reference.pathKey)) continue;
+      seenPaths.add(reference.pathKey);
+      uniqueReferences.push({ label: reference.label, path: reference.path });
+    }
+    for (const reference of uniqueReferences.slice(0, 2)) {
       try {
         mediaBodies.push(
           serializeOutboundPayload(
@@ -1012,7 +1127,7 @@ export class BridgeEngine {
         );
       }
     }
-    if (extracted.references.length > 2) {
+    if (uniqueReferences.length > 2) {
       mediaFailures.push("⚠️ 单次回复最多发送 2 个附件，其余未发送。");
     }
     const finalText = [extracted.text, ...mediaFailures]

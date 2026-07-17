@@ -21,6 +21,27 @@ export { CodexOutcomeUnknownError };
 
 export type CodexRuntimeOptions = AppServerConnectionOptions;
 
+const ILINK_DEVELOPER_INSTRUCTIONS =
+  "你正在通过 iLink 回复微信控制者。需要发送本机文件时：如果 send_file 工具可用，必须优先调用 send_file，path 使用 Windows 绝对文件路径；工具成功后不要在最终回复中再次输出本地路径。若 send_file 不可用，只能在最终回复中使用独占一行的标准 Windows Markdown 本地文件链接 `[名称](<C:\\绝对\\路径>)`。不得把普通自然语言路径或 URL 当作附件。";
+
+const ILINK_DYNAMIC_TOOLS = [
+  {
+    description: "将本机文件登记为微信附件，随本轮最终回复发送。",
+    inputSchema: {
+      additionalProperties: false,
+      properties: {
+        path: {
+          description: "要发送的本机 Windows 绝对文件路径。",
+          type: "string",
+        },
+      },
+      required: ["path"],
+      type: "object",
+    },
+    name: "send_file",
+  },
+] as const;
+
 type ServerRequestOwner = {
   connection: AppServerConnection;
   serverId: number | string;
@@ -102,6 +123,7 @@ export class CodexRuntime {
     options: { permissions?: string } = {},
   ): Promise<ThreadResumeResult> {
     const result = (await this.#requestSafely("thread/resume", {
+      developerInstructions: ILINK_DEVELOPER_INSTRUCTIONS,
       ...(options.permissions ? { permissions: options.permissions } : {}),
       threadId,
     })) as ThreadResumeResult;
@@ -150,6 +172,8 @@ export class CodexRuntime {
   async startThread(cwd: string): Promise<ThreadStartResult> {
     const result = (await this.#requestOnceWithUnknownOutcome("thread/start", {
       cwd,
+      developerInstructions: ILINK_DEVELOPER_INSTRUCTIONS,
+      dynamicTools: ILINK_DYNAMIC_TOOLS,
     })) as ThreadStartResult;
     this.#loadedThreadIds.add(result.thread.id);
     const activeProfileId = permissionProfileId(result.activePermissionProfile);

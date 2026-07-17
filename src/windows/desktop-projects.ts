@@ -52,14 +52,19 @@ export function parseDesktopProjects(value: unknown): DesktopProject[] {
   if (projectOrder !== undefined && !Array.isArray(projectOrder)) {
     throw invalidDesktopProjectState();
   }
-  for (const rawRoot of projectOrder ?? []) {
-    const cwd = normalizeProjectPath(rawRoot);
-    if (!cwd) throw invalidDesktopProjectState();
-    const key = pathKey(cwd);
-    const saved = roots.get(key);
-    if (!saved || seen.has(key)) continue;
-    ordered.push(saved);
-    seen.add(key);
+  const localProjects = value["local-projects"];
+  if (localProjects !== undefined && !isRecord(localProjects)) {
+    throw invalidDesktopProjectState();
+  }
+  for (const orderEntry of projectOrder ?? []) {
+    const orderedRoots = resolveOrderedRoots(orderEntry, localProjects);
+    for (const cwd of orderedRoots) {
+      const key = pathKey(cwd);
+      const saved = roots.get(key);
+      if (!saved || seen.has(key)) continue;
+      ordered.push(saved);
+      seen.add(key);
+    }
   }
   for (const [key, cwd] of roots) {
     if (seen.has(key)) continue;
@@ -77,6 +82,26 @@ export function parseDesktopProjects(value: unknown): DesktopProject[] {
     names.add(key);
   }
   return projects;
+}
+
+function resolveOrderedRoots(
+  orderEntry: unknown,
+  localProjects: Record<string, unknown> | undefined,
+): string[] {
+  const directRoot = normalizeProjectPath(orderEntry);
+  if (directRoot) return [directRoot];
+  if (typeof orderEntry !== "string" || !localProjects) {
+    throw invalidDesktopProjectState();
+  }
+  const project = localProjects[orderEntry];
+  if (!isRecord(project) || !Array.isArray(project.rootPaths)) {
+    throw invalidDesktopProjectState();
+  }
+  return project.rootPaths.map((root) => {
+    const cwd = normalizeProjectPath(root);
+    if (!cwd) throw invalidDesktopProjectState();
+    return cwd;
+  });
 }
 
 function normalizeProjectPath(value: unknown): string | null {

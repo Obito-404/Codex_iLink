@@ -33,6 +33,34 @@ test("Desktop saved workspace roots define the project set, order, and names", (
   );
 });
 
+test("Desktop project ids resolve through local-projects before ordering roots", () => {
+  assert.deepEqual(
+    parseDesktopProjects({
+      "electron-saved-workspace-roots": [
+        "D:\\ContextOS",
+        "D:\\Codex_iLink",
+      ],
+      "local-projects": {
+        "local-codex": {
+          id: "local-codex",
+          name: "Codex iLink",
+          rootPaths: ["D:\\Codex_iLink"],
+        },
+        "local-context": {
+          id: "local-context",
+          name: "Context OS",
+          rootPaths: ["D:\\ContextOS"],
+        },
+      },
+      "project-order": ["local-codex", "local-context"],
+    }),
+    [
+      { cwd: "D:\\Codex_iLink", name: "Codex_iLink" },
+      { cwd: "D:\\ContextOS", name: "ContextOS" },
+    ],
+  );
+});
+
 test("Desktop project loading falls back to the fixed backup and ignores stale temp files", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-desktop-projects-"));
   const primaryPath = join(directory, ".codex-global-state.json");

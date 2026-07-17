@@ -90,12 +90,12 @@ function takeUtf8Prefix(
 function standaloneLocalFileReference(
   line: string,
 ): WechatLocalFileReference | null {
-  const angle = /^\s*!?\[([^\]\r\n]*)\]\(\s*<((?:[A-Za-z]:\\{1,2})[^>\r\n]+)>\s*\)\s*$/u.exec(
+  const angle = /^\s*!?\[([^\]\r\n]*)\]\(\s*<((?:[A-Za-z]:[\\/]{1,2})[^>\r\n]+)>\s*\)\s*$/u.exec(
     line,
   );
   const plain = angle
     ? null
-    : /^\s*!?\[([^\]\r\n]*)\]\(\s*((?:[A-Za-z]:\\{1,2})[^)\r\n]+)\s*\)\s*$/u.exec(
+    : /^\s*!?\[([^\]\r\n]*)\]\(\s*((?:[A-Za-z]:[\\/]{1,2})[^)\r\n]+)\s*\)\s*$/u.exec(
         line,
       );
   const match = angle ?? plain;

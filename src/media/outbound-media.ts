@@ -119,8 +119,8 @@ export function localOutboundMedia(input: {
 
 export function normalizeWindowsMarkdownPath(path: string): string {
   const trimmed = path.trim();
-  if (/^[A-Za-z]:\\\\/u.test(trimmed)) {
-    return `${trimmed.slice(0, 2)}${trimmed.slice(2).replace(/\\{2,}/gu, "\\")}`;
+  if (/^[A-Za-z]:[\\/]/u.test(trimmed)) {
+    return `${trimmed.slice(0, 2)}${trimmed.slice(2).replace(/[\\/]+/gu, "\\")}`;
   }
   return trimmed;
 }

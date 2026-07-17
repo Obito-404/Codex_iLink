@@ -2851,11 +2851,12 @@ test("an oversized final reply is durably capped at three safe WeChat messages",
   }
 });
 
-test("a standalone local file link is delivered as WeChat media instead of fake text", async () => {
+test("a standalone Codex PDF link is delivered as a WeChat file", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-final-media-"));
   const databasePath = join(directory, "state.sqlite");
-  const filePath = join(directory, "到账凭证.png");
-  writeFileSync(filePath, "fake-image");
+  const filePath = join(directory, "报销单.pdf");
+  const markdownPath = filePath.replaceAll("\\", "/");
+  writeFileSync(filePath, "%PDF-1.4\n% fixture");
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
   const order: string[] = [];
@@ -2872,7 +2873,7 @@ test("a standalone local file link is delivered as WeChat media instead of fake 
                 items: [
                   {
                     phase: "final_answer",
-                    text: `已发给你。\n[到账凭证.png](<${filePath}>)`,
+                    text: `已发给你。\n[报销单.pdf](<${markdownPath}>)`,
                     type: "agentMessage",
                   },
                 ],
@@ -2897,7 +2898,7 @@ test("a standalone local file link is delivered as WeChat media instead of fake 
     ilink: {
       async prepareMedia(input) {
         assert.equal(input.media.path, filePath);
-        assert.equal(input.media.kind, "image");
+        assert.equal(input.media.kind, "file");
         return {
           aesKeyBase64: "YWVzLWtleQ==",
           ciphertextSize: 16,
@@ -2915,7 +2916,7 @@ test("a standalone local file link is delivered as WeChat media instead of fake 
       },
       async sendText(input) {
         order.push(`text:${input.text}`);
-        assert.doesNotMatch(input.text, /[A-Za-z]:\\/u);
+        assert.doesNotMatch(input.text, /[A-Za-z]:[\\/]/u);
         return { accepted: true, clientId: input.clientId };
       },
     },
@@ -2930,7 +2931,7 @@ test("a standalone local file link is delivered as WeChat media instead of fake 
   try {
     await bridge.ingestBatch({
       cursor: "cursor-media",
-      messages: [textMessage(221, "把图片发给我")],
+      messages: [textMessage(221, "把 PDF 发给我")],
     });
     assert.equal(
       state.getDispatchIntentByTurnId("turn-media")?.status,
@@ -2944,7 +2945,7 @@ test("a standalone local file link is delivered as WeChat media instead of fake 
       }),
       true,
     );
-    assert.deepEqual(order, ["media:到账凭证.png", "text:已发给你。"]);
+    assert.deepEqual(order, ["media:报销单.pdf", "text:已发给你。"]);
     assert.equal(state.listPendingOutbox().length, 0);
   } finally {
     bridge.close();
@@ -3432,7 +3433,7 @@ test("a newer message cannot bypass an older turn queued after resume fails", as
   }
 });
 
-test("a live Bridge approval can be decided once from WeChat", async () => {
+test("live Bridge approvals are decided silently from WeChat", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-approval-"));
   const state = new SqliteState(join(directory, "state.sqlite"));
   const sent: SendInput[] = [];

@@ -1,6 +1,6 @@
 export type InboundIntent =
-  | { kind: "approve"; index: number }
-  | { kind: "deny"; index: number }
+  | { code: string | null; kind: "approve" }
+  | { code: string | null; kind: "deny" }
   | { kind: "enterSession"; index: number }
   | { kind: "exitSession" }
   | { kind: "help" }
@@ -15,45 +15,56 @@ export type InboundIntent =
   | { kind: "unknownCommand"; text: string };
 
 export const COMMAND_HELP = [
-  "/p — projects",
-  "/p <n> — select project",
-  "/s | /s + | /s arc — sessions",
-  "/s <n> — enter session",
-  "/new — new session",
-  "/exit — return to main",
-  "/st — status",
-  "/perm | /perm <n> — permissions",
-  "/ok <n> | /no <n> — approval",
-  "/help — commands",
+  "p — projects",
+  "p<n> — select project",
+  "s | s+ | sarc — sessions",
+  "s<n> — enter session",
+  "new — new session",
+  "exit — return to main",
+  "st — status",
+  "perm | perm<n> — permissions",
+  "ok[code] | no[code] — approval",
+  "help — commands",
 ].join("\n");
 
 export function parseInboundText(text: string): InboundIntent {
   const command = text.trim();
-  if (!command.startsWith("/")) return { kind: "message", text };
 
   switch (command) {
-    case "/p":
+    case "p":
       return { kind: "projects" };
-    case "/s":
+    case "s":
       return { kind: "sessions", page: "first" };
-    case "/s +":
+    case "s+":
       return { kind: "sessions", page: "next" };
-    case "/s arc":
+    case "sarc":
       return { kind: "sessions", page: "archived" };
-    case "/new":
+    case "new":
       return { kind: "newSession" };
-    case "/exit":
+    case "exit":
       return { kind: "exitSession" };
-    case "/st":
+    case "st":
       return { kind: "status" };
-    case "/perm":
+    case "perm":
       return { kind: "permissions" };
-    case "/help":
+    case "help":
       return { kind: "help" };
   }
 
-  const indexed = /^\/(p|s|perm|ok|no) ([1-9]\d*)$/u.exec(command);
-  if (!indexed) return { kind: "unknownCommand", text };
+  const approval = /^(ok|no)([a-f][a-f\d]{5})?$/iu.exec(command);
+  if (approval) {
+    return {
+      code: approval[2]?.toUpperCase() ?? null,
+      kind: approval[1]?.toLowerCase() === "ok" ? "approve" : "deny",
+    };
+  }
+
+  const indexed = /^(p|s|perm)([1-9]\d*)$/u.exec(command);
+  if (!indexed) {
+    return isReservedCommandShape(command)
+      ? { kind: "unknownCommand", text }
+      : { kind: "message", text };
+  }
   const index = Number(indexed[2]);
   if (!Number.isSafeInteger(index)) return { kind: "unknownCommand", text };
 
@@ -64,11 +75,17 @@ export function parseInboundText(text: string): InboundIntent {
       return { index, kind: "enterSession" };
     case "perm":
       return { index, kind: "selectPermission" };
-    case "ok":
-      return { index, kind: "approve" };
-    case "no":
-      return { index, kind: "deny" };
     default:
       return { kind: "unknownCommand", text };
   }
+}
+
+function isReservedCommandShape(command: string): boolean {
+  return (
+    command.startsWith("/") ||
+    /^go(?:$|\s*\d+$)/iu.test(command) ||
+    /^perm(?:\s|[+\-.\d])/iu.test(command) ||
+    /^(?:p|s)(?:\s|[+\-.\d])/u.test(command) ||
+    /^(?:ok|no)(?:\s|[a-f\d]+$)/iu.test(command)
+  );
 }

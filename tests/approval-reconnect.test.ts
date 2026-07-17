@@ -81,7 +81,7 @@ test("an approval remains approvable when only the turn start response times out
   try {
     await bridge.ingestBatch({
       cursor: "cursor-context",
-      messages: [textMessage(1, "/help")],
+      messages: [textMessage(1, "help")],
     });
     sent.length = 0;
 
@@ -94,14 +94,14 @@ test("an approval remains approvable when only the turn start response times out
       CodexOutcomeUnknownError,
     );
     await Promise.all(eventTasks);
-    assert.match(sent[0] ?? "", /Approval #1[\s\S]*pnpm test/u);
+    assert.match(sent[0] ?? "", /需要批准[\s\S]*pnpm test[\s\S]*回复：ok 或 no/u);
 
     sent.length = 0;
     await runtime.listThreads();
     await Promise.all(eventTasks);
     await bridge.ingestBatch({
       cursor: "cursor-after-reconnect",
-      messages: [textMessage(2, "/st"), textMessage(3, "/ok 1")],
+      messages: [textMessage(2, "st"), textMessage(3, "ok")],
     });
 
     const status = sent.find((text) => text.includes("待审批：")) ?? "";
@@ -111,7 +111,7 @@ test("an approval remains approvable when only the turn start response times out
         pendingCount: /待审批：(\d+)/u.exec(status)?.[1],
       },
       {
-        approvalReply: "Approved #1",
+        approvalReply: "已批准。",
         pendingCount: "1",
       },
     );

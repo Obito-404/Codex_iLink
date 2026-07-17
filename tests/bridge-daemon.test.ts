@@ -104,7 +104,7 @@ test("daemon creates one persistent main thread and polls iLink", async () => {
             {
               context_token: "ctx-1",
               from_user_id: "controller-a",
-              item_list: [{ text_item: { text: "/help" }, type: 1 }],
+              item_list: [{ text_item: { text: "help" }, type: 1 }],
               message_id: 1,
             },
           ],
@@ -391,7 +391,7 @@ test("a spooled Desktop prompt is observed before the same iLink batch enters it
             {
               context_token: "ctx-go",
               from_user_id: "controller-a",
-              item_list: [{ text_item: { text: "/s 1" }, type: 1 }],
+              item_list: [{ text_item: { text: "s1" }, type: 1 }],
               message_id: 1,
             },
             {
@@ -542,7 +542,7 @@ test("prompt telemetry ignores Bridge and rejected competing Desktop turns", asy
   }
 });
 
-test("a prompt spooled after the poll snapshot is drained between /s n and body", async () => {
+test("a prompt spooled after the poll snapshot is drained between s<n> and body", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-message-barrier-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -612,7 +612,7 @@ test("a prompt spooled after the poll snapshot is drained between /s n and body"
             {
               context_token: "ctx-go",
               from_user_id: "controller-a",
-              item_list: [{ text_item: { text: "/s 1" }, type: 1 }],
+              item_list: [{ text_item: { text: "s1" }, type: 1 }],
               message_id: 10,
             },
             {
@@ -946,7 +946,7 @@ test("an away Desktop Stop opens its reply route only after durable delivery", a
     controllerUserId: "controller-a",
     messages: [
       {
-        body: "/help",
+        body: "help",
         contextToken: "ctx-latest",
         messageId: "seed-context",
         receivedAtMs: 1,
@@ -1063,7 +1063,7 @@ test("an away Desktop permission Hook is delivered durably without a reply route
     controllerUserId: "controller-a",
     messages: [
       {
-        body: "/help",
+        body: "help",
         contextToken: "ctx-permission",
         messageId: "seed-permission",
         receivedAtMs: 1,
@@ -1808,7 +1808,7 @@ test("the next real controller message retries a delivery deferred for this daem
     controllerUserId: "controller-a",
     messages: [
       {
-        body: "/help",
+        body: "help",
         contextToken: "ctx-duplicate",
         messageId: "900",
         receivedAtMs: 1,
@@ -1854,7 +1854,7 @@ test("the next real controller message retries a delivery deferred for this daem
               {
                 context_token: "ctx-duplicate",
                 from_user_id: "controller-a",
-                item_list: [{ text_item: { text: "/help" }, type: 1 }],
+                item_list: [{ text_item: { text: "help" }, type: 1 }],
                 message_id: 900,
               },
             ],
@@ -1868,7 +1868,7 @@ test("the next real controller message retries a delivery deferred for this daem
             {
               context_token: "ctx-inbound",
               from_user_id: "controller-a",
-              item_list: [{ text_item: { text: "/help" }, type: 1 }],
+              item_list: [{ text_item: { text: "help" }, type: 1 }],
               message_id: 901,
             },
           ],
@@ -1901,7 +1901,7 @@ test("the next real controller message retries a delivery deferred for this daem
     assert.equal(state.getOutbox("original-deferred-client")?.status, "confirmed");
     assert.equal(sendTexts.length, 5);
     assert.equal(sendTexts.at(-2), "original undelivered reply");
-    assert.ok(sendTexts.at(-1)?.includes("/s <n>"));
+    assert.ok(sendTexts.at(-1)?.includes("s<n>"));
     await daemon.stop();
   } finally {
     leases.close();
@@ -1944,7 +1944,7 @@ test("the first controller context delivers an earlier no-context Desktop notifi
             {
               context_token: "ctx-first-controller",
               from_user_id: "controller-a",
-              item_list: [{ text_item: { text: "/help" }, type: 1 }],
+              item_list: [{ text_item: { text: "help" }, type: 1 }],
               message_id: 1_001,
             },
           ],
@@ -1952,7 +1952,7 @@ test("the first controller context delivers an earlier no-context Desktop notifi
       },
       async sendText(input) {
         sent.push(input);
-        if (input.text.includes("/p — projects")) {
+        if (input.text.includes("p — projects")) {
           throw new Error("reply transport failed after accepting inbound");
         }
         return { accepted: true as const, clientId: input.clientId };
@@ -1985,7 +1985,7 @@ test("the first controller context delivers an earlier no-context Desktop notifi
     );
     assert.match(sent[0]?.text ?? "", /等待本机批准/u);
     assert.equal(sent[0]?.contextToken, "ctx-first-controller");
-    assert.ok(sent[1]?.text.includes("/s <n>"));
+    assert.ok(sent[1]?.text.includes("s<n>"));
     assert.equal(state.getOutbox(sent[0]?.clientId ?? "")?.status, "confirmed");
     assert.deepEqual(state.listLiveNotificationRoutes(50_001), []);
     await daemon.stop();

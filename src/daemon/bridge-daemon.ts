@@ -214,7 +214,7 @@ export class BridgeDaemon {
       ...(signal ? { signal } : {}),
     });
     // A Desktop prompt can arrive while the iLink long-poll is waiting. Drain
-    // it before processing the returned batch so /s <n> cannot race that prompt.
+    // it before processing the returned batch so s<n> cannot race that prompt.
     await this.#options.hookReceiver.drainSpool();
     if (updates.kind === "timeout") return { accepted: 0, sent: 0 };
     try {

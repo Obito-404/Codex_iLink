@@ -1,7 +1,10 @@
 import { win32 } from "node:path";
 
 import { parseInboundText, COMMAND_HELP } from "./commands.ts";
-import { ApprovalCoordinator } from "./approval-coordinator.ts";
+import {
+  ApprovalCoordinator,
+  type PendingApproval,
+} from "./approval-coordinator.ts";
 import {
   parseControllerMessage,
   type ParsedControllerMessage,
@@ -159,9 +162,9 @@ const CODEX_SUBMISSION_REJECTED_TEXT =
 const HOOK_GUARD_UNKNOWN_TEXT =
   "E_HOOK_GUARD：并发门禁未确认，结果状态未知，请在 Desktop 查看。";
 const MISSING_THREAD_TEXT =
-  "原会话尚未写入 Codex 历史，已失效；请使用 /new 重新创建并发送。";
+  "原会话尚未写入 Codex 历史，已失效；请使用 new 重新创建并发送。";
 const CODEX_SLOW_TURN_TEXT =
-  "⏳ Codex 任务仍在执行，已长时间没有结束；可能正在等待工具、审批或网络。任务未被取消，可用 /st 查看。";
+  "⏳ Codex 任务仍在执行，已长时间没有结束；可能正在等待工具、审批或网络。任务未被取消，可用 st 查看。";
 
 export class BridgeEngine {
   readonly #approvals: ApprovalCoordinator | undefined;
@@ -231,14 +234,14 @@ export class BridgeEngine {
             if (!contextToken) return;
             const text =
               reason === "request-lost"
-                ? `⚠️ Approval #${String(approval.index)} 已失效，受限操作未执行；请重新发送操作。`
+                ? "⚠️ 审批已失效，受限操作未执行；请重新发送操作。"
                 : approval.deliveryStatus === "retrying"
-                  ? `🌐 Approval #${String(approval.index)} 因微信网络异常未送达且已超时，受限操作未执行；请重新发送操作。`
-                  : `⌛ Approval #${String(approval.index)} 已超时，受限操作未执行；请重新发送操作。`;
+                  ? "🌐 审批因微信网络异常未送达且已超时，受限操作未执行；请重新发送操作。"
+                  : "⌛ 审批已超时，受限操作未执行；请重新发送操作。";
             void this.#send(
               contextToken,
               text,
-              `codex-ilink:approval:${approval.turnId}:${String(approval.index)}:expired`,
+              `codex-ilink:approval:${approval.turnId}:${approval.code}:expired`,
             ).catch(() => undefined);
           },
           respond,
@@ -656,7 +659,14 @@ export class BridgeEngine {
     messageId: string;
     turnInput: DurableTurnInput;
   }): Promise<number> {
-    const intent = parseInboundText(input.turnInput.text);
+    let intent = parseInboundText(input.turnInput.text);
+    if (
+      (intent.kind === "approve" || intent.kind === "deny") &&
+      intent.code === null &&
+      (this.#approvals?.list().length ?? 0) === 0
+    ) {
+      intent = { kind: "message", text: input.turnInput.text };
+    }
     if (intent.kind !== "message") this.#touchBinding();
     if (intent.kind === "help") {
       return this.#replyToCommand(input.contextToken, input.messageId, COMMAND_HELP);
@@ -745,13 +755,19 @@ export class BridgeEngine {
     }
 
     const decision = this.#approvals?.decide(
-      intent.index,
+      intent.code,
       intent.kind === "approve",
     );
     const reply =
       decision?.kind === "decided"
-        ? `${intent.kind === "approve" ? "Approved" : "Denied"} #${String(intent.index)}`
-        : `Approval #${String(intent.index)} 已失效或不存在。`;
+        ? intent.kind === "approve"
+          ? "已批准。"
+          : "已拒绝。"
+        : decision?.kind === "ambiguous"
+          ? formatAmbiguousApprovals(decision.approvals)
+          : intent.code
+            ? `审批 ${intent.code} 已失效或不存在。`
+            : "当前没有待审批。";
     return this.#replyToCommand(input.contextToken, input.messageId, reply);
   }
 
@@ -952,7 +968,7 @@ export class BridgeEngine {
       ...projects.map(
         (project, index) => `${String(index + 1)}. ${project.name}`,
       ),
-      "使用 /p <n> 选择项目；编号自本列表生成起 10 分钟内有效。",
+      "使用 p<n> 选择项目；编号自本列表生成起 10 分钟内有效。",
     ].join("\n");
   }
 
@@ -980,9 +996,9 @@ export class BridgeEngine {
     }
     if (!snapshot) throw new Error("project snapshot was not created");
     const projectPath = snapshot.projects[index - 1];
-    if (!projectPath) return "项目编号无效，请按 /p 当前列表选择。";
+    if (!projectPath) return "项目编号无效，请按 p 当前列表选择。";
     this.#state.selectProjectForNavigation(projectPath);
-    return `已选择项目：${projectDisplayName(projectPath)}\n已退出原会话；使用 /s 查看或 /new 新建。`;
+    return `已选择项目：${projectDisplayName(projectPath)}\n已退出原会话；使用 s 查看或 new 新建。`;
   }
 
   async #sessionListReply(
@@ -995,7 +1011,7 @@ export class BridgeEngine {
     let pageNumber = 1;
     if (mode === "next") {
       const previous = this.#state.getSessionSnapshot(this.#now());
-      if (!previous) return "会话列表已过期，请先用 /s 或 /s arc 刷新。";
+      if (!previous) return "会话列表已过期，请先用 s 或 sarc 刷新。";
       if (!previous.hasNext) return "当前会话列表没有下一页。";
       archived = previous.archived;
       pageNumber = previous.page + 1;
@@ -1015,8 +1031,8 @@ export class BridgeEngine {
         const status = thread.status ?? "unknown";
         return `${String(index + 1)}. ${title} [${status}]`;
       }),
-      ...(page.hasNext ? ["下一页：/s +"] : []),
-      "使用 /s <n> 进入会话；编号自本页生成起 10 分钟内有效。",
+      ...(page.hasNext ? ["下一页：s+"] : []),
+      "使用 s<n> 进入会话；编号自本页生成起 10 分钟内有效。",
     ].join("\n");
   }
 
@@ -1059,7 +1075,7 @@ export class BridgeEngine {
     }
     if (!snapshot) throw new Error("session snapshot was not created");
     const target = snapshot.threads[index - 1];
-    if (!target) return "会话编号无效，请按当前 /s 列表选择。";
+    if (!target) return "会话编号无效，请按当前 s 列表选择。";
     if (
       !this.#codex?.resumeThread ||
       !this.#codex.readThread ||
@@ -1164,7 +1180,7 @@ export class BridgeEngine {
 
     if (selectedIndex !== undefined) {
       const selected = profiles[selectedIndex - 1];
-      if (!selected) return "权限编号无效，请按 /perm 当前列表选择。";
+      if (!selected) return "权限编号无效，请按 perm 当前列表选择。";
       if (!selected.allowed) {
         return `权限 ${selected.id} 受 Codex 配置限制，当前不可切换。`;
       }
@@ -1217,7 +1233,7 @@ export class BridgeEngine {
           profile.allowed ? "" : "（不可用）"
         }`,
       ),
-      "使用 /perm <n> 直接切换当前任务权限。",
+      "使用 perm<n> 直接切换当前任务权限。",
     ].join("\n");
   }
 
@@ -1376,7 +1392,7 @@ export class BridgeEngine {
     if (route.kind === "ambiguousNotificationRoute") {
       await this.#send(
         input.contextToken,
-        "有多个可回复任务，请先用 /p 选择项目，再用 /s <n> 进入目标会话。",
+        "有多个可回复任务，请先用 p 选择项目，再用 s<n> 进入目标会话。",
       );
       this.#clearInbound(input.messageId);
       await this.#cleanupMedia(this.#dedupeKey(input.messageId));
@@ -2213,6 +2229,16 @@ function isPermissionProfileSummary(value: unknown): value is {
       profile.description === null ||
       typeof profile.description === "string")
   );
+}
+
+function formatAmbiguousApprovals(
+  approvals: readonly PendingApproval[],
+): string {
+  return [
+    "当前有多个待审批：",
+    ...approvals.map((approval) => `${approval.code}：${approval.summary}`),
+    "回复：ok<code> 或 no<code>。",
+  ].join("\n");
 }
 
 function activePermissionProfileId(

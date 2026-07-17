@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { ApprovalCoordinator } from "../src/bridge/approval-coordinator.ts";
 
-test("a live command approval is numbered, notified, and answered once", async () => {
+test("one live approval uses bare ok or no and is answered once", async () => {
   const sent: Array<{ clientId: string; text: string }> = [];
   const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
   const approvals = new ApprovalCoordinator({
@@ -29,21 +29,123 @@ test("a live command approval is numbered, notified, and answered once", async (
     }),
     true,
   );
-  assert.match(sent[0]?.text ?? "", /Approval #1[\s\S]*pnpm test[\s\S]*\/ok 1/u);
-  assert.deepEqual(approvals.decide(1, true), { index: 1, kind: "decided" });
+  const code = approvals.list()[0]?.code;
+  assert.match(code ?? "", /^[A-F][A-F\d]{5}$/u);
+  assert.match(sent[0]?.text ?? "", /需要批准[\s\S]*pnpm test[\s\S]*回复：ok 或 no/u);
+  assert.doesNotMatch(sent[0]?.text ?? "", new RegExp(code ?? "missing", "u"));
+  assert.deepEqual(approvals.decide(null, true), { code, kind: "decided" });
   assert.deepEqual(responses, [{ id: 41, result: { decision: "accept" } }]);
-  assert.deepEqual(approvals.decide(1, true), { index: 1, kind: "not-found" });
+  assert.deepEqual(approvals.decide(code ?? "", true), {
+    code,
+    kind: "not-found",
+  });
+});
+
+test("multiple approvals require their immutable short codes", async () => {
+  const sent: string[] = [];
+  const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
+  const approvals = new ApprovalCoordinator({
+    async notify(text) {
+      sent.push(text);
+    },
+    now: () => 1_500,
+    respond(id, result) {
+      responses.push({ id, result });
+    },
+  });
+
+  for (const [id, itemId, command] of [
+    [51, "item-a", "pnpm test"],
+    [52, "item-b", "pnpm typecheck"],
+  ] as const) {
+    await approvals.ingest({
+      id,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        command,
+        itemId,
+        threadId: `thread-${itemId}`,
+        turnId: `turn-${itemId}`,
+      },
+    });
+  }
+
+  const [first, second] = approvals.list();
+  assert.match(first?.code ?? "", /^[A-F][A-F\d]{5}$/u);
+  assert.match(second?.code ?? "", /^[A-F][A-F\d]{5}$/u);
+  assert.notEqual(first?.code, second?.code);
+  assert.match(sent[0] ?? "", /回复：ok 或 no/u);
+  assert.match(sent[1] ?? "", /当前有多个待审批/u);
+  assert.match(
+    sent[1] ?? "",
+    new RegExp(`${first?.code}：Command: pnpm test`, "u"),
+  );
+  assert.match(
+    sent[1] ?? "",
+    new RegExp(`${second?.code}：Command: pnpm typecheck`, "u"),
+  );
+  assert.match(sent[1] ?? "", /回复：ok<code> 或 no<code>/u);
+  assert.deepEqual(approvals.decide(null, true), {
+    approvals: [first, second],
+    kind: "ambiguous",
+  });
+  assert.deepEqual(responses, []);
+
+  assert.deepEqual(approvals.decide(second?.code ?? "", false), {
+    code: second?.code,
+    kind: "decided",
+  });
+  assert.deepEqual(responses, [{ id: 52, result: { decision: "decline" } }]);
+});
+
+test("a completed approval code cannot decide a later request", async () => {
+  const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
+  const approvals = new ApprovalCoordinator({
+    async notify() {},
+    now: () => 1_750,
+    respond(id, result) {
+      responses.push({ id, result });
+    },
+  });
+
+  await approvals.ingest({
+    id: 61,
+    method: "item/fileChange/requestApproval",
+    params: {
+      itemId: "item-old",
+      threadId: "thread-old",
+      turnId: "turn-old",
+    },
+  });
+  const staleCode = approvals.list()[0]?.code ?? "";
+  approvals.decide(null, true);
+  await approvals.ingest({
+    id: 62,
+    method: "item/fileChange/requestApproval",
+    params: {
+      itemId: "item-new",
+      threadId: "thread-new",
+      turnId: "turn-new",
+    },
+  });
+
+  assert.deepEqual(approvals.decide(staleCode, true), {
+    code: staleCode,
+    kind: "not-found",
+  });
+  assert.equal(approvals.list().length, 1);
+  assert.deepEqual(responses, [{ id: 61, result: { decision: "accept" } }]);
 });
 
 test("permissions are scoped to one turn and expiry denies stale callbacks", async () => {
   let now = 2_000;
-  const expired: Array<{ index: number; reason: string }> = [];
+  const expired: Array<{ code: string; reason: string }> = [];
   const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
   const approvals = new ApprovalCoordinator({
     async notify() {},
     now: () => now,
     onExpired(approval, reason) {
-      expired.push({ index: approval.index, reason });
+      expired.push({ code: approval.code, reason });
     },
     respond(id, result) {
       responses.push({ id, result });
@@ -61,6 +163,7 @@ test("permissions are scoped to one turn and expiry denies stale callbacks", asy
       turnId: "turn-2",
     },
   });
+  const code = approvals.list()[0]?.code ?? "";
   now = 2_101;
   assert.equal(approvals.expire(), 1);
   assert.deepEqual(responses, [
@@ -69,7 +172,7 @@ test("permissions are scoped to one turn and expiry denies stale callbacks", asy
       result: { permissions: {}, scope: "turn" },
     },
   ]);
-  assert.deepEqual(expired, [{ index: 1, reason: "timeout" }]);
+  assert.deepEqual(expired, [{ code, reason: "timeout" }]);
   assert.deepEqual(approvals.list(), []);
 });
 

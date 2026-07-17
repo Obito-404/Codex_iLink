@@ -46,9 +46,9 @@ const fakeCodexRuntime = fileURLToPath(
   new URL("./fixtures/fake-codex-runtime.mjs", import.meta.url),
 );
 
-test("/help is deduplicated, persisted before send, and confirmed after send", async () => {
+test("help is deduplicated, persisted before send, and confirmed after send", async () => {
   await withBridge(async ({ bridge, sent, state }) => {
-    const message = textMessage(1, "/help");
+    const message = textMessage(1, "help");
     assert.deepEqual(
       await bridge.ingestBatch({ cursor: "cursor-1", messages: [message] }),
       { accepted: 1, sent: 1 },
@@ -68,7 +68,7 @@ test("/help is deduplicated, persisted before send, and confirmed after send", a
 
 test("other users are silent while controller media gets one explicit reply", async () => {
   await withBridge(async ({ bridge, sent }) => {
-    const intruder = textMessage(2, "/p", "intruder");
+    const intruder = textMessage(2, "p", "intruder");
     const media: WireWeixinMessage = {
       context_token: "ctx-media",
       from_user_id: "controller-a",
@@ -88,7 +88,7 @@ test("other users are silent while controller media gets one explicit reply", as
   });
 });
 
-test("ordinary text acquires a lease and commits one Codex dispatch", async () => {
+test("bare ok with no pending approval is dispatched as ordinary text", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-bridge-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -120,14 +120,14 @@ test("ordinary text acquires a lease and commits one Codex dispatch", async () =
     assert.deepEqual(
       await bridge.ingestBatch({
         cursor: "cursor-10",
-        messages: [textMessage(10, "继续这个任务")],
+        messages: [textMessage(10, "ok")],
       }),
       { accepted: 1, sent: 0 },
     );
     assert.deepEqual(calls, [
       {
         clientUserMessageId: "bot-a/controller-a/10",
-        text: "继续这个任务",
+        text: "ok",
         threadId: "thread-main",
       },
     ]);
@@ -880,7 +880,7 @@ test("a definite queued Codex media rejection is reported and advances the FIFO"
   }
 });
 
-test("slash commands ignore attached media instead of downloading it", async () => {
+test("commands ignore attached media instead of downloading it", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-media-command-"));
   const state = new SqliteState(join(directory, "state.sqlite"));
   let downloads = 0;
@@ -910,7 +910,7 @@ test("slash commands ignore attached media instead of downloading it", async () 
     assert.deepEqual(
       await bridge.ingestBatch({
         cursor: "cursor-command-media",
-        messages: [imageMessage(74, "/help")],
+        messages: [imageMessage(74, "help")],
       }),
       { accepted: 1, sent: 1 },
     );
@@ -923,7 +923,7 @@ test("slash commands ignore attached media instead of downloading it", async () 
   }
 });
 
-test("a Desktop observation queues a later /s n dispatch until exact Stop and terminal proof", async () => {
+test("a Desktop observation queues a later s<n> dispatch until exact Stop and terminal proof", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-observed-dispatch-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -1760,7 +1760,7 @@ test("a long-running turn sends one durable progress notice without releasing it
     assert.deepEqual(sent.map(({ clientId, text }) => ({ clientId, text })), [
       {
         clientId: "codex-ilink:turn-slow:slow",
-        text: "⏳ Codex 任务仍在执行，已长时间没有结束；可能正在等待工具、审批或网络。任务未被取消，可用 /st 查看。",
+          text: "⏳ Codex 任务仍在执行，已长时间没有结束；可能正在等待工具、审批或网络。任务未被取消，可用 st 查看。",
       },
     ]);
     assert.equal(leases.getLease("thread-slow")?.turnId, "turn-slow");
@@ -3294,7 +3294,7 @@ test("a permanently missing thread is rejected instead of being queued forever",
     assert.equal(state.countQueuedTurns(), 0);
     assert.equal(state.getBinding(2_001), null);
     assert.deepEqual(sent.map(({ text }) => text), [
-      "原会话尚未写入 Codex 历史，已失效；请使用 /new 重新创建并发送。",
+      "原会话尚未写入 Codex 历史，已失效；请使用 new 重新创建并发送。",
     ]);
   } finally {
     bridge.close();
@@ -3347,7 +3347,7 @@ test("startup removes an already queued turn whose thread never materialized", a
     await bridge.scheduleQueuedTurns();
     assert.equal(state.countQueuedTurns(), 0);
     assert.deepEqual(sent.map(({ text }) => text), [
-      "原会话尚未写入 Codex 历史，已失效；请使用 /new 重新创建并发送。",
+      "原会话尚未写入 Codex 历史，已失效；请使用 new 重新创建并发送。",
     ]);
   } finally {
     bridge.close();
@@ -3463,7 +3463,7 @@ test("a live Bridge approval can be decided once from WeChat", async () => {
   try {
     await bridge.ingestBatch({
       cursor: "cursor-approval",
-      messages: [textMessage(30, "/help")],
+      messages: [textMessage(30, "help")],
     });
     sent.length = 0;
     assert.equal(
@@ -3479,21 +3479,51 @@ test("a live Bridge approval can be decided once from WeChat", async () => {
       }),
       true,
     );
-    assert.match(sent[0]?.text ?? "", /Approval #1[\s\S]*pnpm test/u);
+    assert.match(sent[0]?.text ?? "", /需要批准[\s\S]*pnpm test[\s\S]*回复：ok 或 no/u);
 
     await bridge.ingestBatch({
       cursor: "cursor-approved",
-      messages: [textMessage(31, "/ok 1")],
+      messages: [textMessage(31, "ok")],
     });
     assert.deepEqual(responses, [{ id: 77, result: { decision: "accept" } }]);
-    assert.equal(sent.at(-1)?.text, "Approved #1");
+    assert.equal(sent.at(-1)?.text, "已批准。" );
+
+    for (const [id, itemId, command] of [
+      [78, "item-multiple-a", "pnpm test"],
+      [79, "item-multiple-b", "pnpm typecheck"],
+    ] as const) {
+      await bridge.ingestCodexEvent({
+        id,
+        method: "item/commandExecution/requestApproval",
+        params: {
+          command,
+          itemId,
+          threadId: `thread-${itemId}`,
+          turnId: `turn-${itemId}`,
+        },
+      });
+    }
+    await bridge.ingestBatch({
+      cursor: "cursor-ambiguous-approval",
+      messages: [textMessage(32, "ok")],
+    });
+    const ambiguous = sent.at(-1)?.text ?? "";
+    assert.match(ambiguous, /当前有多个待审批/u);
+    const testCode = /([A-F\d]{6})：Command: pnpm test(?:\n|$)/u.exec(
+      ambiguous,
+    )?.[1];
+    assert.match(testCode ?? "", /^[A-F\d]{6}$/u);
+    assert.equal(responses.length, 1);
 
     await bridge.ingestBatch({
-      cursor: "cursor-duplicate-approval",
-      messages: [textMessage(32, "/ok 1")],
+      cursor: "cursor-coded-approval",
+      messages: [textMessage(33, `ok${testCode}`)],
     });
-    assert.equal(responses.length, 1);
-    assert.match(sent.at(-1)?.text ?? "", /已失效或不存在/u);
+    assert.deepEqual(responses.at(-1), {
+      id: 78,
+      result: { decision: "accept" },
+    });
+    assert.equal(sent.at(-1)?.text, "已批准。" );
   } finally {
     bridge.close();
     state.close();
@@ -3519,7 +3549,7 @@ test("a transient approval notification failure stays pending instead of declini
     },
     ilink: {
       async sendText(input) {
-        if (failApprovalOnce && input.text.startsWith("Approval #")) {
+        if (failApprovalOnce && input.text.startsWith("需要批准")) {
           failApprovalOnce = false;
           throw new Error("fetch failed");
         }
@@ -3536,7 +3566,7 @@ test("a transient approval notification failure stays pending instead of declini
   try {
     await bridge.ingestBatch({
       cursor: "cursor-approval-retry-context",
-      messages: [textMessage(33, "/help")],
+      messages: [textMessage(34, "help")],
     });
     assert.equal(
       await bridge.ingestCodexEvent({
@@ -3555,7 +3585,7 @@ test("a transient approval notification failure stays pending instead of declini
 
     await bridge.ingestBatch({
       cursor: "cursor-approval-retry-status",
-      messages: [textMessage(34, "/st")],
+      messages: [textMessage(35, "st")],
     });
     assert.match(sent.at(-1)?.text ?? "", /待审批：1（通知重试中：1）/u);
     assert.match(sent.at(-1)?.text ?? "", /微信异常/u);

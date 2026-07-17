@@ -7,13 +7,13 @@
 ## 已实现
 
 - 单一微信控制者、单聊文本，以及受控的入站图片、语音转写、文件和视频
-- `/p` 按 Desktop 当前保存顺序只显示项目名，`/s` 浏览任务，`/s <n>` 进入任务
-- `/new` 新建任务，`/exit` 返回微信主任务，`/st` 查看状态，`/perm` 查看或切换当前任务的 Codex 原生权限 Profile
+- `p` 按 Desktop 当前保存顺序只显示项目名，`s` 浏览任务，`s<n>` 进入任务
+- `new` 新建任务，`exit` 返回微信主任务，`st` 查看状态，`perm` 查看或切换当前任务的 Codex 原生权限 Profile
 - App Server 可按 `thread_id` 恢复任务，持久化的继续记录可由 Desktop 任务记录读取
 - 30 分钟滑动任务绑定；项目或任务列表显示后，其编号映射固定 10 分钟
 - 同一 `thread_id` 的 Desktop/Bridge SQLite 原子租约；Bridge 停止时 Hook 仍以 fail-open 方式记录在途 Desktop 回合，关闭启动并发窗
 - iLink 游标、去重、FIFO、Dispatch Intent、Outbox 持久化
-- Bridge App Server 单次 `/ok`、`/no` 审批；通知网络失败时使用同一编号退避重试，请求失效或 30 分钟超时才自动拒绝
+- Bridge App Server 单次 `ok`、`no` 审批；多个待审批时使用不可复用的随机短码，通知网络失败时使用同一短码退避重试，请求失效或 30 分钟超时才自动拒绝
 - DPAPI CurrentUser 加密 iLink Token
 - Named Pipe Hook 与 7 天/5MB 有界 Spool，启动及运行期持续恢复
 - 离开电脑后的 Desktop 终态通知与送达后 5 分钟回复路由
@@ -38,7 +38,7 @@ pnpm ilink login
 pnpm ilink start
 ```
 
-插件安装或版本变化后，请在 Codex Desktop 审核并信任 Hooks。信任页显示内部 ID `codex-ilink-probe`，插件显示名为 `Codex iLink Guard`，二者是同一个插件。Bridge 运行时，只对微信主任务、微信当前进入的任务以及仍有微信排队/执行工作的任务启用 fail-closed 租约。当前微信所选项目中的其他任务只留下最小活动 turn 观察，用于稍后通过 `/s <n>` 进入时避免双写；其他 Desktop 项目始终放行且不记录观察，即使状态库正被瞬时写锁占用也不会停止或写入这些项目。观察无法直接入库时先写入本机 Spool，Bridge 会在每条同批微信消息执行前恢复它。观察不会显示为微信活动任务、不会触发系统保活，也不会成为门禁；精确 Stop 后保留 7 天最小 tombstone，防止迟到的重复 Prompt 重新制造永久 `Queued`。
+插件安装或版本变化后，请在 Codex Desktop 审核并信任 Hooks。信任页显示内部 ID `codex-ilink-probe`，插件显示名为 `Codex iLink Guard`，二者是同一个插件。Bridge 运行时，只对微信主任务、微信当前进入的任务以及仍有微信排队/执行工作的任务启用 fail-closed 租约。当前微信所选项目中的其他任务只留下最小活动 turn 观察，用于稍后通过 `s<n>` 进入时避免双写；其他 Desktop 项目始终放行且不记录观察，即使状态库正被瞬时写锁占用也不会停止或写入这些项目。观察无法直接入库时先写入本机 Spool，Bridge 会在每条同批微信消息执行前恢复它。观察不会显示为微信活动任务、不会触发系统保活，也不会成为门禁；精确 Stop 后保留 7 天最小 tombstone，防止迟到的重复 Prompt 重新制造永久 `Queued`。
 
 关闭插件后，微信仍可通过 App Server 执行任务，但 Desktop 回合不再参与租约、Desktop 生命周期通知也会丢失；此时如果 Desktop 与微信同时写同一个共享任务，可能发生并发错组。因此仅在排障或确认不会双端同时操作时临时关闭，并且必须在关闭前确认没有正在运行的 Desktop 回合。若在 Desktop 回合中途关闭，精确 `Stop` 会丢失，已有消息会保守保持 `Queued`，不能仅凭独立 App Server 的 `interrupted` 状态自动解锁。
 
@@ -54,25 +54,26 @@ pnpm ilink stop
 ## 微信命令
 
 ```text
-/p              projects
-/p <n>          select project
-/s              sessions
-/s <n>          enter session
-/s +            next page
-/s arc          archived sessions
-/new            new session
-/exit           return to main
-/st             status
-/perm           list current Codex permission profiles
-/perm <n>       select a Codex permission profile
-/ok <n>         approve Bridge request
-/no <n>         deny Bridge request
-/help           commands
+p               projects
+p<n>            select project
+s               sessions
+s<n>            enter session
+s+              next page
+sarc            archived sessions
+new             new session
+exit            return to main
+st              status
+perm            list current Codex permission profiles
+perm<n>         select a Codex permission profile
+ok | no         decide the only pending approval
+ok<code>        approve one of multiple pending requests
+no<code>        deny one of multiple pending requests
+help            commands
 ```
 
-`/p <n>`、`/s <n>` 可以直接使用；没有有效列表快照时，Bridge 会按当前项目列表或当前项目未归档任务第一页解释编号。执行 `/p`、`/s`、`/s +` 或 `/s arc` 后，刚显示的编号从该列表或页面生成时起固定 10 分钟；进入任务后使用的是另一套 30 分钟滑动绑定。
+`p<n>`、`s<n>` 可以直接使用；没有有效列表快照时，Bridge 会按当前项目列表或当前项目未归档任务第一页解释编号。执行 `p`、`s`、`s+` 或 `sarc` 后，刚显示的编号从该列表或页面生成时起固定 10 分钟；进入任务后使用的是另一套 30 分钟滑动绑定。命令不使用 `/` 或空格；旧斜杠形式会明确返回未知命令。
 
-微信不能切换模型或 reasoning effort。`/perm` 通过 Codex 原生 `permissionProfile/list` 展示当前项目实际允许的 Profile；`/perm <n>` 对已加载任务使用 `thread/settings/update.permissions`，首次加载或重连时使用 `thread/resume.permissions`。Bridge 只保存任务 ID 到原生 Profile ID 的映射，以便自身重连后重新桥接，不自建 Sandbox 或审批规则，也不修改 Desktop 全局设置、其他任务或已经开始的回合。微信主任务首次创建时采用当时 Codex 运行时的默认配置；之后 `/exit` 只返回这个持久化任务，不会重建或改写其模型。`/new` 只显式传入所选项目的 `cwd`，采用创建时的 Codex 运行时默认配置，不读取该项目其他任务或 Desktop 最近选择的模型；`/s <n>` 恢复目标旧任务及 Bridge 已为该任务选择的原生权限 Profile。Desktop 回合的审批仍只能在 Desktop 完成；控制者离开电脑时，同一 Desktop 回合最多向微信提醒一次，微信只处理 Bridge 自己发起且仍在线等待的单次审批。
+微信不能切换模型或 reasoning effort。`perm` 通过 Codex 原生 `permissionProfile/list` 展示当前项目实际允许的 Profile；`perm<n>` 对已加载任务使用 `thread/settings/update.permissions`，首次加载或重连时使用 `thread/resume.permissions`。Bridge 只保存任务 ID 到原生 Profile ID 的映射，以便自身重连后重新桥接，不自建 Sandbox 或审批规则，也不修改 Desktop 全局设置、其他任务或已经开始的回合。微信主任务首次创建时采用当时 Codex 运行时的默认配置；之后 `exit` 只返回这个持久化任务，不会重建或改写其模型。`new` 只显式传入所选项目的 `cwd`，采用创建时的 Codex 运行时默认配置，不读取该项目其他任务或 Desktop 最近选择的模型；`s<n>` 恢复目标旧任务及 Bridge 已为该任务选择的原生权限 Profile。Desktop 回合的审批仍只能在 Desktop 完成；控制者离开电脑时，同一 Desktop 回合最多向微信提醒一次，微信只处理 Bridge 自己发起且仍在线等待的单次审批。
 
 Bridge 启动 App Server 时只声明 Codex 权限 Profile API 所要求的 `experimentalApi` 客户端能力，不覆盖 Codex 的功能开关、模型、插件配置，也不实现权限判定；微信回合使用 Codex 原生 Profile 解析出的 Sandbox 和审批策略。仅由 Desktop UI 宿主提供的能力在后台 App Server 中仍可能不可用。状态读取超时只结束本次读取，不会杀掉仍在执行任务的 App Server；回合超过约 2 分钟仍未结束时，微信只收到一次“仍在执行”提示，任务不会因此被取消或重试。
 
@@ -100,11 +101,11 @@ Bridge 启动 App Server 时只声明 Codex 权限 Profile API 所要求的 `exp
 - Token 仅以 Windows 当前用户 DPAPI 密文保存
 - 其他微信用户和群消息静默忽略，其文本和媒体均不下载、不执行
 - Bridge 未运行时，Hook 只记录在途回合而不阻止普通 Codex；若 Bridge 异常退出且仲裁仍处于安全关闭状态，冲突任务会被保守阻止
-- `/p` 只读 `%USERPROFILE%\.codex\.codex-global-state.json` 的已保存工作区及排序字段；解析失败时关闭项目列表，不回退为全部历史任务目录
+- `p` 只读 `%USERPROFILE%\.codex\.codex-global-state.json` 的已保存工作区及排序字段；解析失败时关闭项目列表，不回退为全部历史任务目录
 
 如异常退出后 Desktop 提示 `CODEX_ILINK_THREAD_BUSY`，先确认 Bridge 已停止且 Desktop 没有活动回合；必要时再临时禁用 `Codex iLink Guard`，不要直接删除整个 SQLite 状态库。
 
-若 `/st` 长时间显示“微信任务（租约活动）”并持续出现 `Queued`，表示持有该回合的 Bridge App Server 仍报告任务活动；独立 App Server 对同一回合显示的 `notLoaded` 或 `interrupted` 不能证明它已经结束。Bridge 不会据此自动解锁或重试，以免同一任务被并发写入。确认该回合确实卡住后，使用 `pnpm ilink stop` 再 `pnpm ilink start`，由新持有进程完成中断对账；已排队消息默认保留并继续执行。
+若 `st` 长时间显示“微信任务（租约活动）”并持续出现 `Queued`，表示持有该回合的 Bridge App Server 仍报告任务活动；独立 App Server 对同一回合显示的 `notLoaded` 或 `interrupted` 不能证明它已经结束。Bridge 不会据此自动解锁或重试，以免同一任务被并发写入。确认该回合确实卡住后，使用 `pnpm ilink stop` 再 `pnpm ilink start`，由新持有进程完成中断对账；已排队消息默认保留并继续执行。
 
 ## 开发验证
 

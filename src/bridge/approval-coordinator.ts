@@ -1,14 +1,17 @@
+import { randomBytes, randomInt } from "node:crypto";
+
 import type { CodexEvent } from "./bridge.ts";
 
 export type ApprovalDecisionResult =
-  | { kind: "decided"; index: number }
-  | { kind: "not-found"; index: number };
+  | { approvals: PendingApproval[]; kind: "ambiguous" }
+  | { code: string; kind: "decided" }
+  | { code: string | null; kind: "not-found" };
 
 export type PendingApproval = {
+  code: string;
   deliveryAttempts: number;
   deliveryStatus: "delivered" | "pending" | "retrying";
   expiresAtMs: number;
-  index: number;
   method: ApprovalMethod;
   summary: string;
   threadId: string;
@@ -38,6 +41,7 @@ type ApprovalMethod =
 
 type LiveApproval = PendingApproval & {
   id: number | string;
+  notificationText: string;
   params: Record<string, unknown>;
   timer: NodeJS.Timeout;
 };
@@ -56,14 +60,14 @@ const APPROVAL_METHODS = new Set<ApprovalMethod>([
  */
 export class ApprovalCoordinator {
   readonly #isLive: NonNullable<ApprovalCoordinatorOptions["isLive"]>;
-  readonly #live = new Map<number, LiveApproval>();
+  readonly #live = new Map<string, LiveApproval>();
   readonly #notify: ApprovalCoordinatorOptions["notify"];
   readonly #now: ApprovalCoordinatorOptions["now"];
   readonly #onExpired: ApprovalCoordinatorOptions["onExpired"];
   readonly #respond: ApprovalCoordinatorOptions["respond"];
   readonly #sleep: NonNullable<ApprovalCoordinatorOptions["sleep"]>;
   readonly #timeoutMs: number;
-  #nextIndex = 1;
+  readonly #usedCodes = new Set<string>();
 
   constructor(options: ApprovalCoordinatorOptions) {
     this.#isLive = options.isLive ?? (() => true);
@@ -84,37 +88,49 @@ export class ApprovalCoordinator {
     if (!this.#isLive(event.id)) return true;
 
     this.expire();
-    const index = this.#nextIndex++;
-    const timer = setTimeout(() => this.#expireIndex(index), this.#timeoutMs);
+    const code = this.#newCode();
+    const timer = setTimeout(() => this.#expireCode(code), this.#timeoutMs);
     timer.unref();
     const approval: LiveApproval = {
+      code,
       deliveryAttempts: 0,
       deliveryStatus: "pending",
       expiresAtMs: this.#now() + this.#timeoutMs,
       id: event.id,
-      index,
       method: event.method,
+      notificationText: "",
       params: event.params,
       summary: approvalSummary(event.method, event.params),
       timer,
       threadId,
       turnId,
     };
-    this.#live.set(index, approval);
-    await this.#deliver(index);
-    if (!this.#isLive(event.id) && this.#live.get(index) === approval) {
-      this.#live.delete(index);
+    approval.notificationText = approvalNotification(
+      approval,
+      [...this.#live.values()],
+    );
+    this.#live.set(code, approval);
+    await this.#deliver(code);
+    if (!this.#isLive(event.id) && this.#live.get(code) === approval) {
+      this.#live.delete(code);
       clearTimeout(timer);
       this.#emitExpired(approval, "request-lost");
     }
     return true;
   }
 
-  decide(index: number, approved: boolean): ApprovalDecisionResult {
+  decide(code: string | null, approved: boolean): ApprovalDecisionResult {
     this.expire();
-    const approval = this.#live.get(index);
-    if (!approval) return { index, kind: "not-found" };
-    this.#live.delete(index);
+    if (code === null && this.#live.size > 1) {
+      return { approvals: this.list(), kind: "ambiguous" };
+    }
+    const normalizedCode = code?.toUpperCase() ?? this.#live.keys().next().value;
+    if (typeof normalizedCode !== "string") {
+      return { code, kind: "not-found" };
+    }
+    const approval = this.#live.get(normalizedCode);
+    if (!approval) return { code: normalizedCode, kind: "not-found" };
+    this.#live.delete(normalizedCode);
     clearTimeout(approval.timer);
     const responded = this.#respond(
       approval.id,
@@ -123,22 +139,22 @@ export class ApprovalCoordinator {
         : denialResult(approval.method),
     );
     return responded === false
-      ? { index, kind: "not-found" }
-      : { index, kind: "decided" };
+      ? { code: normalizedCode, kind: "not-found" }
+      : { code: normalizedCode, kind: "decided" };
   }
 
   expire(nowMs = this.#now()): number {
     let expired = 0;
-    for (const [index, approval] of this.#live) {
+    for (const [code, approval] of this.#live) {
       if (!this.#isLive(approval.id)) {
-        this.#live.delete(index);
+        this.#live.delete(code);
         clearTimeout(approval.timer);
         this.#emitExpired(approval, "request-lost");
         expired += 1;
         continue;
       }
       if (approval.expiresAtMs > nowMs) continue;
-      this.#live.delete(index);
+      this.#live.delete(code);
       clearTimeout(approval.timer);
       this.#respond(approval.id, denialResult(approval.method));
       this.#emitExpired(approval, "timeout");
@@ -150,9 +166,14 @@ export class ApprovalCoordinator {
   list(): PendingApproval[] {
     this.expire();
     return [...this.#live.values()]
-      .sort((left, right) => left.index - right.index)
-      .map(({ id: _id, params: _params, timer: _timer, ...approval }) =>
-        approval,
+      .map(
+        ({
+          id: _id,
+          notificationText: _notificationText,
+          params: _params,
+          timer: _timer,
+          ...approval
+        }) => approval,
       );
   }
 
@@ -166,10 +187,10 @@ export class ApprovalCoordinator {
     this.#live.clear();
   }
 
-  #expireIndex(index: number): void {
-    const approval = this.#live.get(index);
+  #expireCode(code: string): void {
+    const approval = this.#live.get(code);
     if (!approval) return;
-    this.#live.delete(index);
+    this.#live.delete(code);
     clearTimeout(approval.timer);
     const live = this.#isLive(approval.id);
     if (live) {
@@ -178,35 +199,35 @@ export class ApprovalCoordinator {
     this.#emitExpired(approval, live ? "timeout" : "request-lost");
   }
 
-  async #deliver(index: number): Promise<void> {
-    const approval = this.#live.get(index);
+  async #deliver(code: string): Promise<void> {
+    const approval = this.#live.get(code);
     if (!approval) return;
     if (!this.#isLive(approval.id)) {
-      this.#live.delete(index);
+      this.#live.delete(code);
       clearTimeout(approval.timer);
       this.#emitExpired(approval, "request-lost");
       return;
     }
     if (approval.expiresAtMs <= this.#now()) {
-      this.#expireIndex(index);
+      this.#expireCode(code);
       return;
     }
 
     approval.deliveryAttempts += 1;
     try {
       await this.#notify(
-        `Approval #${index}\n${approval.summary}\n/ok ${index} | /no ${index}`,
+        approval.notificationText,
         `codex-ilink:approval:${approval.turnId}:${stringField(approval.params, "itemId") ?? "unknown"}`,
       );
-      if (this.#live.get(index) === approval) {
+      if (this.#live.get(code) === approval) {
         approval.deliveryStatus = "delivered";
       }
     } catch {
-      if (this.#live.get(index) !== approval) {
+      if (this.#live.get(code) !== approval) {
         return;
       }
       if (!this.#isLive(approval.id)) {
-        this.#live.delete(index);
+        this.#live.delete(code);
         clearTimeout(approval.timer);
         this.#emitExpired(approval, "request-lost");
         return;
@@ -217,8 +238,19 @@ export class ApprovalCoordinator {
         1_000 * 2 ** Math.min(approval.deliveryAttempts - 1, 5),
       );
       void this.#sleep(delayMs)
-        .then(() => this.#deliver(index))
+        .then(() => this.#deliver(code))
         .catch(() => undefined);
+    }
+  }
+
+  #newCode(): string {
+    for (;;) {
+      const code = `${"ABCDEF"[randomInt(6)]}${randomBytes(3)
+        .toString("hex")
+        .slice(0, 5)}`.toUpperCase();
+      if (this.#usedCodes.has(code)) continue;
+      this.#usedCodes.add(code);
+      return code;
     }
   }
 
@@ -232,7 +264,7 @@ export class ApprovalCoordinator {
           deliveryAttempts: approval.deliveryAttempts,
           deliveryStatus: approval.deliveryStatus,
           expiresAtMs: approval.expiresAtMs,
-          index: approval.index,
+          code: approval.code,
           method: approval.method,
           summary: approval.summary,
           threadId: approval.threadId,
@@ -296,6 +328,23 @@ function stringField(
 ): string | null {
   const field = value[name];
   return typeof field === "string" && field.length > 0 ? field : null;
+}
+
+function approvalNotification(
+  approval: PendingApproval,
+  existingApprovals: readonly PendingApproval[],
+): string {
+  if (existingApprovals.length === 0) {
+    return `需要批准\n${approval.summary}\n回复：ok 或 no`;
+  }
+  return [
+    "当前有多个待审批：",
+    ...existingApprovals.map(
+      (existing) => `${existing.code}：${existing.summary}`,
+    ),
+    `${approval.code}：${approval.summary}`,
+    "回复：ok<code> 或 no<code>",
+  ].join("\n");
 }
 
 function retrySleep(milliseconds: number): Promise<void> {

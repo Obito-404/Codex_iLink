@@ -23,7 +23,7 @@ const session: ILinkSession = {
   controllerUserId: "controller-navigation",
 };
 
-test("/p creates a fixed ten-minute snapshot and /p n selects from it", async () => {
+test("p creates a fixed ten-minute snapshot and p<n> selects from it", async () => {
   await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
     codex.activeThreads = [
       { cwd: "D:\\Newest", id: "newest", updatedAt: 30 },
@@ -46,14 +46,14 @@ test("/p creates a fixed ten-minute snapshot and /p n selects from it", async ()
       threadId: "previous-thread",
     });
 
-    assert.deepEqual(await ingest(bridge, 1, "/p"), { accepted: 1, sent: 1 });
+    assert.deepEqual(await ingest(bridge, 1, "p"), { accepted: 1, sent: 1 });
     assert.match(sent[0]?.text ?? "", /1\. Newest/u);
     assert.match(sent[0]?.text ?? "", /2\. Older/u);
 
     codex.activeThreads = [
       { cwd: "D:\\Inserted-Later", id: "inserted", updatedAt: 100 },
     ];
-    assert.deepEqual(await ingest(bridge, 2, "/p 2"), {
+    assert.deepEqual(await ingest(bridge, 2, "p2"), {
       accepted: 1,
       sent: 1,
     });
@@ -73,9 +73,9 @@ test("/p creates a fixed ten-minute snapshot and /p n selects from it", async ()
   });
 });
 
-test("/p n selects from the current Desktop projects without a prior list", async () => {
+test("p<n> selects from the current Desktop projects without a prior list", async () => {
   await withNavigationBridge(async ({ bridge, sent, state }) => {
-    assert.deepEqual(await ingest(bridge, 3, "/p 2"), {
+    assert.deepEqual(await ingest(bridge, 3, "p2"), {
       accepted: 1,
       sent: 1,
     });
@@ -91,7 +91,7 @@ test("/p n selects from the current Desktop projects without a prior list", asyn
   });
 });
 
-test("/p mirrors Desktop saved projects by name while routing with hidden paths", async () => {
+test("p mirrors Desktop saved projects by name while routing with hidden paths", async () => {
   const projects = [
     { cwd: "D:\\Codex_iLink", name: "Codex_iLink" },
     {
@@ -111,7 +111,7 @@ test("/p mirrors Desktop saved projects by name while routing with hidden paths"
       { cwd: "D:\\Codex_iLink", id: "allowed-thread", updatedAt: 1 },
     ];
 
-    await ingest(bridge, 3, "/p");
+    await ingest(bridge, 3, "p");
 
     assert.equal(
       sent[0]?.text,
@@ -123,13 +123,13 @@ test("/p mirrors Desktop saved projects by name while routing with hidden paths"
         "4. StudyBuddy",
         "5. Elan_AutoPrint",
         "6. ExcelMapper",
-        "使用 /p <n> 选择项目；编号自本列表生成起 10 分钟内有效。",
+        "使用 p<n> 选择项目；编号自本列表生成起 10 分钟内有效。",
       ].join("\n"),
     );
     assert.doesNotMatch(sent[0]?.text ?? "", /D:\\\\/u);
     assert.doesNotMatch(sent[0]?.text ?? "", /System32/u);
 
-    await ingest(bridge, 4, "/p 6");
+    await ingest(bridge, 4, "p6");
     assert.equal(
       state.getBridgeSettings().selectedProjectPath,
       "D:\\project\\ExcelMapper",
@@ -139,20 +139,20 @@ test("/p mirrors Desktop saved projects by name while routing with hidden paths"
   }, { projects });
 });
 
-test("/p fails closed when the Desktop project catalog is unavailable", async () => {
+test("p fails closed when the Desktop project catalog is unavailable", async () => {
   await withNavigationBridge(async ({ bridge, codex, sent }) => {
     codex.activeThreads = [
       { cwd: "C:\\Windows\\System32", id: "historical-thread", updatedAt: 99 },
     ];
 
-    await ingest(bridge, 5, "/p");
+    await ingest(bridge, 5, "p");
 
     assert.equal(sent[0]?.text, "项目命令执行失败，请稍后重试。");
     assert.doesNotMatch(sent[0]?.text ?? "", /System32|C:\\\\/u);
   });
 });
 
-test("/s n enters the current first-page session without a prior list", async () => {
+test("s<n> enters the current first-page session without a prior list", async () => {
   await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
     state.setSelectedProjectPath("D:\\Selected");
     codex.activeThreads = [
@@ -172,7 +172,7 @@ test("/s n enters the current first-page session without a prior list", async ()
       },
     ];
 
-    await ingest(bridge, 9, "/s 2");
+    await ingest(bridge, 9, "s2");
 
     assert.deepEqual(codex.calls, [
       "resume:thread-second",
@@ -184,7 +184,7 @@ test("/s n enters the current first-page session without a prior list", async ()
   });
 });
 
-test("/s pages the selected project's sessions and /s n binds the displayed session", async () => {
+test("s pages the selected project's sessions and s<n> binds the displayed session", async () => {
   await withNavigationBridge(async ({ bridge, clock, codex, sent, state }) => {
     state.setSelectedProjectPath("D:\\Selected");
     codex.activeThreads = Array.from({ length: 12 }, (_, index) => ({
@@ -195,12 +195,12 @@ test("/s pages the selected project's sessions and /s n binds the displayed sess
       updatedAt: index + 1,
     }));
 
-    await ingest(bridge, 10, "/s");
+    await ingest(bridge, 10, "s");
     assert.match(sent[0]?.text ?? "", /1\. Task 12 \[idle\]/u);
     assert.match(sent[0]?.text ?? "", /10\. Task 3 \[idle\]/u);
-    assert.match(sent[0]?.text ?? "", /下一页：\/s \+/u);
+    assert.match(sent[0]?.text ?? "", /下一页：s\+/u);
 
-    await ingest(bridge, 11, "/s +");
+    await ingest(bridge, 11, "s+");
     assert.match(sent[1]?.text ?? "", /1\. Task 2 \[idle\]/u);
     assert.match(sent[1]?.text ?? "", /2\. Task 1 \[idle\]/u);
 
@@ -241,7 +241,7 @@ test("/s pages the selected project's sessions and /s n binds the displayed sess
     });
     clock.value = 50_000;
 
-    await ingest(bridge, 12, "/s 2");
+    await ingest(bridge, 12, "s2");
     assert.deepEqual(codex.calls.slice(-2), [
       "resume:thread-01",
       "read:thread-01",
@@ -263,7 +263,7 @@ test("/s pages the selected project's sessions and /s n binds the displayed sess
   });
 });
 
-test("/s arc keeps archived identity and /s n unarchives before resuming", async () => {
+test("sarc keeps archived identity and s<n> unarchives before resuming", async () => {
   await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
     state.setSelectedProjectPath("D:\\Selected");
     codex.archivedThreads = [
@@ -282,8 +282,8 @@ test("/s arc keeps archived identity and /s n unarchives before resuming", async
       thread: { id: "thread-archived" },
     });
 
-    await ingest(bridge, 20, "/s arc");
-    await ingest(bridge, 21, "/s 1");
+    await ingest(bridge, 20, "sarc");
+    await ingest(bridge, 21, "s1");
 
     assert.deepEqual(codex.calls.slice(-3), [
       "unarchive:thread-archived",
@@ -295,7 +295,7 @@ test("/s arc keeps archived identity and /s n unarchives before resuming", async
   });
 });
 
-test("/s n keeps the successful binding when preview reading is temporarily unavailable", async () => {
+test("s<n> keeps the successful binding when preview reading is temporarily unavailable", async () => {
   await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
     codex.activeThreads = [
       {
@@ -306,8 +306,8 @@ test("/s n keeps the successful binding when preview reading is temporarily unav
     ];
     codex.readFailures.add("thread-preview-unavailable");
 
-    await ingest(bridge, 25, "/s");
-    await ingest(bridge, 26, "/s 1");
+    await ingest(bridge, 25, "s");
+    await ingest(bridge, 26, "s1");
 
     assert.equal(state.getBinding(1_001)?.threadId, "thread-preview-unavailable");
     assert.match(
@@ -318,7 +318,7 @@ test("/s n keeps the successful binding when preview reading is temporarily unav
   });
 });
 
-test("/new creates in the selected project, binds immediately, and /exit returns to main", async () => {
+test("new creates in the selected project, binds immediately, and exit returns to main", async () => {
   await withNavigationBridge(async ({ bridge, clock, codex, sent, state }) => {
     state.setSelectedProjectPath("D:\\Selected");
     state.putNotificationRoute({
@@ -330,7 +330,7 @@ test("/new creates in the selected project, binds immediately, and /exit returns
     codex.nextStartedThreadId = "thread-new-project";
     clock.value = 10_000;
 
-    await ingest(bridge, 30, "/new");
+    await ingest(bridge, 30, "new");
     assert.deepEqual(codex.startedCwds, ["D:\\Selected"]);
     assert.deepEqual(state.getBinding(10_001), {
       expiresAtMs: 10_000 + 30 * 60 * 1_000,
@@ -357,7 +357,7 @@ test("/new creates in the selected project, binds immediately, and /exit returns
       expiresAtMs: 100_000,
       threadId: "thread-new-project",
     });
-    await ingest(bridge, 31, "/exit");
+    await ingest(bridge, 31, "exit");
     assert.equal(state.getBinding(10_001), null);
     assert.deepEqual(state.listLiveNotificationRoutes(10_001), []);
     assert.equal(state.getBridgeSettings().selectedProjectPath, "D:\\Selected");
@@ -373,11 +373,11 @@ test("/new creates in the selected project, binds immediately, and /exit returns
   });
 });
 
-test("/new without a project uses the reserved Inbox and stays product-level unprojected", async () => {
+test("new without a project uses the reserved Inbox and stays product-level unprojected", async () => {
   await withNavigationBridge(async ({ bridge, codex, state }) => {
     codex.nextStartedThreadId = "thread-new-inbox";
 
-    await ingest(bridge, 40, "/new");
+    await ingest(bridge, 40, "new");
 
     assert.deepEqual(codex.startedCwds, ["D:\\Codex-iLink\\Inbox"]);
     assert.equal(state.getBinding(1_001)?.projectPath, null);
@@ -385,7 +385,7 @@ test("/new without a project uses the reserved Inbox and stays product-level unp
   });
 });
 
-test("/perm lists and directly selects Codex native permission profiles", async () => {
+test("perm lists and perm<n> selects Codex native permission profiles", async () => {
   await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
     codex.resumes.set("wechat-main", {
       activePermissionProfile: { id: ":workspace" },
@@ -395,7 +395,7 @@ test("/perm lists and directly selects Codex native permission profiles", async 
       thread: { id: "wechat-main" },
     });
 
-    await ingest(bridge, 45, "/perm");
+    await ingest(bridge, 45, "perm");
 
     assert.equal(
       sent[0]?.text,
@@ -407,11 +407,11 @@ test("/perm lists and directly selects Codex native permission profiles", async 
         "1. 只读 (:read-only)",
         "2. 项目读写 (:workspace)",
         "3. 完全访问 (:danger-full-access)",
-        "使用 /perm <n> 直接切换当前任务权限。",
+        "使用 perm<n> 直接切换当前任务权限。",
       ].join("\n"),
     );
 
-    await ingest(bridge, 46, "/perm 3");
+    await ingest(bridge, 46, "perm3");
 
     assert.match(sent[1]?.text ?? "", /已切换当前任务权限/u);
     assert.match(sent[1]?.text ?? "", /3\. 完全访问 \(:danger-full-access\)/u);
@@ -434,7 +434,7 @@ test("/perm lists and directly selects Codex native permission profiles", async 
   });
 });
 
-test("/perm can explicitly recover when a saved profile is no longer allowed", async () => {
+test("perm can explicitly recover when a saved profile is no longer allowed", async () => {
   await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
     state.setThreadPermissionProfile({
       profileId: ":danger-full-access",
@@ -448,7 +448,7 @@ test("/perm can explicitly recover when a saved profile is no longer allowed", a
       id: ":danger-full-access",
     };
 
-    await ingest(bridge, 48, "/perm");
+    await ingest(bridge, 48, "perm");
 
     assert.match(sent[0]?.text ?? "", /Codex 未能确认当前权限/u);
     assert.match(
@@ -456,7 +456,7 @@ test("/perm can explicitly recover when a saved profile is no longer allowed", a
       /3\. 完全访问 \(:danger-full-access\)（不可用）/u,
     );
 
-    await ingest(bridge, 49, "/perm 2");
+    await ingest(bridge, 49, "perm2");
 
     assert.match(sent[1]?.text ?? "", /已切换当前任务权限/u);
     assert.deepEqual(state.getThreadPermissionProfile("wechat-main"), {
@@ -467,7 +467,7 @@ test("/perm can explicitly recover when a saved profile is no longer allowed", a
   });
 });
 
-test("/st reports current routing, every known active task, queues, and health", async () => {
+test("st reports current routing, every known active task, queues, and health", async () => {
   await withNavigationBridge(async ({ bridge, clock, codex, leases, sent, state }) => {
     clock.value = 100_000;
     state.setSelectedProjectPath("D:\\Selected");
@@ -541,7 +541,7 @@ test("/st reports current routing, every known active task, queues, and health",
       turnId: "lease-only-turn",
     });
 
-    await ingest(bridge, 50, "/st");
+    await ingest(bridge, 50, "st");
 
     const reply = sent[0]?.text ?? "";
     assert.match(reply, /项目：Selected/u);

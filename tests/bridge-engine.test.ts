@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { createCipheriv } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2837,6 +2843,109 @@ test("an oversized final reply is durably capped at three safe WeChat messages",
     assert.ok(sent.every(({ text }) => Buffer.byteLength(text, "utf8") <= 2_000));
     assert.match(sent[2]?.text ?? "", /内容已截断.*Codex Desktop/u);
     assert.ok(sent.every(({ text }) => !text.includes("\uFFFD")));
+  } finally {
+    bridge.close();
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a standalone local file link is delivered as WeChat media instead of fake text", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-final-media-"));
+  const databasePath = join(directory, "state.sqlite");
+  const filePath = join(directory, "到账凭证.png");
+  writeFileSync(filePath, "fake-image");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const order: string[] = [];
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  const bridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      async readThread() {
+        return {
+          thread: {
+            turns: [
+              {
+                id: "turn-media",
+                items: [
+                  {
+                    phase: "final_answer",
+                    text: `已发给你。\n[到账凭证.png](<${filePath}>)`,
+                    type: "agentMessage",
+                  },
+                ],
+                status: "completed",
+              },
+            ],
+          },
+        };
+      },
+      async resumeThread(threadId) {
+        return { thread: { id: threadId } };
+      },
+      async startTurn(input) {
+        leases.claimBridgeTurn({
+          instanceId: "bridge-instance",
+          threadId: input.threadId,
+          turnId: "turn-media",
+        });
+        return { turn: { id: "turn-media" } };
+      },
+    },
+    ilink: {
+      async prepareMedia(input) {
+        assert.equal(input.media.path, filePath);
+        assert.equal(input.media.kind, "image");
+        return {
+          aesKeyBase64: "YWVzLWtleQ==",
+          ciphertextSize: 16,
+          encryptedQueryParam: "download-param",
+          kind: input.media.kind,
+          name: input.media.name,
+          plaintextSize: 10,
+          type: "prepared-media",
+          v: 1,
+        };
+      },
+      async sendMedia(input) {
+        order.push(`media:${input.media.name}`);
+        return { accepted: true, clientId: input.clientId };
+      },
+      async sendText(input) {
+        order.push(`text:${input.text}`);
+        assert.doesNotMatch(input.text, /[A-Za-z]:\\/u);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases,
+    mainThreadId: "thread-main",
+    newId: () => "dispatch-media",
+    now: () => 3_000,
+    session,
+    state,
+  });
+
+  try {
+    await bridge.ingestBatch({
+      cursor: "cursor-media",
+      messages: [textMessage(221, "把图片发给我")],
+    });
+    assert.equal(
+      state.getDispatchIntentByTurnId("turn-media")?.status,
+      "accepted",
+    );
+    assert.equal(leases.getLease("thread-main")?.turnId, "turn-media");
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        method: "turn/completed",
+        params: { threadId: "thread-main", turn: { id: "turn-media" } },
+      }),
+      true,
+    );
+    assert.deepEqual(order, ["media:到账凭证.png", "text:已发给你。"]);
+    assert.equal(state.listPendingOutbox().length, 0);
   } finally {
     bridge.close();
     leases.close();

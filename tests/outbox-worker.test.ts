@@ -7,6 +7,10 @@ import test from "node:test";
 import { OutboxWorker } from "../src/bridge/outbox-worker.ts";
 import { SqliteState } from "../src/bridge/sqlite-state.ts";
 import type { ILinkSession } from "../src/ilink/protocol.ts";
+import {
+  parseOutboundPayload,
+  serializeOutboundPayload,
+} from "../src/media/outbound-media.ts";
 
 const session: ILinkSession = {
   baseUrl: "https://ilink.example",
@@ -270,6 +274,88 @@ test("concurrent drains share one in-flight delivery", async () => {
     release();
     assert.deepEqual(await first, await second);
     assert.equal(calls, 1);
+  });
+});
+
+test("media is uploaded once, persisted before send, and blocks a false text claim", async () => {
+  await withState(async (state) => {
+    state.enqueueOutbox({
+      body: serializeOutboundPayload({
+        kind: "image",
+        name: "凭证.png",
+        path: "C:\\Desktop\\凭证.png",
+        type: "local-media",
+        v: 1,
+      }),
+      clientId: "codex-ilink:turn-media:final:part:1",
+      contextToken: "ctx",
+      createdAtMs: 1,
+      targetUserId: "controller-a",
+    });
+    state.enqueueOutbox({
+      body: "已发给你。",
+      clientId: "codex-ilink:turn-media:final:part:2",
+      contextToken: "ctx",
+      createdAtMs: 1,
+      targetUserId: "controller-a",
+    });
+    let available = false;
+    let prepareCalls = 0;
+    let mediaCalls = 0;
+    let textCalls = 0;
+    const worker = new OutboxWorker({
+      ilink: {
+        async prepareMedia(input) {
+          prepareCalls += 1;
+          return {
+            aesKeyBase64: "YWVzLWtleQ==",
+            ciphertextSize: 32,
+            encryptedQueryParam: "download-param",
+            kind: input.media.kind,
+            name: input.media.name,
+            plaintextSize: 20,
+            type: "prepared-media",
+            v: 1,
+          };
+        },
+        async sendMedia(input) {
+          mediaCalls += 1;
+          if (!available) throw new Error("network unavailable");
+          return { accepted: true, clientId: input.clientId };
+        },
+        async sendText(input) {
+          textCalls += 1;
+          return { accepted: true, clientId: input.clientId };
+        },
+      },
+      maxAttempts: 1,
+      now: () => 2,
+      session,
+      state,
+    });
+
+    assert.deepEqual(await worker.drain(), {
+      confirmed: 0,
+      deferred: 1,
+      failed: 1,
+    });
+    assert.equal(prepareCalls, 1);
+    assert.equal(mediaCalls, 1);
+    assert.equal(textCalls, 0);
+    const persisted = state.getOutbox("codex-ilink:turn-media:final:part:1");
+    assert.ok(persisted?.body);
+    assert.equal(parseOutboundPayload(persisted.body).type, "prepared-media");
+
+    available = true;
+    assert.equal(worker.resetDeferred(), 1);
+    assert.deepEqual(await worker.drain(), {
+      confirmed: 2,
+      deferred: 0,
+      failed: 0,
+    });
+    assert.equal(prepareCalls, 1, "a retry must reuse the durable CDN payload");
+    assert.equal(mediaCalls, 2);
+    assert.equal(textCalls, 1);
   });
 });
 

@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { createDecipheriv } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { ILinkClient } from "../src/ilink/ilink-client.ts";
@@ -841,4 +845,168 @@ test("sendText treats an unreadable success response as delivery unknown", async
       return true;
     },
   );
+});
+
+test("media follows the official encrypted CDN upload and structured item flow", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-outbound-"));
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const filePath = join(directory, "到账凭证.png");
+  const plaintext = Buffer.from("fake-png-payload");
+  writeFileSync(filePath, plaintext);
+  let uploadRequest: Record<string, unknown> | undefined;
+  let ciphertext: Buffer | undefined;
+  let sendRequest: Record<string, unknown> | undefined;
+  const client = new ILinkClient({
+    fetch: async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/ilink/bot/getuploadurl")) {
+        uploadRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        assert.equal(
+          new Headers(init?.headers).get("Authorization"),
+          "Bearer secret-token",
+        );
+        return Response.json({
+          upload_full_url:
+            "https://novac2c.cdn.weixin.qq.com/c2c/upload?ticket=opaque",
+        });
+      }
+      if (url.includes("novac2c.cdn.weixin.qq.com/c2c/upload")) {
+        ciphertext = Buffer.from(init?.body as Uint8Array);
+        return new Response(null, {
+          headers: { "x-encrypted-param": "download-opaque" },
+          status: 200,
+        });
+      }
+      if (url.endsWith("/ilink/bot/sendmessage")) {
+        sendRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ ret: 0 });
+      }
+      throw new Error(`unexpected request ${url}`);
+    },
+  });
+  const session = {
+    baseUrl: "https://api.weixin.qq.com/",
+    botId: "bot-1",
+    botToken: "secret-token",
+    controllerUserId: "controller-1",
+  };
+
+  const prepared = await client.prepareMedia({
+    media: {
+      kind: "image",
+      name: "到账凭证.png",
+      path: filePath,
+      type: "local-media",
+      v: 1,
+    },
+    session,
+  });
+  await client.sendMedia({
+    clientId: "codex-ilink:media-1",
+    contextToken: "ctx-media",
+    media: prepared,
+    session,
+  });
+
+  assert.equal(uploadRequest?.media_type, 1);
+  assert.equal(uploadRequest?.rawsize, plaintext.length);
+  assert.equal(uploadRequest?.filesize, 32);
+  assert.equal(uploadRequest?.no_need_thumb, true);
+  assert.ok(typeof uploadRequest?.aeskey === "string");
+  assert.ok(ciphertext);
+  const decipher = createDecipheriv(
+    "aes-128-ecb",
+    Buffer.from(String(uploadRequest.aeskey), "hex"),
+    null,
+  );
+  assert.deepEqual(
+    Buffer.concat([decipher.update(ciphertext), decipher.final()]),
+    plaintext,
+  );
+  const message = (sendRequest?.msg ?? {}) as Record<string, unknown>;
+  const item = (message.item_list as Array<Record<string, unknown>>)[0];
+  assert.equal(message.client_id, "codex-ilink:media-1");
+  assert.equal(item?.type, 2);
+  const image = item?.image_item as Record<string, unknown>;
+  const media = image.media as Record<string, unknown>;
+  assert.deepEqual(media, {
+    aes_key: Buffer.from(String(uploadRequest.aeskey), "utf8").toString("base64"),
+    encrypt_query_param: "download-opaque",
+    encrypt_type: 1,
+  });
+  assert.equal(image.mid_size, 32);
+});
+
+test("prepared videos and ordinary attachments use the official item fields", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const client = new ILinkClient({
+    fetch: async (_input, init) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ ret: 0 });
+    },
+  });
+  const session = {
+    baseUrl: "https://api.weixin.qq.com/",
+    botId: "bot-1",
+    botToken: "secret-token",
+    controllerUserId: "controller-1",
+  };
+  await client.sendMedia({
+    clientId: "video-1",
+    contextToken: "ctx",
+    media: {
+      aesKeyBase64: "YWVz",
+      ciphertextSize: 48,
+      encryptedQueryParam: "video-param",
+      kind: "video",
+      name: "clip.mp4",
+      plaintextSize: 40,
+      type: "prepared-media",
+      v: 1,
+    },
+    session,
+  });
+  await client.sendMedia({
+    clientId: "file-1",
+    contextToken: "ctx",
+    media: {
+      aesKeyBase64: "YWVz",
+      ciphertextSize: 64,
+      encryptedQueryParam: "file-param",
+      kind: "file",
+      name: "报销单.pdf",
+      plaintextSize: 60,
+      type: "prepared-media",
+      v: 1,
+    },
+    session,
+  });
+
+  const video = ((requests[0]?.msg as Record<string, unknown>)
+    .item_list as Array<Record<string, unknown>>)[0];
+  assert.deepEqual(video, {
+    type: 5,
+    video_item: {
+      media: {
+        aes_key: "YWVz",
+        encrypt_query_param: "video-param",
+        encrypt_type: 1,
+      },
+      video_size: 48,
+    },
+  });
+  const file = ((requests[1]?.msg as Record<string, unknown>)
+    .item_list as Array<Record<string, unknown>>)[0];
+  assert.deepEqual(file, {
+    file_item: {
+      file_name: "报销单.pdf",
+      len: "60",
+      media: {
+        aes_key: "YWVz",
+        encrypt_query_param: "file-param",
+        encrypt_type: 1,
+      },
+    },
+    type: 4,
+  });
 });

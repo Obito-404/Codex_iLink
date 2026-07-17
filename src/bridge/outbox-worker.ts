@@ -5,6 +5,7 @@ import {
 } from "./sqlite-state.ts";
 import type { ILinkSender } from "./bridge.ts";
 import type { ILinkSession } from "../ilink/protocol.ts";
+import { dispatchOutboxItem } from "./outbox-delivery.ts";
 
 export type OutboxDrainResult = {
   confirmed: number;
@@ -77,16 +78,20 @@ export class OutboxWorker {
 
   async #drain(signal?: AbortSignal): Promise<OutboxDrainResult> {
     const result: OutboxDrainResult = { confirmed: 0, deferred: 0, failed: 0 };
+    const blockedFinalReplies = new Set<string>();
     for (const item of this.#state.listPendingOutbox()) {
       if (signal?.aborted) throw signal.reason;
+      const finalReply = finalReplyGroup(item.clientId);
       const contextToken =
         item.contextToken ||
         this.#state.getILinkState(this.#session.botId)?.contextToken;
       if (
         item.body === null ||
         !contextToken ||
-        this.#failedForRun.has(item.clientId)
+        this.#failedForRun.has(item.clientId) ||
+        (finalReply !== null && blockedFinalReplies.has(finalReply))
       ) {
+        if (finalReply !== null) blockedFinalReplies.add(finalReply);
         result.deferred += 1;
         continue;
       }
@@ -94,18 +99,21 @@ export class OutboxWorker {
       let confirmed = false;
       for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
         try {
-          await this.#ilink.sendText({
-            clientId: item.clientId,
+          const current = this.#state.getOutbox(item.clientId) ?? item;
+          const dispatched = await dispatchOutboxItem({
             contextToken,
+            ilink: this.#ilink,
+            item: current,
             session: this.#session,
             ...(signal ? { signal } : {}),
-            text: item.body,
+            state: this.#state,
           });
           const confirmedAtMs = this.#now();
-          const route = this.#routeOnConfirmed?.(item, confirmedAtMs) ?? undefined;
+          const route =
+            this.#routeOnConfirmed?.(dispatched, confirmedAtMs) ?? undefined;
           this.#state.confirmOutbox(item.clientId, confirmedAtMs, route);
           try {
-            this.#onConfirmed?.(item, confirmedAtMs);
+            this.#onConfirmed?.(dispatched, confirmedAtMs);
           } catch {
             // Delivery is already accepted and must never be retried merely
             // because an optional local post-confirmation hook failed.
@@ -122,11 +130,17 @@ export class OutboxWorker {
       }
       if (!confirmed) {
         this.#failedForRun.add(item.clientId);
+        if (finalReply !== null) blockedFinalReplies.add(finalReply);
         result.failed += 1;
       }
     }
     return result;
   }
+}
+
+function finalReplyGroup(clientId: string): string | null {
+  const match = /^(codex-ilink:[^:]+:final)(?::part:[1-3])?$/u.exec(clientId);
+  return match?.[1] ?? null;
 }
 
 function abortableSleep(

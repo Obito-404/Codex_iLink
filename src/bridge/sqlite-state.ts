@@ -1057,6 +1057,21 @@ export class SqliteState {
     );
   }
 
+  replacePendingOutboxBody(clientId: string, body: string): OutboxItem {
+    if (body.length === 0) throw new Error("pending outbox item requires a body");
+    const current = this.#requireOutbox(clientId);
+    if (current.status !== "pending") {
+      throw new Error("only pending outbox body can be replaced");
+    }
+    this.#database
+      .prepare(
+        `UPDATE outbox SET body = ?, body_sha256 = ?
+         WHERE client_id = ? AND status = 'pending'`,
+      )
+      .run(body, sha256(body), clientId);
+    return this.#requireOutbox(clientId);
+  }
+
   getOutbox(clientId: string): OutboxItem | null {
     const row = this.#getOutboxRow(clientId);
     return row ? outboxItemFromRow(row) : null;

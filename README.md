@@ -2,7 +2,7 @@
 
 把微信作为 Windows 本机 Codex 的另一个入口。微信和 Codex Desktop 访问同一份持久化任务历史；Bridge 只负责传输、路由、并发仲裁和可靠送达，不复制对话，也不创建第二个 Agent 身份。
 
-> 当前为可运行的开发版。新版 Hook、Codex/App Server 与 Desktop 同任务可见性、真实微信扫码绑定及双向文本收发已验证；微信入站媒体链路已实现，仍需完成真实微信媒体、离开状态主动推送和长期后台运行的最终验收。
+> 当前为可运行的开发版。新版 Hook、Codex/App Server 与 Desktop 同任务可见性、真实微信扫码绑定及双向文本收发已验证；微信入站媒体与 Codex 回复中的本地附件出站链路已实现，仍需完成真实微信媒体、离开状态主动推送和长期后台运行的最终验收。
 
 ## 已实现
 
@@ -23,6 +23,7 @@
 - Windows 前台 Host、单实例控制管道、串行长轮询和优雅停止
 - 官方 iLink `notifyStart/notifyStop` 生命周期，以及 64 位 `message_id` 的无损解析和稳定去重
 - 微信入站图片下载、解密并持久化后作为 Codex `localImage` 输入；文件和视频作为本地 `mention` 输入
+- Codex 最终回复中独占一行的 Windows 本地 Markdown 文件链接会经微信 CDN 加密上传，作为图片、视频或普通附件发送
 - 语音优先使用微信 wire 中的 `voice_item.text` 作为文本；没有转写时明确拒绝，不把 SILK 转 WAV 冒充语音识别
 
 ## 安装与启动
@@ -75,7 +76,7 @@ Bridge 启动 App Server 时不覆盖 Codex 的功能开关、模型、权限、
 
 ## 媒体能力与边界
 
-入站媒体协议与解密行为参照腾讯官方 [`Tencent/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) `v2.4.6` 的固定提交 [`cef0bfc390393f716903e16d50408118047f87e0`](https://github.com/Tencent/openclaw-weixin/commit/cef0bfc390393f716903e16d50408118047f87e0)，不是跟随远端 `main` 漂移：
+媒体协议、加解密与上传行为参照腾讯官方 [`Tencent/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) `v2.4.6` 的固定提交 [`cef0bfc390393f716903e16d50408118047f87e0`](https://github.com/Tencent/openclaw-weixin/commit/cef0bfc390393f716903e16d50408118047f87e0)，不是跟随远端 `main` 漂移：
 
 - 图片保存到 `%LOCALAPPDATA%\Codex_iLink\media\inbound` 后，通过 Codex App Server 的 `localImage` 输入提交。
 - 文件和视频通过本地 `mention` 提交。`mention` 只是路径引用，能否读取取决于目标任务的 Sandbox、审批策略和 Codex 对具体格式的处理能力，不承诺任意附件都能解析。
@@ -83,13 +84,15 @@ Bridge 启动 App Server 时不覆盖 Codex 的功能开关、模型、权限、
 - 语音有 `voice_item.text` 时按微信提供的转写文本提交，引用语音的已有转写也会保留为引用上下文；没有转写时明确回复暂不支持。官方项目的 SILK → WAV 仅是音频转码，不是 ASR，不能产生文字。
 - 每个媒体文件最多 100 MiB；只接受 HTTPS 微信 CDN 白名单地址。加密媒体按官方格式使用 AES-128-ECB + PKCS#7 解密，图片也兼容官方允许的明文载荷。
 - 下载、URL/大小/密钥/路径校验、解密或落盘失败时，微信会收到明确错误且不会提交空回合；若已排队的本地媒体后来被外部删除，Codex 的确定性拒绝也会明确返回微信，不会误报成“结果未知”。当前不宣称校验 wire MD5 或真实文件类型。
-- 当前只支持“微信 → Codex”的入站媒体。Codex App Server 的最终回复没有可信的媒体字段，因此“Codex → 微信”附件和语音暂不支持，也不会从助手自然语言中猜测本地路径后自动外发文件。
+- Codex App Server 的最终回复没有独立媒体字段，因此 Bridge 只把**独占一行**的标准 Markdown 本地文件链接 `[名称](<C:\...>)` 或 `![名称](<C:\...>)` 视为显式出站附件；正文里顺带提到的路径、HTTP 链接和非独占行链接不会触发文件读取。每个文件必须是当时存在的 Windows 绝对普通文件且不超过 100 MiB；单次最终回复最多发送 2 个附件。
+- 出站链路按官方格式执行 `getuploadurl → AES-128-ECB 加密 → HTTPS CDN POST → x-encrypted-param → IMAGE/VIDEO/FILE sendmessage`。图片和视频按扩展名分类，其他格式（包括音频）作为普通文件；媒体在说明文字之前发送，避免上传失败时先出现“已发给你”的假成功文本。
+- 官方固定版本没有语音气泡发送、位置/附近或出站引用消息 schema，本项目也不猜造这些能力。
 
 ## 数据与安全边界
 
 - 状态目录：`%LOCALAPPDATA%\Codex_iLink`
 - 对话事实源：Codex 持久化任务；SQLite 不保存完整 Transcript
-- 文本和附件路径使用版本化 payload 穿过入站、队列和 Dispatch Intent；SQLite 不保存媒体二进制、CDN URL 或 AES 密钥
+- 文本和附件路径使用版本化 payload 穿过入站、队列和 Dispatch Intent；SQLite 不保存媒体二进制。出站媒体上传成功后，Outbox 会短暂保存 CDN 加密引用和 AES key，以便用同一 `client_id` 稳定重试；微信确认接收后立即清除正文
 - 入站媒体二进制只落在 `%LOCALAPPDATA%\Codex_iLink\media\inbound`，至少保留到对应回合终态或状态未知完成对账，再安全清理
 - 入站/出站正文在明确接受或确认发送后清除
 - Token 仅以 Windows 当前用户 DPAPI 密文保存

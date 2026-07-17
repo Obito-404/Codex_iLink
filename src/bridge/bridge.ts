@@ -22,7 +22,18 @@ import {
   type OutboxItem,
   type PendingOutboxInput,
 } from "./sqlite-state.ts";
-import { formatWechatFinalReply } from "./wechat-output.ts";
+import {
+  extractWechatLocalFileReferences,
+  formatWechatFinalReply,
+} from "./wechat-output.ts";
+import {
+  localOutboundMedia,
+  serializeOutboundPayload,
+} from "../media/outbound-media.ts";
+import {
+  dispatchOutboxItem,
+  type OutboxILinkSender,
+} from "./outbox-delivery.ts";
 import { routeInboundText } from "../domain/route-inbound.ts";
 import {
   SqliteTurnLeaseStore,
@@ -36,7 +47,6 @@ import {
 } from "./thread-catalog.ts";
 import type {
   ILinkSession,
-  SendTextResult,
   WireWeixinMessage,
 } from "../ilink/protocol.ts";
 import {
@@ -46,16 +56,7 @@ import {
 } from "../media/inbound-media.ts";
 import { CodexOutcomeUnknownError } from "../codex/protocol.ts";
 
-export type ILinkSender = {
-  sendText(input: {
-    clientId: string;
-    contextToken: string;
-    session: ILinkSession;
-    signal?: AbortSignal;
-    text: string;
-    timeoutMs?: number;
-  }): Promise<SendTextResult>;
-};
+export type ILinkSender = OutboxILinkSender;
 
 export type BridgeEngineOptions = {
   bridgeInstanceId?: string;
@@ -793,13 +794,42 @@ export class BridgeEngine {
     text: string,
     turnId: string,
   ): PendingOutboxInput[] {
-    const messages = formatWechatFinalReply(text);
+    const extracted = extractWechatLocalFileReferences(text);
+    const mediaBodies: string[] = [];
+    const mediaFailures: string[] = [];
+    for (const reference of extracted.references.slice(0, 2)) {
+      try {
+        mediaBodies.push(
+          serializeOutboundPayload(
+            localOutboundMedia({
+              label: reference.label,
+              path: reference.path,
+            }),
+          ),
+        );
+      } catch (error) {
+        mediaFailures.push(
+          `⚠️ 附件“${reference.label}”未发送：${outboundMediaFailureText(error)}`,
+        );
+      }
+    }
+    if (extracted.references.length > 2) {
+      mediaFailures.push("⚠️ 单次回复最多发送 2 个附件，其余未发送。");
+    }
+    const finalText = [extracted.text, ...mediaFailures]
+      .filter((part) => part.length > 0)
+      .join("\n\n");
+    const messages = formatWechatFinalReply(finalText, {
+      maxMessages: 3 - mediaBodies.length,
+    });
+    const bodies = [...mediaBodies, ...messages];
+    if (bodies.length === 0) bodies.push(CODEX_EMPTY_REPLY_TEXT);
     const baseClientId = `codex-ilink:${turnId}:final`;
     const createdAtMs = this.#now();
-    return messages.map((body, index) => ({
+    return bodies.map((body, index) => ({
       body,
       clientId:
-        messages.length === 1
+        bodies.length === 1
           ? baseClientId
           : `${baseClientId}:part:${String(index + 1)}`,
       contextToken,
@@ -812,12 +842,13 @@ export class BridgeEngine {
     for (const item of items) {
       if (item.status === "confirmed") continue;
       if (item.body === null) throw new Error("pending final reply has no body");
-      await this.#ilink.sendText({
-        clientId: item.clientId,
+      await dispatchOutboxItem({
         contextToken: item.contextToken,
+        ilink: this.#ilink,
+        item,
         session: this.#session,
         signal: this.#shutdown.signal,
-        text: item.body,
+        state: this.#state,
       });
       this.#state.confirmOutbox(item.clientId, this.#now());
     }
@@ -1814,6 +1845,13 @@ function inboundMediaFailureCode(error: unknown): DurableInboundFailureCode {
     return "download-failed";
   }
   return "invalid-media";
+}
+
+function outboundMediaFailureText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "E_OUTBOUND_MEDIA_TOO_LARGE") return "文件超过 100 MB";
+  if (message === "E_OUTBOUND_MEDIA_NOT_FILE") return "路径不存在或不是文件";
+  return "本地路径无效或不可访问";
 }
 
 function inboundFailureText(code: DurableInboundFailureCode): string {

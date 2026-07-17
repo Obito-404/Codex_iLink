@@ -1,4 +1,5 @@
-import { randomBytes } from "node:crypto";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
 import {
   ILINK_APP_CLIENT_VERSION,
@@ -6,15 +7,24 @@ import {
   ILINK_BOT_AGENT,
   ILINK_BOT_TYPE,
   ILINK_CHANNEL_VERSION,
+  ILINK_CDN_BASE_URL,
   ILINK_LOGIN_BASE_URL,
   ILinkError,
   type GetUpdatesResult,
   type ILinkSession,
   type QrChallenge,
   type QrPollResult,
+  type SendMessageResult,
   type SendTextResult,
+  WireMessageItemType,
+  type WireMessageItem,
   type WireWeixinMessage,
 } from "./protocol.ts";
+import {
+  OUTBOUND_MEDIA_MAX_BYTES,
+  type LocalOutboundMedia,
+  type PreparedOutboundMedia,
+} from "../media/outbound-media.ts";
 
 export type ILinkFetch = typeof fetch;
 
@@ -48,6 +58,33 @@ type SendTextFlight = {
   promise: Promise<SendTextResult>;
 };
 
+export type PrepareMediaInput = {
+  media: LocalOutboundMedia;
+  session: ILinkSession;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
+
+export type SendMediaInput = {
+  clientId: string;
+  contextToken: string;
+  media: PreparedOutboundMedia;
+  session: ILinkSession;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
+
+type SendMediaIdentity = {
+  contextToken: string;
+  media: PreparedOutboundMedia;
+  targetUserId: string;
+};
+
+type SendMediaFlight = {
+  identity: SendMediaIdentity;
+  promise: Promise<SendMessageResult>;
+};
+
 export class ILinkClientIdCollisionError extends Error {
   readonly clientId: string;
   readonly code = "ILINK_CLIENT_ID_COLLISION" as const;
@@ -61,6 +98,7 @@ export class ILinkClientIdCollisionError extends Error {
 
 export class ILinkClient {
   readonly #fetch: ILinkFetch;
+  readonly #sendMediaFlights = new Map<string, SendMediaFlight>();
   readonly #sendTextFlights = new Map<string, SendTextFlight>();
 
   constructor(options: ILinkClientOptions = {}) {
@@ -267,6 +305,144 @@ export class ILinkClient {
     assertApiSuccess(operation, body);
   }
 
+  async prepareMedia(input: PrepareMediaInput): Promise<PreparedOutboundMedia> {
+    if (input.signal?.aborted) {
+      throw new ILinkError({
+        kind: "cancelled",
+        message: "prepareMedia cancelled before upload",
+      });
+    }
+    const plaintext = await readFile(input.media.path);
+    if (plaintext.length > OUTBOUND_MEDIA_MAX_BYTES) {
+      throw new Error("E_OUTBOUND_MEDIA_TOO_LARGE");
+    }
+    const aesKey = randomBytes(16);
+    const aesKeyHex = aesKey.toString("hex");
+    const fileKey = randomBytes(16).toString("hex");
+    const cipher = createCipheriv("aes-128-ecb", aesKey, null);
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const uploadRequest = createRequestSignal(
+      input.signal,
+      input.timeoutMs ?? 30_000,
+    );
+    let uploadInfo: Record<string, unknown>;
+    try {
+      const response = await this.#fetch(
+        endpointUrl(input.session.baseUrl, "ilink/bot/getuploadurl"),
+        {
+          body: JSON.stringify({
+            filekey: fileKey,
+            media_type: uploadMediaType(input.media.kind),
+            to_user_id: input.session.controllerUserId,
+            rawsize: plaintext.length,
+            rawfilemd5: createHash("md5").update(plaintext).digest("hex"),
+            filesize: ciphertext.length,
+            no_need_thumb: true,
+            aeskey: aesKeyHex,
+            base_info: buildBaseInfo(),
+          }),
+          headers: buildPostHeaders(input.session.botToken),
+          method: "POST",
+          signal: uploadRequest.signal,
+        },
+      );
+      assertHttpSuccess("prepareMedia", response);
+      uploadInfo = await readResponseObject("prepareMedia", response);
+      assertApiSuccess(
+        "prepareMedia",
+        uploadInfo as { errcode?: number; errmsg?: string; ret?: number },
+      );
+    } finally {
+      uploadRequest.cleanup();
+    }
+
+    const uploadUrl = outboundUploadUrl(uploadInfo, fileKey);
+    const cdnRequest = createRequestSignal(
+      input.signal,
+      input.timeoutMs ?? 30_000,
+    );
+    let response: Response;
+    try {
+      response = await this.#fetch(uploadUrl, {
+        body: new Uint8Array(ciphertext),
+        headers: { "Content-Type": "application/octet-stream" },
+        method: "POST",
+        redirect: "error",
+        signal: cdnRequest.signal,
+      });
+    } finally {
+      cdnRequest.cleanup();
+    }
+    if (response.status !== 200) {
+      throw new ILinkError({
+        httpStatus: response.status,
+        kind: "http",
+        message: `prepareMedia CDN HTTP ${response.status}`,
+      });
+    }
+    const encryptedQueryParam = response.headers.get("x-encrypted-param")?.trim();
+    if (!encryptedQueryParam) {
+      throw new ILinkError({
+        kind: "invalid-response",
+        message: "prepareMedia CDN response missing x-encrypted-param",
+      });
+    }
+    return {
+      aesKeyBase64: Buffer.from(aesKeyHex, "utf8").toString("base64"),
+      ciphertextSize: ciphertext.length,
+      encryptedQueryParam,
+      kind: input.media.kind,
+      name: input.media.name,
+      plaintextSize: plaintext.length,
+      type: "prepared-media",
+      v: 1,
+    };
+  }
+
+  sendMedia(input: SendMediaInput): Promise<SendMessageResult> {
+    if (input.signal?.aborted) {
+      return Promise.reject(
+        new ILinkError({
+          kind: "cancelled",
+          message: "sendMedia cancelled before dispatch",
+        }),
+      );
+    }
+    const identity: SendMediaIdentity = {
+      contextToken: input.contextToken,
+      media: input.media,
+      targetUserId: input.session.controllerUserId,
+    };
+    const existing = this.#sendMediaFlights.get(input.clientId);
+    if (existing) {
+      if (JSON.stringify(existing.identity) !== JSON.stringify(identity)) {
+        return Promise.reject(sendTextClientIdCollision(input.clientId));
+      }
+      return existing.promise;
+    }
+    const promise = this.#dispatchMedia(input);
+    this.#sendMediaFlights.set(input.clientId, { identity, promise });
+    const clearFlight = () => {
+      if (this.#sendMediaFlights.get(input.clientId)?.promise === promise) {
+        this.#sendMediaFlights.delete(input.clientId);
+      }
+    };
+    void promise.then(clearFlight, clearFlight);
+    return promise;
+  }
+
+  async #dispatchMedia(input: SendMediaInput): Promise<SendMessageResult> {
+    return this.#dispatchItem({
+      clientId: input.clientId,
+      contextToken: input.contextToken,
+      item: mediaWireItem(input.media),
+      operation: "sendMedia",
+      session: input.session,
+      ...(input.signal ? { signal: input.signal } : {}),
+      ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
+    });
+  }
+
   sendText(input: SendTextInput): Promise<SendTextResult> {
     const identity: SendTextIdentity = {
       contextToken: input.contextToken,
@@ -299,6 +475,29 @@ export class ILinkClient {
         message: "sendText cancelled before dispatch",
       });
     }
+    return this.#dispatchItem({
+      clientId: input.clientId,
+      contextToken: input.contextToken,
+      item: {
+        type: WireMessageItemType.TEXT,
+        text_item: { text: input.text.replace(/\r?\n/gu, "\r\n") },
+      },
+      operation: "sendText",
+      session: input.session,
+      ...(input.signal ? { signal: input.signal } : {}),
+      ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
+    });
+  }
+
+  async #dispatchItem(input: {
+    clientId: string;
+    contextToken: string;
+    item: WireMessageItem;
+    operation: "sendMedia" | "sendText";
+    session: ILinkSession;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }): Promise<SendMessageResult> {
     const requestSignal = createRequestSignal(input.signal, input.timeoutMs ?? 15_000);
     let response: Response;
     try {
@@ -312,12 +511,7 @@ export class ILinkClient {
               client_id: input.clientId,
               message_type: 2,
               message_state: 2,
-              item_list: [
-                {
-                  type: 1,
-                  text_item: { text: input.text.replace(/\r?\n/gu, "\r\n") },
-                },
-              ],
+              item_list: [input.item],
               context_token: input.contextToken,
             },
             base_info: buildBaseInfo(),
@@ -332,16 +526,81 @@ export class ILinkClient {
     } finally {
       requestSignal.cleanup();
     }
-    assertHttpSuccess("sendText", response);
+    assertHttpSuccess(input.operation, response);
     let body: { errcode?: number; errmsg?: string; ret?: number };
     try {
       body = (await response.json()) as typeof body;
     } catch (error) {
       throw deliveryUnknown(input.clientId, error);
     }
-    assertApiSuccess("sendText", body);
+    assertApiSuccess(input.operation, body);
     return { accepted: true, clientId: input.clientId };
   }
+}
+
+function uploadMediaType(kind: LocalOutboundMedia["kind"]): number {
+  if (kind === "image") return 1;
+  if (kind === "video") return 2;
+  return 3;
+}
+
+function outboundUploadUrl(
+  response: Record<string, unknown>,
+  fileKey: string,
+): URL {
+  const fullUrl =
+    typeof response.upload_full_url === "string"
+      ? response.upload_full_url.trim()
+      : "";
+  const url = fullUrl
+    ? new URL(fullUrl)
+    : typeof response.upload_param === "string" && response.upload_param.length > 0
+      ? new URL(
+          `${ILINK_CDN_BASE_URL}/upload?encrypted_query_param=${encodeURIComponent(response.upload_param)}&filekey=${encodeURIComponent(fileKey)}`,
+        )
+      : null;
+  if (
+    !url ||
+    url.protocol !== "https:" ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    (url.hostname !== "novac2c.cdn.weixin.qq.com" &&
+      !url.hostname.endsWith(".cdn.weixin.qq.com"))
+  ) {
+    throw new ILinkError({
+      kind: "invalid-response",
+      message: "prepareMedia returned an invalid CDN upload URL",
+    });
+  }
+  return url;
+}
+
+function mediaWireItem(media: PreparedOutboundMedia): WireMessageItem {
+  const cdn = {
+    aes_key: media.aesKeyBase64,
+    encrypt_query_param: media.encryptedQueryParam,
+    encrypt_type: 1,
+  };
+  if (media.kind === "image") {
+    return {
+      image_item: { media: cdn, mid_size: media.ciphertextSize },
+      type: WireMessageItemType.IMAGE,
+    };
+  }
+  if (media.kind === "video") {
+    return {
+      type: WireMessageItemType.VIDEO,
+      video_item: { media: cdn, video_size: media.ciphertextSize },
+    };
+  }
+  return {
+    file_item: {
+      file_name: media.name,
+      len: String(media.plaintextSize),
+      media: cdn,
+    },
+    type: WireMessageItemType.FILE,
+  };
 }
 
 function sameSendTextIdentity(

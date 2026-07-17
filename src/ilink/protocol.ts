@@ -4,6 +4,7 @@ export const ILINK_APP_ID = "bot";
 export const ILINK_APP_CLIENT_VERSION = "132102";
 export const ILINK_CHANNEL_VERSION = "2.4.6";
 export const ILINK_BOT_AGENT = "Codex-iLink/0.0.0";
+export const ILINK_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 
 export type ILinkErrorKind =
   | "api"
@@ -180,3 +181,5 @@ export type SendTextResult = {
   accepted: true;
   clientId: string;
 };
+
+export type SendMessageResult = SendTextResult;

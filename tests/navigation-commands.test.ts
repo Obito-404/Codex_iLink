@@ -10,6 +10,7 @@ import {
 } from "../src/bridge/bridge.ts";
 import { SqliteState } from "../src/bridge/sqlite-state.ts";
 import { SqliteTurnLeaseStore } from "../src/coordination/turn-lease.ts";
+import { CodexOutcomeUnknownError } from "../src/codex/protocol.ts";
 import type {
   ILinkSession,
   SendTextResult,
@@ -385,6 +386,387 @@ test("new without a project uses the reserved Inbox and stays product-level unpr
   });
 });
 
+test("stop interrupts the active WeChat turn in the current session", async () => {
+  await withNavigationBridge(async ({ bridge, codex, leases, sent, state }) => {
+    state.setBinding({
+      expiresAtMs: 60_000,
+      projectPath: "D:\\Selected",
+      threadId: "thread-running",
+      updatedAtMs: 900,
+    });
+    const lease = leases.tryAcquire({
+      createdAtMs: 900,
+      instanceId: "bridge-navigation",
+      operationId: "operation-running",
+      owner: "bridge",
+      threadId: "thread-running",
+      turnId: "turn-running",
+    });
+    assert.equal(lease.acquired, true);
+    state.createDispatchIntent({
+      body: "running input",
+      createdAtMs: 900,
+      dedupeKey: "running-dedupe",
+      operationId: "operation-running",
+      threadId: "thread-running",
+    });
+    state.markDispatchAccepted("operation-running", "turn-running", 901);
+
+    await ingest(bridge, 41, "stop");
+
+    assert.deepEqual(codex.interruptedTurns, [
+      { threadId: "thread-running", turnId: "turn-running" },
+    ]);
+    assert.equal(sent[0]?.text, "已请求停止当前任务。");
+  });
+});
+
+test("stop does not attempt to interrupt a Desktop-owned turn", async () => {
+  await withNavigationBridge(async ({ bridge, codex, leases, sent }) => {
+    const lease = leases.tryAcquire({
+      createdAtMs: 900,
+      instanceId: "desktop",
+      operationId: "desktop-running",
+      owner: "desktop",
+      threadId: "wechat-main",
+      turnId: "desktop-turn",
+    });
+    assert.equal(lease.acquired, true);
+
+    await ingest(bridge, 45, "stop");
+
+    assert.deepEqual(codex.interruptedTurns, []);
+    assert.equal(sent[0]?.text, "当前任务由 Desktop 发起，请在电脑端停止。");
+  });
+});
+
+test("stop uses a known Turn ID even when the original submission outcome is unknown", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
+    state.createDispatchIntent({
+      body: "unknown input",
+      createdAtMs: 900,
+      dedupeKey: "unknown-dedupe",
+      operationId: "operation-unknown",
+      threadId: "wechat-main",
+    });
+    state.markDispatchUnknown("operation-unknown", 901, "turn-unknown");
+
+    await ingest(bridge, 47, "stop");
+
+    assert.deepEqual(codex.interruptedTurns, [
+      { threadId: "wechat-main", turnId: "turn-unknown" },
+    ]);
+    assert.equal(sent[0]?.text, "已请求停止当前任务。");
+  });
+});
+
+test("stop returns a stable short code when interruption deterministically fails", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
+    state.createDispatchIntent({
+      body: "failing stop input",
+      createdAtMs: 900,
+      dedupeKey: "failing-stop-dedupe",
+      operationId: "operation-failing-stop",
+      threadId: "wechat-main",
+    });
+    state.markDispatchAccepted(
+      "operation-failing-stop",
+      "turn-failing-stop",
+      901,
+    );
+    codex.interruptError = new Error("fixture interruption failure");
+
+    await ingest(bridge, 48, "stop");
+
+    assert.equal(sent[0]?.text, "E_TURN_STOP：停止任务失败，请稍后重试。");
+  });
+});
+
+test("clear starts and binds a fresh session while preserving the old history", async () => {
+  await withNavigationBridge(async ({ bridge, codex, leases, sent, state }) => {
+    state.setSelectedProjectPath("D:\\Selected");
+    state.setBinding({
+      expiresAtMs: 60_000,
+      projectPath: "D:\\Selected",
+      threadId: "thread-old-context",
+      updatedAtMs: 900,
+    });
+    codex.nextStartedThreadId = "thread-cleared-context";
+    codex.reads.set("thread-old-context", {
+      thread: {
+        id: "thread-old-context",
+        status: { type: "idle" },
+      },
+    });
+    let desktopAcquiredDuringClear = true;
+    codex.beforeStartThread = async () => {
+      await bridge.reconcilePendingWork();
+      desktopAcquiredDuringClear = leases.tryAcquire({
+        createdAtMs: 950,
+        instanceId: "desktop",
+        operationId: "desktop-race-clear",
+        owner: "desktop",
+        threadId: "thread-old-context",
+        turnId: "desktop-race-turn",
+      }).acquired;
+    };
+
+    await ingest(bridge, 42, "clear");
+
+    assert.equal(desktopAcquiredDuringClear, false);
+    assert.deepEqual(codex.startedCwds, ["D:\\Selected"]);
+    assert.equal(state.getBinding(1_001)?.threadId, "thread-cleared-context");
+    assert.equal(leases.getLease("thread-old-context"), null);
+    assert.match(sent[0]?.text ?? "", /已清除当前上下文/u);
+    assert.doesNotMatch(codex.calls.join("\n"), /delete|archive/u);
+  });
+});
+
+test("clear from the WeChat main session stays in Inbox even when a project remains selected", async () => {
+  await withNavigationBridge(async ({ bridge, codex, state }) => {
+    state.setSelectedProjectPath("D:\\Selected");
+    codex.nextStartedThreadId = "thread-cleared-main";
+
+    await ingest(bridge, 49, "clear");
+
+    assert.deepEqual(codex.startedCwds, ["D:\\Codex-iLink\\Inbox"]);
+    assert.deepEqual(state.getBinding(1_001), {
+      expiresAtMs: 1_000 + 30 * 60 * 1_000,
+      projectPath: null,
+      threadId: "thread-cleared-main",
+      updatedAtMs: 1_000,
+    });
+  });
+});
+
+test("clear preserves the project environment of a notification-bound session", async () => {
+  await withNavigationBridge(async ({ bridge, codex, state }) => {
+    state.setBinding({
+      expiresAtMs: 60_000,
+      projectPath: null,
+      threadId: "thread-from-desktop-notification",
+      updatedAtMs: 900,
+    });
+    codex.reads.set("thread-from-desktop-notification", {
+      thread: {
+        cwd: "D:\\NotificationProject",
+        id: "thread-from-desktop-notification",
+        status: { type: "idle" },
+      },
+    });
+    codex.nextStartedThreadId = "thread-cleared-notification-project";
+
+    await ingest(bridge, 51, "clear");
+
+    assert.deepEqual(codex.startedCwds, ["D:\\NotificationProject"]);
+    assert.deepEqual(state.getBinding(1_001), {
+      expiresAtMs: 1_000 + 30 * 60 * 1_000,
+      projectPath: "D:\\NotificationProject",
+      threadId: "thread-cleared-notification-project",
+      updatedAtMs: 1_000,
+    });
+  });
+});
+
+test("clear refuses to leave an active or queued current session behind", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
+    state.enqueueQueuedTurn({
+      body: "queued old context",
+      createdAtMs: 900,
+      dedupeKey: "queued-before-clear",
+      threadId: "wechat-main",
+    });
+
+    await ingest(bridge, 46, "clear");
+
+    assert.deepEqual(codex.startedCwds, []);
+    assert.equal(
+      sent[0]?.text,
+      "当前会话仍有任务正在执行或排队，请先用 stop 停止或等待任务结束。",
+    );
+  });
+});
+
+test("compact holds the session lease until compaction completes and then drains queued input", async () => {
+  await withNavigationBridge(async ({ bridge, codex, leases, sent, state }) => {
+    await ingest(bridge, 43, "compact");
+
+    assert.deepEqual(codex.compactedThreads, ["wechat-main"]);
+    assert.match(sent[0]?.text ?? "", /已开始压缩当前会话上下文/u);
+    assert.equal(leases.getLease("wechat-main")?.owner, "bridge");
+    codex.reads.set("wechat-main", {
+      thread: { id: "wechat-main", status: { type: "idle" } },
+    });
+    await bridge.reconcilePendingWork();
+    assert.equal(leases.getLease("wechat-main")?.owner, "bridge");
+
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        method: "turn/started",
+        params: {
+          threadId: "wechat-main",
+          turn: { id: "stale-normal-turn" },
+        },
+      }),
+      false,
+    );
+    assert.equal(leases.getLease("wechat-main")?.turnId, null);
+
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        method: "turn/completed",
+        params: {
+          threadId: "wechat-main",
+          turn: { id: "stale-old-turn", status: "completed" },
+        },
+      }),
+      false,
+    );
+    assert.equal(leases.getLease("wechat-main")?.turnId, null);
+
+    await ingest(bridge, 44, "压缩完成后继续");
+    assert.equal(state.countQueuedTurns(), 1);
+    assert.deepEqual(codex.startedTurns, []);
+    assert.match(sent[1]?.text ?? "", /Queued/u);
+
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        method: "item/started",
+        params: {
+          item: { id: "compact-item", type: "contextCompaction" },
+          threadId: "wechat-main",
+          turnId: "turn-compact",
+        },
+      }),
+      true,
+    );
+    assert.equal(leases.getLease("wechat-main")?.turnId, "turn-compact");
+
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        method: "turn/completed",
+        params: {
+          threadId: "wechat-main",
+          turn: { id: "turn-compact", status: "completed" },
+        },
+      }),
+      true,
+    );
+    assert.deepEqual(codex.startedTurns, [
+      { text: "压缩完成后继续", threadId: "wechat-main" },
+    ]);
+  });
+});
+
+test("a failed compact turn reports a stable error after releasing its lease", async () => {
+  await withNavigationBridge(async ({ bridge, sent }) => {
+    await ingest(bridge, 50, "compact");
+    await bridge.ingestCodexEvent({
+      method: "item/started",
+      params: {
+        item: { id: "failed-compact-item", type: "contextCompaction" },
+        threadId: "wechat-main",
+        turnId: "turn-compact-failed",
+      },
+    });
+
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        method: "turn/completed",
+        params: {
+          threadId: "wechat-main",
+          turn: { id: "turn-compact-failed", status: "failed" },
+        },
+      }),
+      true,
+    );
+    assert.equal(
+      sent[1]?.text,
+      "E_CONTEXT_COMPACT_FAILED：上下文压缩失败，请在 Desktop 查看。",
+    );
+  });
+});
+
+test("an unknown compact request releases after public idle reconciliation", async () => {
+  await withNavigationBridge(async ({ bridge, codex, leases, sent, state }) => {
+    codex.compactError = new CodexOutcomeUnknownError(
+      "thread/compact/start",
+      "eof",
+    );
+    codex.reads.set("wechat-main", {
+      thread: { id: "wechat-main", status: { type: "idle" } },
+    });
+
+    await ingest(bridge, 52, "compact");
+
+    assert.match(sent[0]?.text ?? "", /压缩请求结果未知/u);
+    assert.equal(leases.getLease("wechat-main")?.owner, "bridge");
+    await ingest(bridge, 53, "结果未知后继续");
+    assert.equal(state.countQueuedTurns(), 1);
+
+    await bridge.reconcilePendingWork();
+
+    assert.equal(leases.getLease("wechat-main")?.owner, "bridge");
+    assert.equal(state.countQueuedTurns(), 0);
+    assert.deepEqual(codex.startedTurns, [
+      { text: "结果未知后继续", threadId: "wechat-main" },
+    ]);
+  });
+});
+
+test("a timed out compact request keeps its lease despite an immediate idle read", async () => {
+  await withNavigationBridge(async ({ bridge, codex, leases, sent }) => {
+    codex.compactError = new CodexOutcomeUnknownError(
+      "thread/compact/start",
+      "timeout",
+    );
+    codex.reads.set("wechat-main", {
+      thread: { id: "wechat-main", status: { type: "idle" } },
+    });
+
+    await ingest(bridge, 54, "compact");
+    const operationId = leases.getLease("wechat-main")?.operationId;
+    await bridge.reconcilePendingWork();
+
+    assert.match(sent[0]?.text ?? "", /压缩请求结果未知/u);
+    assert.equal(leases.getLease("wechat-main")?.operationId, operationId);
+  });
+});
+
+test("unknown compact reconciliation reports a failed claimed turn", async () => {
+  await withNavigationBridge(async ({ bridge, codex, leases, sent }) => {
+    codex.compactError = new CodexOutcomeUnknownError(
+      "thread/compact/start",
+      "eof",
+    );
+    await ingest(bridge, 55, "compact");
+    await bridge.ingestCodexEvent({
+      method: "item/started",
+      params: {
+        item: { id: "unknown-compact-item", type: "contextCompaction" },
+        threadId: "wechat-main",
+        turnId: "turn-compact-unknown-failed",
+      },
+    });
+    codex.reads.set("wechat-main", {
+      thread: {
+        id: "wechat-main",
+        turns: [
+          { id: "turn-compact-unknown-failed", status: "failed" },
+        ],
+      },
+    });
+
+    await bridge.reconcilePendingWork();
+
+    assert.equal(leases.getLease("wechat-main"), null);
+    assert.equal(
+      sent[1]?.text,
+      "E_CONTEXT_COMPACT_FAILED：上下文压缩失败，请在 Desktop 查看。",
+    );
+  });
+});
+
 test("perm lists and perm<n> selects Codex native permission profiles", async () => {
   await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
     codex.resumes.set("wechat-main", {
@@ -580,6 +962,7 @@ class FakeNavigationCodex implements CodexTurnStarter {
   activeThreads: unknown[] = [];
   archivedThreads: unknown[] = [];
   blockedPermissionProfiles = new Set<string>();
+  beforeStartThread: (() => Promise<void> | void) | undefined;
   calls: string[] = [];
   reads = new Map<string, { thread: Record<string, unknown> }>();
   readFailures = new Set<string>();
@@ -595,6 +978,10 @@ class FakeNavigationCodex implements CodexTurnStarter {
     permissions: string | undefined;
     threadId: string;
   }> = [];
+  compactedThreads: string[] = [];
+  compactError: Error | undefined;
+  interruptedTurns: Array<{ threadId: string; turnId: string }> = [];
+  interruptError: Error | undefined;
   startedCwds: string[] = [];
   startedTurns: Array<{ text: string; threadId: string }> = [];
   readonly loadedThreadIds = new Set<string>();
@@ -622,6 +1009,21 @@ class FakeNavigationCodex implements CodexTurnStarter {
   async startTurn(input: { text: string; threadId: string }): Promise<{ turn: { id: string } }> {
     this.startedTurns.push({ text: input.text, threadId: input.threadId });
     return { turn: { id: `turn-${String(this.startedTurns.length)}` } };
+  }
+
+  async compactThread(threadId: string): Promise<Record<string, unknown>> {
+    if (this.compactError) throw this.compactError;
+    this.compactedThreads.push(threadId);
+    return {};
+  }
+
+  async interruptTurn(input: {
+    threadId: string;
+    turnId: string;
+  }): Promise<Record<string, unknown>> {
+    if (this.interruptError) throw this.interruptError;
+    this.interruptedTurns.push(input);
+    return {};
   }
 
   async readThread(input: { includeTurns: boolean; threadId: string }) {
@@ -707,6 +1109,7 @@ class FakeNavigationCodex implements CodexTurnStarter {
   }
 
   async startThread(cwd: string) {
+    await this.beforeStartThread?.();
     this.startedCwds.push(cwd);
     this.loadedThreadIds.add(this.nextStartedThreadId);
     return {

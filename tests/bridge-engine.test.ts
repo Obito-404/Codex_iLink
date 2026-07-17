@@ -1786,7 +1786,7 @@ test("a long-running turn sends one durable progress notice without releasing it
     assert.deepEqual(sent.map(({ clientId, text }) => ({ clientId, text })), [
       {
         clientId: "codex-ilink:turn-slow:slow",
-          text: "⏳ Codex 任务仍在执行，已长时间没有结束；可能正在等待工具、审批或网络。任务未被取消，可用 st 查看。",
+          text: "⏳ Codex 任务仍在执行，已长时间没有结束；可能正在等待工具、审批或网络。任务未被取消，可用 st 查看或用 stop 停止。",
       },
     ]);
     assert.equal(leases.getLease("thread-slow")?.turnId, "turn-slow");

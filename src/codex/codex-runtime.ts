@@ -224,6 +224,22 @@ export class CodexRuntime {
     })) as TurnStartResult;
   }
 
+  async interruptTurn(input: {
+    threadId: string;
+    turnId: string;
+  }): Promise<JsonObject> {
+    return this.#requestOnceWithUnknownOutcome("turn/interrupt", {
+      threadId: input.threadId,
+      turnId: input.turnId,
+    });
+  }
+
+  async compactThread(threadId: string): Promise<JsonObject> {
+    return this.#requestOnceWithUnknownOutcome("thread/compact/start", {
+      threadId,
+    });
+  }
+
   setThreadName(input: {
     name: string;
     threadId: string;

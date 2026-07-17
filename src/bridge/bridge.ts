@@ -97,6 +97,7 @@ export type ProjectNavigationEntry = {
 };
 
 export type CodexTurnStarter = {
+  compactThread?(threadId: string): Promise<Record<string, unknown>>;
   ensureThread?(
     threadId: string,
     options?: { permissions?: string },
@@ -118,6 +119,10 @@ export type CodexTurnStarter = {
     threadId: string;
   }): Promise<{ thread: Record<string, unknown> }>;
   isServerRequestLive?(id: number | string): boolean;
+  interruptTurn?(input: {
+    threadId: string;
+    turnId: string;
+  }): Promise<Record<string, unknown>>;
   respondToServerRequest?(
     id: number | string,
     result: Record<string, unknown>,
@@ -168,7 +173,7 @@ const HOOK_GUARD_UNKNOWN_TEXT =
 const MISSING_THREAD_TEXT =
   "原会话尚未写入 Codex 历史，已失效；请使用 new 重新创建并发送。";
 const CODEX_SLOW_TURN_TEXT =
-  "⏳ Codex 任务仍在执行，已长时间没有结束；可能正在等待工具、审批或网络。任务未被取消，可用 st 查看。";
+  "⏳ Codex 任务仍在执行，已长时间没有结束；可能正在等待工具、审批或网络。任务未被取消，可用 st 查看或用 stop 停止。";
 
 export class BridgeEngine {
   readonly #approvals: ApprovalCoordinator | undefined;
@@ -187,6 +192,15 @@ export class BridgeEngine {
   readonly #slowTurnNoticeAfterMs: number;
   readonly #state: SqliteState;
   readonly #turnFailures = new Map<string, CodexTurnFailure>();
+  readonly #clearOperations = new Map<string, string>();
+  readonly #compactOperations = new Map<
+    string,
+    {
+      contextToken: string;
+      operationId: string;
+      unknownReason: "eof" | "timeout" | null;
+    }
+  >();
   readonly #typingTurns = new Set<string>();
   #closing = false;
   #ilinkHealthy = true;
@@ -371,10 +385,61 @@ export class BridgeEngine {
       return true;
     }
     if (this.#approvals && (await this.#approvals.ingest(event))) return true;
+    if (event.method === "item/started") {
+      const threadId = stringField(event.params, "threadId");
+      const turnId = stringField(event.params, "turnId");
+      const item = objectField(event.params, "item");
+      const operation = threadId
+        ? this.#compactOperation(threadId)
+        : undefined;
+      if (
+        !threadId ||
+        !turnId ||
+        stringField(item, "type") !== "contextCompaction" ||
+        !operation ||
+        !this.#leases
+      ) {
+        return false;
+      }
+      return this.#leases.claimBridgeTurn({
+        instanceId: this.#bridgeInstanceId ?? "",
+        threadId,
+        turnId,
+      });
+    }
     if (event.method !== "turn/completed") return false;
     const threadId = stringField(event.params, "threadId");
     const turn = objectField(event.params, "turn");
     const turnId = stringField(turn, "id") ?? stringField(event.params, "turnId");
+    const compactOperation = threadId
+      ? this.#compactOperation(threadId)
+      : undefined;
+    if (threadId && turnId && compactOperation && this.#leases) {
+      const lease = this.#leases.getLease(threadId);
+      if (
+        !lease ||
+        lease.owner !== "bridge" ||
+        lease.instanceId !== this.#bridgeInstanceId ||
+        lease.operationId !== compactOperation.operationId ||
+        lease.turnId !== turnId ||
+        !this.#leases.release(lease)
+      ) {
+        return false;
+      }
+      this.#compactOperations.delete(threadId);
+      this.#turnFailures.delete(turnFailureKey(threadId, turnId));
+      const completionStatus = turn ? stringField(turn, "status") : null;
+      try {
+        await this.#notifyCompactCompletion(
+          compactOperation.contextToken,
+          turnId,
+          completionStatus ?? null,
+        );
+      } finally {
+        await this.#drainQueuedTurns();
+      }
+      return true;
+    }
     if (
       !threadId ||
       !turnId ||
@@ -706,6 +771,39 @@ export class BridgeEngine {
           text: intent.text,
         },
       });
+    }
+    if (
+      intent.kind === "clearSession" ||
+      intent.kind === "compactSession" ||
+      intent.kind === "stopTurn"
+    ) {
+      try {
+        const reply =
+          intent.kind === "clearSession"
+            ? await this.#clearSessionReply()
+            : intent.kind === "compactSession"
+              ? await this.#compactSessionReply(input.contextToken)
+              : await this.#stopTurnReply();
+        return this.#replyToCommand(input.contextToken, input.messageId, reply);
+      } catch {
+        const action =
+          intent.kind === "clearSession"
+            ? "清除上下文"
+            : intent.kind === "compactSession"
+              ? "压缩上下文"
+              : "停止任务";
+        const code =
+          intent.kind === "clearSession"
+            ? "E_CONTEXT_CLEAR"
+            : intent.kind === "compactSession"
+              ? "E_CONTEXT_COMPACT"
+              : "E_TURN_STOP";
+        return this.#replyToCommand(
+          input.contextToken,
+          input.messageId,
+          `${code}：${action}失败，请稍后重试。`,
+        );
+      }
     }
     if (intent.kind === "projects" || intent.kind === "selectProject") {
       try {
@@ -1148,10 +1246,15 @@ export class BridgeEngine {
   }
 
   async #newSessionReply(): Promise<string> {
+    return this.#startSessionReply(
+      this.#state.getBridgeSettings().selectedProjectPath,
+    );
+  }
+
+  async #startSessionReply(projectPath: string | null): Promise<string> {
     if (!this.#codex?.startThread || !this.#inboxDirectory) {
       throw new Error("new session is not configured");
     }
-    const projectPath = this.#state.getBridgeSettings().selectedProjectPath;
     const cwd = projectPath ?? this.#inboxDirectory;
     const started = await this.#codex.startThread(cwd);
     const threadId = stringField(started.thread, "id");
@@ -1176,6 +1279,236 @@ export class BridgeEngine {
       `Sandbox：${sandboxTypeText(started)}`,
       "30 分钟无活动后自动退出。",
     ].join("\n");
+  }
+
+  async #clearSessionReply(): Promise<string> {
+    if (!this.#bridgeInstanceId || !this.#leases) {
+      throw new Error("atomic context clearing is not configured");
+    }
+    const binding = this.#state.getBinding(this.#now());
+    const threadId = binding?.threadId ?? this.#currentThreadId();
+    const projectPath = await this.#clearProjectPath(binding, threadId);
+    if (this.#threadHasScheduledWork(threadId)) {
+      return "当前会话仍有任务正在执行或排队，请先用 stop 停止或等待任务结束。";
+    }
+    const operationId = this.#newId();
+    const acquired = this.#leases.tryAcquire({
+      createdAtMs: this.#now(),
+      instanceId: this.#bridgeInstanceId,
+      operationId,
+      owner: "bridge",
+      threadId,
+      turnId: null,
+    });
+    if (!acquired.acquired) {
+      return "当前会话正在被其他任务使用，请先用 stop 停止或等待任务结束。";
+    }
+    this.#clearOperations.set(threadId, operationId);
+    try {
+      if (this.#threadHasScheduledWork(threadId)) {
+        return "当前会话仍有任务正在执行或排队，请先用 stop 停止或等待任务结束。";
+      }
+      return [
+        "已清除当前上下文。",
+        await this.#startSessionReply(projectPath),
+      ].join("\n");
+    } finally {
+      this.#clearOperations.delete(threadId);
+      this.#leases.release(acquired.lease);
+    }
+  }
+
+  async #compactSessionReply(contextToken: string): Promise<string> {
+    if (
+      !this.#bridgeInstanceId ||
+      !this.#codex?.compactThread ||
+      !this.#leases
+    ) {
+      throw new Error("context compaction is not configured");
+    }
+    const threadId = this.#currentThreadId();
+    if (this.#threadHasPendingWork(threadId)) {
+      return "当前会话仍有任务正在执行或排队，请先用 stop 停止或等待任务结束。";
+    }
+
+    const operationId = this.#newId();
+    const acquired = this.#leases.tryAcquire({
+      createdAtMs: this.#now(),
+      instanceId: this.#bridgeInstanceId,
+      operationId,
+      owner: "bridge",
+      threadId,
+      turnId: null,
+    });
+    if (!acquired.acquired) {
+      return "当前会话正在被其他任务使用，请稍后再 compact。";
+    }
+    this.#compactOperations.set(threadId, {
+      contextToken,
+      operationId,
+      unknownReason: null,
+    });
+    try {
+      await this.#ensureThread(threadId);
+      await this.#codex.compactThread(threadId);
+    } catch (error) {
+      if (error instanceof CodexOutcomeUnknownError) {
+        this.#compactOperations.set(threadId, {
+          contextToken,
+          operationId,
+          unknownReason: error.reason,
+        });
+        return "压缩请求结果未知，请在 Desktop 查看；确认结束前的新消息会自动排队。";
+      }
+      this.#compactOperations.delete(threadId);
+      this.#leases.release(acquired.lease);
+      throw error;
+    }
+    return "已开始压缩当前会话上下文；完成前的新消息会自动排队。";
+  }
+
+  async #notifyCompactCompletion(
+    contextToken: string,
+    turnId: string,
+    status: string | null,
+  ): Promise<void> {
+    if (status === "failed") {
+      await this.#send(
+        contextToken,
+        "E_CONTEXT_COMPACT_FAILED：上下文压缩失败，请在 Desktop 查看。",
+        `codex-ilink:compact:${turnId}:failed`,
+      );
+    } else if (status === "interrupted") {
+      await this.#send(
+        contextToken,
+        "上下文压缩已停止。",
+        `codex-ilink:compact:${turnId}:interrupted`,
+      );
+    }
+  }
+
+  async #stopTurnReply(): Promise<string> {
+    if (!this.#codex?.interruptTurn) {
+      throw new Error("turn interruption is not configured");
+    }
+    const threadId = this.#currentThreadId();
+    const dispatch = this.#state
+      .listUnresolvedDispatchIntents()
+      .find(
+        (candidate) =>
+          candidate.threadId === threadId &&
+          (candidate.status === "accepted" || candidate.status === "unknown") &&
+          candidate.turnId !== null,
+      );
+    let turnId = dispatch?.turnId ?? null;
+    const compactOperation = this.#compactOperation(threadId);
+    const lease = this.#leases?.getLease(threadId) ?? null;
+    if (
+      !turnId &&
+      compactOperation &&
+      lease?.owner === "bridge" &&
+      lease.operationId === compactOperation.operationId
+    ) {
+      turnId = lease.turnId;
+    }
+    if (!turnId) {
+      const unresolved = this.#state
+        .listUnresolvedDispatchIntents()
+        .some((candidate) => candidate.threadId === threadId);
+      if (unresolved || compactOperation) {
+        return "当前任务尚未取得可中断的 Turn ID，请稍后再试。";
+      }
+      if (lease?.owner === "desktop") {
+        return "当前任务由 Desktop 发起，请在电脑端停止。";
+      }
+      return "当前会话没有正在执行的微信任务。";
+    }
+    try {
+      await this.#codex.interruptTurn({ threadId, turnId });
+    } catch (error) {
+      if (error instanceof CodexOutcomeUnknownError) {
+        return "停止请求结果未知，请在 Desktop 查看当前任务状态。";
+      }
+      throw error;
+    }
+    return "已请求停止当前任务。";
+  }
+
+  #compactOperation(
+    threadId: string,
+  ):
+    | {
+        contextToken: string;
+        operationId: string;
+        unknownReason: "eof" | "timeout" | null;
+      }
+    | undefined {
+    const operation = this.#compactOperations.get(threadId);
+    if (!operation) return undefined;
+    const lease = this.#leases?.getLease(threadId) ?? null;
+    if (
+      lease?.owner === "bridge" &&
+      lease.instanceId === this.#bridgeInstanceId &&
+      lease.operationId === operation.operationId
+    ) {
+      return operation;
+    }
+    this.#compactOperations.delete(threadId);
+    return undefined;
+  }
+
+  #activeControlOperationId(threadId: string): string | undefined {
+    const compactOperation = this.#compactOperation(threadId);
+    if (compactOperation && compactOperation.unknownReason !== "eof") {
+      return compactOperation.operationId;
+    }
+    const clearOperationId = this.#clearOperations.get(threadId);
+    if (!clearOperationId) return undefined;
+    const lease = this.#leases?.getLease(threadId) ?? null;
+    if (
+      lease?.owner === "bridge" &&
+      lease.instanceId === this.#bridgeInstanceId &&
+      lease.operationId === clearOperationId
+    ) {
+      return clearOperationId;
+    }
+    this.#clearOperations.delete(threadId);
+    return undefined;
+  }
+
+  async #clearProjectPath(
+    binding: ReturnType<SqliteState["getBinding"]>,
+    threadId: string,
+  ): Promise<string | null> {
+    if (!binding || threadId === this.#mainThreadId) return null;
+    if (binding.projectPath) return binding.projectPath;
+    if (!this.#inboxDirectory) {
+      throw new Error("clear session environment is not configured");
+    }
+    const thread = await this.#readThreadForReconciliation(threadId);
+    const cwd = stringField(thread, "cwd");
+    if (!cwd || sameWindowsPath(cwd, this.#inboxDirectory)) return null;
+    return cwd;
+  }
+
+  #currentThreadId(): string {
+    const threadId =
+      this.#state.getBinding(this.#now())?.threadId ?? this.#mainThreadId;
+    if (!threadId) throw new Error("current session is not configured");
+    return threadId;
+  }
+
+  #threadHasPendingWork(threadId: string): boolean {
+    const lease = this.#leases?.getLease(threadId) ?? null;
+    return this.#threadHasScheduledWork(threadId) || lease !== null;
+  }
+
+  #threadHasScheduledWork(threadId: string): boolean {
+    return (
+      this.#state.hasActiveDispatchForThread(threadId) ||
+      this.#state.getDesktopTurnObservation(threadId) !== null ||
+      this.#state.peekQueuedTurn(threadId) !== null
+    );
   }
 
   async #permissionReply(selectedIndex?: number): Promise<string> {
@@ -1635,16 +1968,41 @@ export class BridgeEngine {
       leasedOperations.add(lease.operationId);
       const dispatch = this.#state.getDispatchIntent(lease.operationId);
       if (!dispatch) {
+        if (this.#activeControlOperationId(lease.threadId) === lease.operationId) {
+          continue;
+        }
+        const compactOperation = this.#compactOperation(lease.threadId);
         let thread: Record<string, unknown>;
         try {
           thread = await this.#readThreadForReconciliation(lease.threadId);
         } catch {
           continue;
         }
+        const leasedTurn = lease.turnId
+          ? findThreadTurn(thread, lease.turnId)
+          : null;
         const safeToRelease = lease.turnId
-          ? isTerminalTurnStatus(findThreadTurn(thread, lease.turnId)?.status)
+          ? isTerminalTurnStatus(leasedTurn?.status)
           : isExplicitlyIdleThread(thread);
-        if (safeToRelease && this.#leases.release(lease)) releasedWork = true;
+        if (safeToRelease && this.#leases.release(lease)) {
+          if (compactOperation?.operationId === lease.operationId) {
+            this.#compactOperations.delete(lease.threadId);
+            if (lease.turnId) {
+              try {
+                await this.#notifyCompactCompletion(
+                  compactOperation.contextToken,
+                  lease.turnId,
+                  typeof leasedTurn?.status === "string"
+                    ? leasedTurn.status
+                    : null,
+                );
+              } catch {
+                // The durable outbox retains the terminal notification.
+              }
+            }
+          }
+          releasedWork = true;
+        }
         continue;
       }
       if (dispatch.threadId !== lease.threadId) continue;

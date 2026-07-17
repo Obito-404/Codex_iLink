@@ -12,6 +12,58 @@ import {
 
 const fakeRuntime = resolve("tests/fixtures/fake-codex-runtime.mjs");
 
+test("turn interruption and thread compaction use the native App Server methods", async () => {
+  const runtime = await CodexRuntime.create({
+    bridgeInstanceId: "bridge-instance-controls",
+    command: [process.execPath, fakeRuntime],
+    requestTimeoutMs: 1_000,
+  });
+
+  try {
+    await runtime.interruptTurn({
+      threadId: "thread-controls",
+      turnId: "turn-controls",
+    });
+    await runtime.compactThread("thread-controls");
+  } finally {
+    runtime.close();
+  }
+});
+
+test("context compaction EOF is unknown and is never retried", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-runtime-"));
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const countPath = join(directory, "compact-start.count");
+  const runtime = await CodexRuntime.create({
+    bridgeInstanceId: "bridge-instance-compact-timeout",
+    command: [
+      process.execPath,
+      fakeRuntime,
+      "--eof-method-always",
+      "thread/compact/start",
+      "--count-method",
+      "thread/compact/start",
+      countPath,
+    ],
+    requestTimeoutMs: 1_000,
+  });
+
+  try {
+    await assert.rejects(
+      runtime.compactThread("thread-compact-timeout"),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexOutcomeUnknownError);
+        assert.equal(error.method, "thread/compact/start");
+        assert.equal(error.reason, "eof");
+        return true;
+      },
+    );
+    assert.equal(readFileSync(countPath, "utf8"), "1");
+  } finally {
+    runtime.close();
+  }
+});
+
 test("one initialized App Server process serves subsequent requests", async () => {
   const runtime = await CodexRuntime.create({
     bridgeInstanceId: "bridge-instance-1",

@@ -15,7 +15,7 @@ test("controller identity and database configuration survive reopening", () => {
     const first = new SqliteState(path);
     assert.deepEqual(first.storageDiagnostics(), {
       journalMode: "wal",
-      schemaVersion: 7,
+      schemaVersion: 8,
       synchronous: "full",
     });
     assert.deepEqual(
@@ -870,7 +870,7 @@ test("schema v6 deletes legacy plain-text scheduler payloads", () => {
     database.close();
 
     const state = new SqliteState(path);
-    assert.equal(state.storageDiagnostics().schemaVersion, 7);
+    assert.equal(state.storageDiagnostics().schemaVersion, 8);
     assert.deepEqual(state.listQueuedTurns(), []);
     assert.equal(state.getDispatchIntent("legacy-operation"), null);
     assert.equal(state.countActiveDispatches(), 0);

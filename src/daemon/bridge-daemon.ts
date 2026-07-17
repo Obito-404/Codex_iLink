@@ -23,6 +23,7 @@ import type {
   ILinkSession,
 } from "../ilink/protocol.ts";
 import type { PresenceState } from "../windows/presence.ts";
+import type { PresenceObservation } from "../windows/presence.ts";
 
 export type DaemonCodexPort = CodexTurnStarter & {
   close(): void;
@@ -79,6 +80,7 @@ export type BridgeDaemonOptions = {
     error: unknown,
   ) => void;
   presence?: () => Promise<PresenceState>;
+  presenceObservation?: () => Promise<PresenceObservation>;
   session: ILinkSession;
   state: SqliteState;
 };
@@ -188,6 +190,8 @@ export class BridgeDaemon {
     await this.#options.hookReceiver.start();
     await this.#options.hookReceiver.drainSpool();
     await this.#outbox.drain();
+    await this.#reconcilePendingDesktopNotifications();
+    await this.#outbox.drain();
     try {
       await this.#bridge.recoverPendingWork();
     } finally {
@@ -204,6 +208,7 @@ export class BridgeDaemon {
     );
     await this.#options.hookReceiver.drainSpool();
     await this.#bridge.reconcilePendingWork();
+    await this.#reconcilePendingDesktopNotifications();
     await this.#syncActiveTaskCount();
     await this.#outbox?.drain(signal);
     const cursor =
@@ -390,7 +395,7 @@ export class BridgeDaemon {
           .find((value) => value.id === turnId);
         const status = desktopTerminalStatus(turn?.status);
         if (status) {
-          await this.#notifyDesktopTerminalOnce(event, status);
+          await this.#notifyDesktopTerminalOnce(event, status, read.thread);
           const releasedLease = this.#options.leases.releaseStoppedDesktop({
             threadId,
             turnId,
@@ -432,11 +437,101 @@ export class BridgeDaemon {
   async #notifyDesktopTerminalOnce(
     event: HookEvent & { turnId: string },
     status: DesktopTerminalStatus,
+    thread: Record<string, unknown>,
   ): Promise<void> {
     const notifier = this.#desktopNotifier;
     if (!notifier) return;
-    const result = await notifier.notifyTerminal(event, status);
+    const observePresence = this.#options.presenceObservation;
+    let confirmedAway = false;
+    if (observePresence) {
+      let observation: PresenceObservation;
+      try {
+        observation = await observePresence();
+      } catch {
+        this.#options.state.putPendingDesktopNotification({
+          completedAtMs: event.capturedAtMs,
+          cwd: event.cwd,
+          status,
+          threadId: event.sessionId,
+          turnId: event.turnId,
+        });
+        return;
+      }
+      const lastInputAtMs = this.#options.now() - observation.idleMilliseconds;
+      if (lastInputAtMs > event.capturedAtMs) return;
+      if (observation.state === "present") {
+        this.#options.state.putPendingDesktopNotification({
+          completedAtMs: event.capturedAtMs,
+          cwd: event.cwd,
+          status,
+          threadId: event.sessionId,
+          turnId: event.turnId,
+        });
+        return;
+      }
+      confirmedAway = true;
+    }
+    const result = await notifier.notifyTerminal(event, status, {
+      ...(confirmedAway ? { presence: "away" as const } : {}),
+      thread,
+    });
     if (result !== "present") void this.#outbox?.drain().catch(() => undefined);
+  }
+
+  async #reconcilePendingDesktopNotifications(): Promise<void> {
+    const notifier = this.#desktopNotifier;
+    const observePresence = this.#options.presenceObservation;
+    const pending = this.#options.state.listPendingDesktopNotifications();
+    if (!notifier || !observePresence || pending.length === 0) return;
+
+    let observation: PresenceObservation;
+    try {
+      observation = await observePresence();
+    } catch {
+      return;
+    }
+    const lastInputAtMs = this.#options.now() - observation.idleMilliseconds;
+    for (const candidate of pending) {
+      if (lastInputAtMs > candidate.completedAtMs) {
+        this.#options.state.deletePendingDesktopNotification(
+          candidate.threadId,
+          candidate.turnId,
+        );
+        continue;
+      }
+      if (observation.state !== "away") continue;
+      try {
+        await this.#options.codex.ensureThread?.(candidate.threadId);
+        const read = await this.#options.codex.readThread({
+          includeTurns: true,
+          threadId: candidate.threadId,
+        });
+        const result = await notifier.notifyTerminal(
+          {
+            capturedAtMs: candidate.completedAtMs,
+            cwd: candidate.cwd,
+            eventName: "Stop",
+            model: null,
+            permissionMode: null,
+            schemaVersion: 1,
+            sessionId: candidate.threadId,
+            source: null,
+            toolName: null,
+            turnId: candidate.turnId,
+          },
+          candidate.status,
+          { presence: "away", thread: read.thread },
+        );
+        if (result !== "present") {
+          this.#options.state.deletePendingDesktopNotification(
+            candidate.threadId,
+            candidate.turnId,
+          );
+        }
+      } catch {
+        // Keep the durable candidate for the next poll.
+      }
+    }
   }
 
   async #notifyDesktopPermission(event: HookEvent): Promise<void> {

@@ -1,6 +1,8 @@
 export type InboundIntent =
   | { code: string | null; kind: "approve" }
   | { code: string | null; kind: "deny" }
+  | { kind: "clearSession" }
+  | { kind: "compactSession" }
   | { kind: "enterSession"; index: number }
   | { kind: "exitSession" }
   | { kind: "help" }
@@ -12,6 +14,7 @@ export type InboundIntent =
   | { kind: "selectProject"; index: number }
   | { kind: "sessions"; page: "archived" | "first" | "next" }
   | { kind: "status" }
+  | { kind: "stopTurn" }
   | { kind: "unknownCommand"; text: string };
 
 export const COMMAND_HELP = [
@@ -20,6 +23,9 @@ export const COMMAND_HELP = [
   "s | s+ | sarc — sessions",
   "s<n> — enter session",
   "new — new session",
+  "clear — clear context in a new session",
+  "compact — compact current context",
+  "stop — stop current turn",
   "exit — return to main",
   "st — status",
   "perm | perm<n> — permissions",
@@ -41,6 +47,12 @@ export function parseInboundText(text: string): InboundIntent {
       return { kind: "sessions", page: "archived" };
     case "new":
       return { kind: "newSession" };
+    case "clear":
+      return { kind: "clearSession" };
+    case "compact":
+      return { kind: "compactSession" };
+    case "stop":
+      return { kind: "stopTurn" };
     case "exit":
       return { kind: "exitSession" };
     case "st":

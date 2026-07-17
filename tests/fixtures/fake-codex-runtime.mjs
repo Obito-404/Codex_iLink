@@ -293,6 +293,24 @@ lines.on("line", (line) => {
       fixtureParams: message.params,
       turn: { id: "turn-new" },
     });
+    return;
+  }
+
+  if (message.method === "turn/interrupt") {
+    if (!hasExactKeys(message.params, ["threadId", "turnId"])) {
+      rejectUnexpectedParams(message);
+      return;
+    }
+    respond(message.id, {});
+    return;
+  }
+
+  if (message.method === "thread/compact/start") {
+    if (!hasExactKeys(message.params, ["threadId"])) {
+      rejectUnexpectedParams(message);
+      return;
+    }
+    respond(message.id, {});
   }
 });
 

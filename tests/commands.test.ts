@@ -26,6 +26,9 @@ test("the documented short command table is parsed exactly", () => {
     kind: "enterSession",
   });
   assert.deepEqual(parseInboundText("new"), { kind: "newSession" });
+  assert.deepEqual(parseInboundText("clear"), { kind: "clearSession" });
+  assert.deepEqual(parseInboundText("compact"), { kind: "compactSession" });
+  assert.deepEqual(parseInboundText("stop"), { kind: "stopTurn" });
   assert.deepEqual(parseInboundText("exit"), { kind: "exitSession" });
   assert.deepEqual(parseInboundText("st"), { kind: "status" });
   assert.deepEqual(parseInboundText("perm"), { kind: "permissions" });

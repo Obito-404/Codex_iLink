@@ -16,7 +16,7 @@
 - Bridge App Server 单次 `ok`、`no` 审批；多个待审批时使用不可复用的随机短码，通知网络失败时使用同一短码退避重试，请求失效或 30 分钟超时才自动拒绝
 - DPAPI CurrentUser 加密 iLink Token
 - Named Pipe Hook 与 7 天/5MB 有界 Spool，启动及运行期持续恢复
-- 离开电脑后的 Desktop 终态通知与送达后 5 分钟回复路由
+- 离开电脑后的 Desktop 最后一轮摘要与最终回答通知、延迟离开复查，以及送达后 30 分钟回复路由
 - 活动任务期间保持系统唤醒，任务结束后恢复原电源行为
 - 微信最终回复每条最多 2000 UTF-8 字节、最多 3 条，超长时截断并提示到 Desktop 查看
 - Codex 网络或上游请求失败时向微信返回脱敏错误及可用的 HTTP 状态；失败前的部分文本不会伪装成成功回复
@@ -62,6 +62,9 @@ s<n>            enter session
 s+              next page
 sarc            archived sessions
 new             new session
+clear           start a fresh session with empty context
+compact         compact the current session context
+stop            interrupt the current WeChat turn
 exit            return to main
 st              status
 perm            list current Codex permission profiles
@@ -74,9 +77,11 @@ help            commands
 
 `p<n>`、`s<n>` 可以直接使用；没有有效列表快照时，Bridge 会按当前项目列表或当前项目未归档任务第一页解释编号。执行 `p`、`s`、`s+` 或 `sarc` 后，刚显示的编号从该列表或页面生成时起固定 10 分钟；进入任务后使用的是另一套 30 分钟滑动绑定。命令不使用 `/` 或空格；旧斜杠形式会明确返回未知命令。
 
+`stop` 只中断当前会话里由微信 Bridge 发起且已取得 Turn ID 的活动回合，不停止后台 Bridge，也不回滚已经完成的文件修改；Desktop 发起的回合仍需回到电脑端停止。`clear` 仅在当前会话没有执行中或排队任务时创建并绑定一个全新会话；项目会话的原历史可通过 `s` 找回，微信主会话则可通过 `exit` 返回。`compact` 通过 Codex 原生 `thread/compact/start` 压缩当前会话上下文，并在压缩完成前持有同一会话租约；期间收到的新消息会排队。
+
 微信不能切换模型或 reasoning effort。`perm` 通过 Codex 原生 `permissionProfile/list` 展示当前项目实际允许的 Profile；`perm<n>` 对已加载任务使用 `thread/settings/update.permissions`，首次加载或重连时使用 `thread/resume.permissions`。Bridge 只保存任务 ID 到原生 Profile ID 的映射，以便自身重连后重新桥接，不自建 Sandbox 或审批规则，也不修改 Desktop 全局设置、其他任务或已经开始的回合。微信主任务首次创建时采用当时 Codex 运行时的默认配置；之后 `exit` 只返回这个持久化任务，不会重建或改写其模型。`new` 只显式传入所选项目的 `cwd`，采用创建时的 Codex 运行时默认配置，不读取该项目其他任务或 Desktop 最近选择的模型；`s<n>` 恢复目标旧任务及 Bridge 已为该任务选择的原生权限 Profile。Desktop 回合的审批仍只能在 Desktop 完成；控制者离开电脑时，同一 Desktop 回合最多向微信提醒一次，微信只处理 Bridge 自己发起且仍在线等待的单次审批。
 
-Bridge 启动 App Server 时只声明 Codex 权限 Profile API 所要求的 `experimentalApi` 客户端能力，不覆盖 Codex 的功能开关、模型、插件配置，也不实现权限判定；微信回合使用 Codex 原生 Profile 解析出的 Sandbox 和审批策略。仅由 Desktop UI 宿主提供的能力在后台 App Server 中仍可能不可用。状态读取超时只结束本次读取，不会杀掉仍在执行任务的 App Server；回合超过约 2 分钟仍未结束时，微信只收到一次“仍在执行”提示，任务不会因此被取消或重试。
+Bridge 启动 App Server 时只声明 Codex 权限 Profile API 所要求的 `experimentalApi` 客户端能力，不覆盖 Codex 的功能开关、模型、插件配置，也不实现权限判定；微信回合使用 Codex 原生 Profile 解析出的 Sandbox 和审批策略。仅由 Desktop UI 宿主提供的能力在后台 App Server 中仍可能不可用。状态读取超时只结束本次读取，不会杀掉仍在执行任务的 App Server；回合超过约 2 分钟仍未结束时，微信只收到一次“仍在执行”提示，任务不会因此被自动取消或重试，控制者可显式发送 `stop`。
 
 ## 媒体能力与边界
 
@@ -106,7 +111,7 @@ Bridge 启动 App Server 时只声明 Codex 权限 Profile API 所要求的 `exp
 
 如异常退出后 Desktop 提示 `CODEX_ILINK_THREAD_BUSY`，先确认 Bridge 已停止且 Desktop 没有活动回合；必要时再临时禁用 `Codex iLink Guard`，不要直接删除整个 SQLite 状态库。
 
-若 `st` 长时间显示“微信任务（租约活动）”并持续出现 `Queued`，表示持有该回合的 Bridge App Server 仍报告任务活动；独立 App Server 对同一回合显示的 `notLoaded` 或 `interrupted` 不能证明它已经结束。Bridge 不会据此自动解锁或重试，以免同一任务被并发写入。确认该回合确实卡住后，使用 `pnpm ilink stop` 再 `pnpm ilink start`，由新持有进程完成中断对账；已排队消息默认保留并继续执行。
+若 `st` 长时间显示“微信任务（租约活动）”并持续出现 `Queued`，表示持有该回合的 Bridge App Server 仍报告任务活动；独立 App Server 对同一回合显示的 `notLoaded` 或 `interrupted` 不能证明它已经结束。Bridge 不会据此自动解锁或重试，以免同一任务被并发写入。可先在微信当前会话发送 `stop`；若停止结果未知且确认回合确实卡住，再使用 `pnpm ilink stop` 后执行 `pnpm ilink start`，由新持有进程完成中断对账。前者停止当前微信回合，后者停止整个后台 Bridge；已排队消息默认保留并继续执行。
 
 ## 开发验证
 

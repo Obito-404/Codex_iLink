@@ -31,7 +31,7 @@ import {
   createPowerRequestCommand,
   PowerRequestController,
 } from "./power-request.ts";
-import { getPresence } from "./presence.ts";
+import { getPresence, getPresenceObservation } from "./presence.ts";
 import { runtimePaths, userPipePath } from "./runtime-paths.ts";
 
 const CONTROL_REQUEST_LIMIT_BYTES = 4 * 1024;
@@ -469,6 +469,7 @@ export async function runWindowsHost(
         console.error(`[ilink] ${operation} failed:`, safeErrorMessage(error));
       },
       presence: getPresence,
+      presenceObservation: getPresenceObservation,
       session,
       state,
     });

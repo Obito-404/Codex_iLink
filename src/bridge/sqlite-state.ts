@@ -44,6 +44,14 @@ export type DesktopTurnObservation = {
   turnId: string;
 };
 
+export type PendingDesktopNotification = {
+  completedAtMs: number;
+  cwd: string | null;
+  status: "completed" | "failed" | "interrupted";
+  threadId: string;
+  turnId: string;
+};
+
 const DESKTOP_OBSERVATION_TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export type QueuedTurn = {
@@ -534,6 +542,59 @@ export class SqliteState {
         .run(input.threadId, input.turnId);
       return Number(result.changes) === 1;
     });
+  }
+
+  putPendingDesktopNotification(input: PendingDesktopNotification): void {
+    this.#database
+      .prepare(
+        `INSERT INTO pending_desktop_notifications
+          (thread_id, turn_id, completed_at_ms, cwd, terminal_status)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (thread_id, turn_id) DO UPDATE SET
+           completed_at_ms = excluded.completed_at_ms,
+           cwd = excluded.cwd,
+           terminal_status = excluded.terminal_status`,
+      )
+      .run(
+        input.threadId,
+        input.turnId,
+        input.completedAtMs,
+        input.cwd,
+        input.status,
+      );
+  }
+
+  listPendingDesktopNotifications(): PendingDesktopNotification[] {
+    const rows = this.#database
+      .prepare(
+        `SELECT thread_id, turn_id, completed_at_ms, cwd, terminal_status
+         FROM pending_desktop_notifications
+         ORDER BY completed_at_ms, thread_id, turn_id`,
+      )
+      .all() as Array<{
+        completed_at_ms: number;
+        cwd: string | null;
+        terminal_status: PendingDesktopNotification["status"];
+        thread_id: string;
+        turn_id: string;
+      }>;
+    return rows.map((row) => ({
+      completedAtMs: row.completed_at_ms,
+      cwd: row.cwd,
+      status: row.terminal_status,
+      threadId: row.thread_id,
+      turnId: row.turn_id,
+    }));
+  }
+
+  deletePendingDesktopNotification(threadId: string, turnId: string): boolean {
+    const result = this.#database
+      .prepare(
+        `DELETE FROM pending_desktop_notifications
+         WHERE thread_id = ? AND turn_id = ?`,
+      )
+      .run(threadId, turnId);
+    return Number(result.changes) === 1;
   }
 
   recordDesktopTurnStopTombstone(input: {
@@ -1481,7 +1542,7 @@ export class SqliteState {
       | { user_version: number }
       | undefined;
     let version = current?.user_version ?? 0;
-    if (version < 0 || version > 7) {
+    if (version < 0 || version > 8) {
       throw new Error(`unsupported schema version ${String(version)}`);
     }
     const migrations = [
@@ -1492,6 +1553,7 @@ export class SqliteState {
       "./migrations/005-desktop-observation-tombstones.sql",
       "./migrations/006-durable-turn-input.sql",
       "./migrations/007-thread-permission-profiles.sql",
+      "./migrations/008-pending-desktop-notifications.sql",
     ];
     while (version < migrations.length) {
       const nextVersion = version + 1;

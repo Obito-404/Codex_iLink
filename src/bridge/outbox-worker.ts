@@ -139,8 +139,13 @@ export class OutboxWorker {
 }
 
 function finalReplyGroup(clientId: string): string | null {
-  const match = /^(codex-ilink:[^:]+:final)(?::part:[1-3])?$/u.exec(clientId);
-  return match?.[1] ?? null;
+  const bridge = /^(codex-ilink:[^:]+:final)(?::part:[1-3])?$/u.exec(clientId);
+  if (bridge?.[1]) return bridge[1];
+  const desktop =
+    /^(codex-ilink:desktop:[^:]+:[^:]+:final)(?::part:[1-3])?$/u.exec(
+      clientId,
+    );
+  return desktop?.[1] ?? null;
 }
 
 function abortableSleep(

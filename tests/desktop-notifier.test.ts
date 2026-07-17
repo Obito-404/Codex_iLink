@@ -174,7 +174,29 @@ test("an away Desktop completion is durably queued once without opening a route"
       now: () => 10_000,
       presence: async () => "away",
       readThread: async () => ({
-        thread: { cwd: "D:\\Project", name: "后台任务" },
+        thread: {
+          cwd: "D:\\Project",
+          name: "后台任务",
+          turns: [
+            {
+              id: "turn-desktop",
+              items: [
+                {
+                  content: [
+                    { text: "请检查登录问题并给出修复方案。", type: "text" },
+                  ],
+                  type: "userMessage",
+                },
+                {
+                  phase: "final_answer",
+                  text: "已经修复登录状态过期后无法重新认证的问题。",
+                  type: "agentMessage",
+                },
+              ],
+              status: "completed",
+            },
+          ],
+        },
       }),
       session,
       state,
@@ -183,7 +205,7 @@ test("an away Desktop completion is durably queued once without opening a route"
     assert.equal(await notifier.notifyTerminal(stopEvent, "completed"), "queued");
     assert.match(
       state.listPendingOutbox()[0]?.body ?? "",
-      /Codex Desktop 任务已完成[\s\S]*后台任务/u,
+      /Codex Desktop 任务已完成[\s\S]*后台任务[\s\S]*你问：请检查登录问题并给出修复方案。[\s\S]*Codex：已经修复登录状态过期后无法重新认证的问题。[\s\S]*直接回复即可继续这个会话[\s\S]*重启 Codex App/u,
     );
     assert.deepEqual(state.listLiveNotificationRoutes(10_001), []);
     assert.equal(
@@ -208,6 +230,93 @@ test("a present user is not sent a duplicate Desktop notification", async () => 
     });
     assert.equal(await notifier.notifyTerminal(stopEvent, "completed"), "present");
     assert.deepEqual(state.listPendingOutbox(), []);
+  });
+});
+
+test("a long Desktop completion keeps a short question summary and splits the final answer", async () => {
+  await withState(async (state) => {
+    seedContext(state);
+    const finalAnswer = `处理结果：${"修复完成。".repeat(240)}结束。`;
+    const notifier = new DesktopNotifier({
+      now: () => 25_000,
+      presence: async () => "away",
+      readThread: async () => ({
+        thread: {
+          cwd: "D:\\Project",
+          name: "长任务",
+          turns: [
+            {
+              id: "turn-desktop",
+              items: [
+                {
+                  content: [
+                    {
+                      text: `${"请检查这个问题。".repeat(30)}不应出现在摘要中的结尾`,
+                      type: "text",
+                    },
+                  ],
+                  type: "userMessage",
+                },
+                {
+                  phase: "final_answer",
+                  text: finalAnswer,
+                  type: "agentMessage",
+                },
+              ],
+              status: "completed",
+            },
+          ],
+        },
+      }),
+      session,
+      state,
+    });
+
+    assert.equal(await notifier.notifyTerminal(stopEvent, "completed"), "queued");
+    const pending = state.listPendingOutbox();
+    assert.equal(pending.length, 3);
+    const deliveredText = pending.map(({ body }) => body ?? "").join("");
+    assert.match(deliveredText, /你问：[^\n]+…/u);
+    assert.doesNotMatch(deliveredText, /不应出现在摘要中的结尾/u);
+    assert.match(deliveredText, /结束。/u);
+    assert.equal(
+      await notifier.notifyTerminal(stopEvent, "completed"),
+      "already-sent",
+    );
+    assert.equal(state.listPendingOutbox().length, 3);
+  });
+});
+
+test("a Desktop completion hides local file paths and points attachments back to Desktop", async () => {
+  await withState(async (state) => {
+    seedContext(state);
+    const notifier = new DesktopNotifier({
+      now: () => 26_000,
+      presence: async () => "away",
+      readThread: async () => ({
+        thread: {
+          turns: [
+            {
+              id: "turn-desktop",
+              items: [
+                {
+                  phase: "final_answer",
+                  text: "报告已生成：\n[报告](<D:\\Project\\report.md>)",
+                  type: "agentMessage",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+      session,
+      state,
+    });
+
+    assert.equal(await notifier.notifyTerminal(stopEvent, "completed"), "queued");
+    const body = state.listPendingOutbox()[0]?.body ?? "";
+    assert.doesNotMatch(body, /D:\\Project|report\.md/u);
+    assert.match(body, /最终回答包含本机附件，请在 Codex Desktop 查看/u);
   });
 });
 

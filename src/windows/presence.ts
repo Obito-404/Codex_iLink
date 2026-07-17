@@ -7,6 +7,10 @@ export type PresenceSample = {
   locked: boolean;
 };
 
+export type PresenceObservation = PresenceSample & {
+  state: PresenceState;
+};
+
 export type PresenceProbe = () => Promise<PresenceSample>;
 
 export type PresenceCommand = (script: string) => Promise<string>;
@@ -115,10 +119,20 @@ export const windowsPresenceProbe = createWindowsPresenceProbe();
 export async function getPresence(
   probe: PresenceProbe = windowsPresenceProbe,
 ): Promise<PresenceState> {
+  return (await getPresenceObservation(probe)).state;
+}
+
+export async function getPresenceObservation(
+  probe: PresenceProbe = windowsPresenceProbe,
+): Promise<PresenceObservation> {
   const sample = await probe();
-  return sample.locked || sample.idleMilliseconds >= AWAY_IDLE_MILLISECONDS
-    ? "away"
-    : "present";
+  return {
+    ...sample,
+    state:
+      sample.locked || sample.idleMilliseconds >= AWAY_IDLE_MILLISECONDS
+        ? "away"
+        : "present",
+  };
 }
 
 function runPresencePowerShell(script: string): Promise<string> {

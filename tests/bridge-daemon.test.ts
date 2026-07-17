@@ -956,6 +956,12 @@ test("an away Desktop Stop opens its reply route only after durable delivery", a
     updatedAtMs: 1,
   });
   state.clearInboundBody("bot-a", "controller-a", "seed-context");
+  state.setBinding({
+    expiresAtMs: 60_000,
+    projectPath: "D:\\Other",
+    threadId: "thread-existing-binding",
+    updatedAtMs: 1,
+  });
   leases.tryAcquire({
     createdAtMs: 2,
     instanceId: "desktop",
@@ -1033,10 +1039,239 @@ test("an away Desktop Stop opens its reply route only after durable delivery", a
       {
         deliveredAtMs: 31_000,
         eventId: "desktop:desktop-turn",
-        expiresAtMs: 331_000,
+        expiresAtMs: 1_831_000,
         threadId: "thread-desktop",
       },
     ]);
+    assert.equal(state.getBinding(nowMs), null);
+    await daemon.stop();
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a recently active Desktop completion is sent after five idle minutes without new input", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-presence-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const sent: Array<{ clientId: string; text: string }> = [];
+  let nowMs = 300_000;
+  let idleMilliseconds = 60_000;
+  state.setMainThreadId("thread-main");
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  state.acceptInboundBatch({
+    accountId: "bot-a",
+    controllerUserId: "controller-a",
+    messages: [
+      {
+        body: "help",
+        contextToken: "ctx-presence",
+        messageId: "seed-presence",
+        receivedAtMs: 1,
+      },
+    ],
+    nextCursor: "cursor-presence",
+    updatedAtMs: 1,
+  });
+  state.clearInboundBody("bot-a", "controller-a", "seed-presence");
+  assert.equal(
+    leases.tryAcquire({
+      createdAtMs: 2,
+      instanceId: "desktop",
+      operationId: "desktop-turn",
+      owner: "desktop",
+      threadId: "thread-desktop",
+      turnId: "desktop-turn",
+    }).acquired,
+    true,
+  );
+
+  const daemon = new BridgeDaemon({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      close() {},
+      onEvent() { return () => undefined; },
+      async readThread() {
+        return {
+          thread: {
+            cwd: "D:\\Project",
+            name: "离开后完成",
+            turns: [
+              {
+                id: "desktop-turn",
+                items: [
+                  {
+                    content: [{ text: "检查后台任务", type: "text" }],
+                    type: "userMessage",
+                  },
+                  {
+                    phase: "final_answer",
+                    text: `${"后台任务已经完成。".repeat(120)}结束。`,
+                    type: "agentMessage",
+                  },
+                ],
+                status: "completed",
+              },
+            ],
+          },
+        };
+      },
+      async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
+      async setThreadName() { return {}; },
+      async startThread() { assert.fail("main thread already exists"); },
+      async startTurn() { assert.fail("no inbound messages"); },
+    },
+    hookReceiver: {
+      async close() {}, async drainSpool() { return 0; }, async start() {},
+    },
+    ilink: {
+      async getUpdates() {
+        return { cursor: "cursor-presence", kind: "timeout" as const };
+      },
+      async sendText(input) {
+        sent.push(input);
+        return { accepted: true as const, clientId: input.clientId };
+      },
+    },
+    inboxDirectory: join(directory, "Inbox"),
+    leases,
+    newId: () => "unused",
+    now: () => nowMs,
+    presence: async () => "present",
+    presenceObservation: async () => ({
+      idleMilliseconds,
+      locked: false,
+      state: idleMilliseconds >= 5 * 60 * 1_000 ? "away" : "present",
+    }),
+    session,
+    state,
+  });
+
+  try {
+    await daemon.start();
+    await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      capturedAtMs: nowMs,
+    });
+    assert.equal(sent.length, 0);
+
+    nowMs += 4 * 60 * 1_000;
+    idleMilliseconds = 5 * 60 * 1_000;
+    await daemon.pollOnce();
+    assert.equal(sent.length, 2);
+    assert.match(
+      sent.map(({ text }) => text).join(""),
+      /你问：检查后台任务[\s\S]*Codex：后台任务已经完成/u,
+    );
+    assert.deepEqual(state.listLiveNotificationRoutes(nowMs), [
+      {
+        deliveredAtMs: nowMs,
+        eventId: "desktop:desktop-turn",
+        expiresAtMs: nowMs + 30 * 60 * 1_000,
+        threadId: "thread-desktop",
+      },
+    ]);
+    await daemon.stop();
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("daemon startup sends a durable Desktop completion that became away while stopped", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-presence-restart-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const sent: string[] = [];
+  state.setMainThreadId("thread-main");
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  state.acceptInboundBatch({
+    accountId: "bot-a",
+    controllerUserId: "controller-a",
+    messages: [
+      {
+        body: "help",
+        contextToken: "ctx-restart",
+        messageId: "seed-restart",
+        receivedAtMs: 1,
+      },
+    ],
+    nextCursor: "cursor-restart",
+    updatedAtMs: 1,
+  });
+  state.clearInboundBody("bot-a", "controller-a", "seed-restart");
+  state.putPendingDesktopNotification({
+    completedAtMs: 100_000,
+    cwd: "D:\\Project",
+    status: "completed",
+    threadId: "thread-desktop",
+    turnId: "desktop-turn",
+  });
+
+  const daemon = new BridgeDaemon({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      close() {},
+      onEvent() { return () => undefined; },
+      async readThread() {
+        return {
+          thread: {
+            cwd: "D:\\Project",
+            name: "重启恢复任务",
+            turns: [
+              {
+                id: "desktop-turn",
+                items: [
+                  {
+                    phase: "final_answer",
+                    text: "重启后成功补发。",
+                    type: "agentMessage",
+                  },
+                ],
+                status: "completed",
+              },
+            ],
+          },
+        };
+      },
+      async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
+      async setThreadName() { return {}; },
+      async startThread() { assert.fail("main thread already exists"); },
+      async startTurn() { assert.fail("no inbound messages"); },
+    },
+    hookReceiver: {
+      async close() {}, async drainSpool() { return 0; }, async start() {},
+    },
+    ilink: {
+      async getUpdates() { return { cursor: "cursor-restart", kind: "timeout" as const }; },
+      async sendText(input) {
+        sent.push(input.text);
+        return { accepted: true as const, clientId: input.clientId };
+      },
+    },
+    inboxDirectory: join(directory, "Inbox"),
+    leases,
+    newId: () => "unused",
+    now: () => 500_000,
+    presence: async () => "present",
+    presenceObservation: async () => ({
+      idleMilliseconds: 450_000,
+      locked: false,
+      state: "away",
+    }),
+    session,
+    state,
+  });
+
+  try {
+    await daemon.start();
+    assert.equal(sent.length, 1);
+    assert.match(sent[0] ?? "", /重启后成功补发/u);
     await daemon.stop();
   } finally {
     leases.close();

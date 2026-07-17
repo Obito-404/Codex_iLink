@@ -6,7 +6,9 @@ export type InboundIntent =
   | { kind: "help" }
   | { kind: "message"; text: string }
   | { kind: "newSession" }
+  | { kind: "permissions" }
   | { kind: "projects" }
+  | { kind: "selectPermission"; index: number }
   | { kind: "selectProject"; index: number }
   | { kind: "sessions"; page: "archived" | "first" | "next" }
   | { kind: "status" }
@@ -20,6 +22,7 @@ export const COMMAND_HELP = [
   "/new — new session",
   "/exit — return to main",
   "/st — status",
+  "/perm | /perm <n> — permissions",
   "/ok <n> | /no <n> — approval",
   "/help — commands",
 ].join("\n");
@@ -43,11 +46,13 @@ export function parseInboundText(text: string): InboundIntent {
       return { kind: "exitSession" };
     case "/st":
       return { kind: "status" };
+    case "/perm":
+      return { kind: "permissions" };
     case "/help":
       return { kind: "help" };
   }
 
-  const indexed = /^\/(p|s|ok|no) ([1-9]\d*)$/u.exec(command);
+  const indexed = /^\/(p|s|perm|ok|no) ([1-9]\d*)$/u.exec(command);
   if (!indexed) return { kind: "unknownCommand", text };
   const index = Number(indexed[2]);
   if (!Number.isSafeInteger(index)) return { kind: "unknownCommand", text };
@@ -57,6 +62,8 @@ export function parseInboundText(text: string): InboundIntent {
       return { index, kind: "selectProject" };
     case "s":
       return { index, kind: "enterSession" };
+    case "perm":
+      return { index, kind: "selectPermission" };
     case "ok":
       return { index, kind: "approve" };
     case "no":

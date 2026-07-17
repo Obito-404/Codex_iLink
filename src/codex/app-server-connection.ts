@@ -74,6 +74,7 @@ export class AppServerConnection {
     const connection = new AppServerConnection(options);
     try {
       await connection.request("initialize", {
+        capabilities: { experimentalApi: true },
         clientInfo: {
           name: "codex_ilink_bridge",
           title: "Codex iLink Bridge",

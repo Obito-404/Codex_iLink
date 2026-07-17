@@ -255,11 +255,14 @@ test("a /s n preview exposes only recent user and final agent text, capped at 80
   });
 
   assert.deepEqual(preview, {
+    approvalPolicy: null,
     finalAgentText: "答".repeat(800),
     id: "thread-preview",
     latestUserText: "latest question\nsecond text block",
     model: "gpt-5.6-sol",
     permissionMode: "workspace-write",
+    permissionProfileId: null,
+    sandboxType: null,
     status: "active",
     title: "T".repeat(800),
   });
@@ -286,11 +289,14 @@ test("a thread preview never treats an unphased agent message as final", () => {
       },
     }),
     {
+      approvalPolicy: null,
       finalAgentText: null,
       id: "thread-legacy",
       latestUserText: "legacy question",
       model: null,
       permissionMode: null,
+      permissionProfileId: null,
+      sandboxType: null,
       status: null,
       title: "fallback title",
     },

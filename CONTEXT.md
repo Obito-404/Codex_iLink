@@ -68,6 +68,10 @@ _Avoid_: 插话、并发回合、改变当前回合
 共享会话自身的 Sandbox、审批策略和审批者设置；它属于会话，而不属于微信入口。
 _Avoid_: 微信权限、远程权限覆盖
 
+**权限 Profile 选择**:
+微信控制者为当前任务选择 Codex `permissionProfile/list` 实际返回且允许的原生 Profile；Bridge 只保存并转交 Profile ID，权限判定仍由 Codex 完成。
+_Avoid_: Bridge 自建权限、修改 Desktop 全局权限、跨任务权限继承
+
 **单次审批**:
 某个微信回合为一项具体受限操作发出的临时授权请求。
 _Avoid_: 永久授权、自动提权、跨入口审批

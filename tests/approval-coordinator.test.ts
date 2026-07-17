@@ -37,10 +37,14 @@ test("a live command approval is numbered, notified, and answered once", async (
 
 test("permissions are scoped to one turn and expiry denies stale callbacks", async () => {
   let now = 2_000;
+  const expired: Array<{ index: number; reason: string }> = [];
   const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
   const approvals = new ApprovalCoordinator({
     async notify() {},
     now: () => now,
+    onExpired(approval, reason) {
+      expired.push({ index: approval.index, reason });
+    },
     respond(id, result) {
       responses.push({ id, result });
     },
@@ -65,35 +69,88 @@ test("permissions are scoped to one turn and expiry denies stale callbacks", asy
       result: { permissions: {}, scope: "turn" },
     },
   ]);
+  assert.deepEqual(expired, [{ index: 1, reason: "timeout" }]);
   assert.deepEqual(approvals.list(), []);
 });
 
-test("notification failure denies instead of leaving Codex waiting", async () => {
+test("notification failure keeps the live approval and retries with one client id", async () => {
+  const attempts: Array<{ clientId: string; text: string }> = [];
+  const retryDelays: number[] = [];
+  const retryResolvers: Array<() => void> = [];
   const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
   const approvals = new ApprovalCoordinator({
-    async notify() {
-      throw new Error("offline");
+    async notify(text, clientId) {
+      attempts.push({ clientId, text });
+      if (attempts.length === 1) throw new Error("offline");
     },
     now: () => 3_000,
     respond(id, result) {
       responses.push({ id, result });
     },
+    sleep(milliseconds) {
+      retryDelays.push(milliseconds);
+      return new Promise((resolve) => retryResolvers.push(resolve));
+    },
   });
 
-  await assert.rejects(
-    approvals.ingest({
-      id: 43,
-      method: "item/fileChange/requestApproval",
-      params: {
-        itemId: "item-3",
-        reason: "write outside workspace",
-        threadId: "thread-3",
-        turnId: "turn-3",
-      },
-    }),
-    /offline/u,
-  );
-  assert.deepEqual(responses, [{ id: 43, result: { decision: "decline" } }]);
+  await approvals.ingest({
+    id: 43,
+    method: "item/fileChange/requestApproval",
+    params: {
+      itemId: "item-3",
+      reason: "write outside workspace",
+      threadId: "thread-3",
+      turnId: "turn-3",
+    },
+  });
+  assert.deepEqual(responses, []);
+  assert.equal(approvals.list()[0]?.deliveryStatus, "retrying");
+  assert.deepEqual(retryDelays, [1_000]);
+
+  retryResolvers.shift()?.();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0]?.clientId, attempts[1]?.clientId);
+  assert.equal(approvals.list()[0]?.deliveryStatus, "delivered");
+  assert.deepEqual(responses, []);
+});
+
+test("a lost Codex callback cancels notification retries with an explicit reason", async () => {
+  let live = true;
+  const expired: string[] = [];
+  const retryResolvers: Array<() => void> = [];
+  const approvals = new ApprovalCoordinator({
+    isLive: () => live,
+    async notify() {
+      throw new Error("offline");
+    },
+    now: () => 3_500,
+    onExpired(_approval, reason) {
+      expired.push(reason);
+    },
+    respond() {
+      assert.fail("a lost callback cannot be answered");
+    },
+    sleep() {
+      return new Promise((resolve) => retryResolvers.push(resolve));
+    },
+  });
+
+  await approvals.ingest({
+    id: 45,
+    method: "item/fileChange/requestApproval",
+    params: {
+      itemId: "item-lost",
+      threadId: "thread-lost",
+      turnId: "turn-lost",
+    },
+  });
+  live = false;
+  retryResolvers.shift()?.();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(expired, ["request-lost"]);
   assert.deepEqual(approvals.list(), []);
 });
 

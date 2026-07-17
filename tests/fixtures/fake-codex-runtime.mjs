@@ -51,6 +51,7 @@ if (recordStartIndex !== -1) {
 }
 
 let initializeCount = 0;
+let experimentalApi = false;
 const lines = readline.createInterface({ input: process.stdin });
 
 lines.on("line", (line) => {
@@ -96,6 +97,7 @@ lines.on("line", (line) => {
 
   if (message.method === "initialize") {
     initializeCount += 1;
+    experimentalApi = message.params?.capabilities?.experimentalApi === true;
     respond(message.id, { userAgent: "fake-codex-runtime" });
     return;
   }
@@ -172,12 +174,55 @@ lines.on("line", (line) => {
     return;
   }
 
-  if (message.method === "thread/resume") {
-    if (!hasExactKeys(message.params, ["threadId"])) {
+  if (message.method === "permissionProfile/list") {
+    if (!experimentalApi) {
+      respondError(message.id, -32600, "experimentalApi capability required");
+      return;
+    }
+    if (!hasExactKeys(message.params, ["cwd"])) {
       rejectUnexpectedParams(message);
       return;
     }
-    respond(message.id, { thread: { id: message.params.threadId } });
+    respond(message.id, {
+      data: [
+        { allowed: true, description: null, id: ":read-only" },
+        { allowed: true, description: null, id: ":workspace" },
+        { allowed: true, description: null, id: ":danger-full-access" },
+      ],
+      nextCursor: null,
+    });
+    return;
+  }
+
+  if (message.method === "thread/resume") {
+    if (message.params.permissions && !experimentalApi) {
+      respondError(message.id, -32600, "experimentalApi capability required");
+      return;
+    }
+    if (
+      !hasExactKeys(message.params, ["threadId"]) &&
+      !hasExactKeys(message.params, ["permissions", "threadId"])
+    ) {
+      rejectUnexpectedParams(message);
+      return;
+    }
+    respond(message.id, {
+      activePermissionProfile: {
+        id: message.params.permissions ?? ":workspace",
+      },
+      approvalPolicy:
+        message.params.permissions === ":danger-full-access"
+          ? "never"
+          : "on-request",
+      cwd: "D:\\Fixture",
+      sandbox: {
+        type:
+          message.params.permissions === ":danger-full-access"
+            ? "dangerFullAccess"
+            : "workspaceWrite",
+      },
+      thread: { id: message.params.threadId },
+    });
     return;
   }
 
@@ -246,6 +291,10 @@ function incrementFile(path) {
 
 function respond(id, result) {
   process.stdout.write(`${JSON.stringify({ id, result })}\n`);
+}
+
+function respondError(id, code, message) {
+  process.stdout.write(`${JSON.stringify({ id, error: { code, message } })}\n`);
 }
 
 function hasExactKeys(value, expected) {

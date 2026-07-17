@@ -91,7 +91,18 @@ export type ProjectNavigationEntry = {
 };
 
 export type CodexTurnStarter = {
-  ensureThread?(threadId: string): Promise<void>;
+  ensureThread?(
+    threadId: string,
+    options?: { permissions?: string },
+  ): Promise<void>;
+  listPermissionProfiles?(input: { cwd?: string }): Promise<{
+    data: Array<{
+      allowed: boolean;
+      description?: string | null;
+      id: string;
+    }>;
+    nextCursor: string | null;
+  }>;
   listThreads?(input: {
     archived: boolean;
     cursor?: string;
@@ -105,8 +116,11 @@ export type CodexTurnStarter = {
     id: number | string,
     result: Record<string, unknown>,
   ): boolean | void;
-  resumeThread?(threadId: string): Promise<Record<string, unknown>>;
-  startThread?(cwd: string): Promise<{
+  resumeThread?(
+    threadId: string,
+    options?: { permissions?: string },
+  ): Promise<Record<string, unknown>>;
+  startThread?(cwd: string): Promise<Record<string, unknown> & {
     thread: { id: string } & Record<string, unknown>;
   }>;
   unarchiveThread?(threadId: string): Promise<Record<string, unknown>>;
@@ -163,6 +177,7 @@ export class BridgeEngine {
   readonly #state: SqliteState;
   readonly #turnFailures = new Map<string, CodexTurnFailure>();
   #closing = false;
+  #ilinkHealthy = true;
   #reconcilePromise: Promise<void> | undefined;
 
   constructor(options: BridgeEngineOptions) {
@@ -204,6 +219,24 @@ export class BridgeEngine {
           },
           ...(isLive ? { isLive } : {}),
           now: this.#now,
+          onExpired: (approval, reason) => {
+            const contextToken =
+              this.#state.getDispatchIntentByTurnId(approval.turnId)
+                ?.contextToken ??
+              this.#state.getILinkState(this.#session.botId)?.contextToken;
+            if (!contextToken) return;
+            const text =
+              reason === "request-lost"
+                ? `⚠️ Approval #${String(approval.index)} 已失效，受限操作未执行；请重新发送操作。`
+                : approval.deliveryStatus === "retrying"
+                  ? `🌐 Approval #${String(approval.index)} 因微信网络异常未送达且已超时，受限操作未执行；请重新发送操作。`
+                  : `⌛ Approval #${String(approval.index)} 已超时，受限操作未执行；请重新发送操作。`;
+            void this.#send(
+              contextToken,
+              text,
+              `codex-ilink:approval:${approval.turnId}:${String(approval.index)}:expired`,
+            ).catch(() => undefined);
+          },
           respond,
         })
       : undefined;
@@ -671,6 +704,20 @@ export class BridgeEngine {
         );
       }
     }
+    if (intent.kind === "permissions" || intent.kind === "selectPermission") {
+      try {
+        const reply = await this.#permissionReply(
+          intent.kind === "selectPermission" ? intent.index : undefined,
+        );
+        return this.#replyToCommand(input.contextToken, input.messageId, reply);
+      } catch {
+        return this.#replyToCommand(
+          input.contextToken,
+          input.messageId,
+          "权限命令执行失败，请稍后重试。",
+        );
+      }
+    }
     if (
       intent.kind === "newSession" ||
       intent.kind === "exitSession" ||
@@ -719,13 +766,19 @@ export class BridgeEngine {
       createdAtMs,
       targetUserId: this.#session.controllerUserId,
     });
-    await this.#ilink.sendText({
-      clientId,
-      contextToken,
-      session: this.#session,
-      signal: this.#shutdown.signal,
-      text,
-    });
+    try {
+      await this.#ilink.sendText({
+        clientId,
+        contextToken,
+        session: this.#session,
+        signal: this.#shutdown.signal,
+        text,
+      });
+      this.#ilinkHealthy = true;
+    } catch (error) {
+      this.#ilinkHealthy = false;
+      throw error;
+    }
     this.#state.confirmOutbox(clientId, this.#now());
     return true;
   }
@@ -1013,7 +1066,7 @@ export class BridgeEngine {
     if (target.archived) {
       await this.#codex.unarchiveThread?.(target.threadId);
     }
-    const resumed = await this.#codex.resumeThread(target.threadId);
+    const resumed = await this.#resumeThreadForControl(target.threadId);
     this.#state.setBindingForNavigation({
       expiresAtMs: nowMs + 30 * 60 * 1_000,
       projectPath: target.projectPath,
@@ -1040,11 +1093,16 @@ export class BridgeEngine {
 
   #formatThreadPreview(preview: ThreadPreview | null, threadId: string): string {
     if (!preview) return `已进入会话：${threadId}`;
+    const permission = preview.permissionProfileId
+      ? permissionProfileDisplayName(preview.permissionProfileId)
+      : (preview.permissionMode ?? "未知");
     return [
       `已进入会话：${preview.title ?? preview.id}`,
       `状态：${preview.status ?? "未知"}`,
       `模型：${preview.model ?? "未知"}`,
-      `权限：${preview.permissionMode ?? "未知"}`,
+      `权限：${permission}`,
+      `审批：${preview.approvalPolicy ?? "未知"}`,
+      `Sandbox：${preview.sandboxType ?? "未知"}`,
       `最近提问：${preview.latestUserText ?? "（无）"}`,
       `最近回复：${preview.finalAgentText ?? "（无）"}`,
     ].join("\n");
@@ -1066,7 +1124,95 @@ export class BridgeEngine {
       threadId,
       updatedAtMs: nowMs,
     });
-    return `已新建并进入会话：${threadId}\n项目：${projectDisplayName(projectPath)}\n30 分钟无活动后自动退出。`;
+    const activePermission = activePermissionProfileId(started);
+    return [
+      `已新建并进入会话：${threadId}`,
+      `项目：${projectDisplayName(projectPath)}`,
+      `权限：${
+        activePermission
+          ? permissionProfileDisplayName(activePermission)
+          : "未知"
+      }`,
+      `审批：${approvalPolicyText(started)}`,
+      `Sandbox：${sandboxTypeText(started)}`,
+      "30 分钟无活动后自动退出。",
+    ].join("\n");
+  }
+
+  async #permissionReply(selectedIndex?: number): Promise<string> {
+    if (
+      !this.#codex?.resumeThread ||
+      !this.#codex.listPermissionProfiles ||
+      !this.#mainThreadId
+    ) {
+      throw new Error("permission profiles are not configured");
+    }
+    const binding = this.#state.getBinding(this.#now());
+    const threadId = binding?.threadId ?? this.#mainThreadId;
+    const storedPermission = this.#state.getThreadPermissionProfile(threadId)
+      ?.profileId;
+    const cwd = binding?.projectPath ?? this.#inboxDirectory ?? undefined;
+    const listed = await this.#codex.listPermissionProfiles({
+      ...(cwd ? { cwd } : {}),
+    });
+    const profiles = listed.data.filter(isPermissionProfileSummary);
+
+    if (selectedIndex !== undefined) {
+      const selected = profiles[selectedIndex - 1];
+      if (!selected) return "权限编号无效，请按 /perm 当前列表选择。";
+      if (!selected.allowed) {
+        return `权限 ${selected.id} 受 Codex 配置限制，当前不可切换。`;
+      }
+      const changed = await this.#codex.resumeThread(threadId, {
+        permissions: selected.id,
+      });
+      const activeId = activePermissionProfileId(changed);
+      if (activeId !== selected.id) {
+        throw new Error("Codex did not activate the selected permission profile");
+      }
+      this.#state.setThreadPermissionProfile({
+        profileId: selected.id,
+        threadId,
+        updatedAtMs: this.#now(),
+      });
+      return [
+        `已切换当前任务权限：${formatPermissionProfile(selectedIndex, selected)}`,
+        `审批：${approvalPolicyText(changed)}`,
+        `Sandbox：${sandboxTypeText(changed)}`,
+      ].join("\n");
+    }
+
+    let current: Record<string, unknown> | null = null;
+    try {
+      current = await this.#resumeThreadForControl(threadId);
+    } catch {
+      // Keep the native profile list usable so an explicitly selected allowed
+      // profile can recover a task whose previously saved profile was disabled.
+    }
+    const activeId =
+      (current ? activePermissionProfileId(current) : undefined) ??
+      storedPermission;
+    const activeIndex = profiles.findIndex((profile) => profile.id === activeId);
+    const active = activeIndex >= 0 ? profiles[activeIndex] : null;
+    return [
+      `当前权限：${
+        active
+          ? formatPermissionProfile(activeIndex + 1, active)
+          : (activeId ?? "未知")
+      }`,
+      `审批：${current ? approvalPolicyText(current) : "未知"}`,
+      `Sandbox：${current ? sandboxTypeText(current) : "未知"}`,
+      ...(current
+        ? []
+        : ["⚠️ Codex 未能确认当前权限；请选择可用 Profile 或稍后重试。"]),
+      "",
+      ...profiles.map((profile, index) =>
+        `${formatPermissionProfile(index + 1, profile)}${
+          profile.allowed ? "" : "（不可用）"
+        }`,
+      ),
+      "使用 /perm <n> 直接切换当前任务权限。",
+    ].join("\n");
   }
 
   #exitSessionReply(): string {
@@ -1089,6 +1235,17 @@ export class BridgeEngine {
     } catch {
       codexHealthy = false;
     }
+    let permissionMetadata: Record<string, unknown> | null = null;
+    const permissionThreadId = binding?.threadId ?? this.#mainThreadId;
+    if (permissionThreadId && this.#codex?.resumeThread) {
+      try {
+        permissionMetadata = await this.#resumeThreadForControl(
+          permissionThreadId,
+        );
+      } catch {
+        codexHealthy = false;
+      }
+    }
     const knownActive = new Map(
       active.map((thread) => [
         thread.id,
@@ -1110,20 +1267,40 @@ export class BridgeEngine {
       });
     }
     const knownActiveTasks = [...knownActive.values()];
+    const pendingApprovals = this.#approvals?.list() ?? [];
+    const retryingApprovalCount = pendingApprovals.filter(
+      (approval) => approval.deliveryStatus === "retrying",
+    ).length;
     const session = binding
       ? `${binding.threadId}（剩余 ${String(Math.max(1, Math.ceil((binding.expiresAtMs - nowMs) / 60_000)))} 分钟）`
       : "微信主会话";
     return [
       `项目：${projectDisplayName(projectPath)}`,
       `会话：${session}`,
+      `权限：${
+        permissionMetadata && activePermissionProfileId(permissionMetadata)
+          ? permissionProfileDisplayName(
+              activePermissionProfileId(permissionMetadata) as string,
+            )
+          : "未知"
+      }`,
+      `审批：${
+        permissionMetadata ? approvalPolicyText(permissionMetadata) : "未知"
+      }；Sandbox：${
+        permissionMetadata ? sandboxTypeText(permissionMetadata) : "未知"
+      }`,
       `活动任务：${String(knownActiveTasks.length)}`,
       ...knownActiveTasks.map(
         (thread) => `- ${thread.title ?? thread.id} (${thread.id})`,
       ),
       `队列：${String(queueCount)}`,
       `通知回复窗口：${String(notificationCount)}`,
-      `待审批：${String(this.#approvals?.list().length ?? 0)}`,
-      `连接：Codex ${codexHealthy ? "正常" : "异常"}；仲裁${arbitrationHealthy ? "正常" : "关闭"}`,
+      `待审批：${String(pendingApprovals.length)}${
+        retryingApprovalCount > 0
+          ? `（通知重试中：${String(retryingApprovalCount)}）`
+          : ""
+      }`,
+      `连接：Codex ${codexHealthy ? "正常" : "异常"}；仲裁${arbitrationHealthy ? "正常" : "关闭"}；微信${this.#ilinkHealthy ? "正常" : "异常"}`,
     ].join("\n");
   }
 
@@ -1809,14 +1986,33 @@ export class BridgeEngine {
   }
 
   async #ensureThread(threadId: string): Promise<void> {
+    const storedPermission = this.#state.getThreadPermissionProfile(threadId)
+      ?.profileId;
+    const options = storedPermission
+      ? { permissions: storedPermission }
+      : undefined;
     if (this.#codex?.ensureThread) {
-      await this.#codex.ensureThread(threadId);
+      await this.#codex.ensureThread(threadId, options);
       return;
     }
     if (!this.#codex?.resumeThread) {
       throw new Error("Codex thread resume is not configured");
     }
-    await this.#codex.resumeThread(threadId);
+    await this.#codex.resumeThread(threadId, options);
+  }
+
+  async #resumeThreadForControl(
+    threadId: string,
+  ): Promise<Record<string, unknown>> {
+    if (!this.#codex?.resumeThread) {
+      throw new Error("Codex thread resume is not configured");
+    }
+    const storedPermission = this.#state.getThreadPermissionProfile(threadId)
+      ?.profileId;
+    if (!storedPermission) return this.#codex.resumeThread(threadId);
+    return this.#codex.resumeThread(threadId, {
+      permissions: storedPermission,
+    });
   }
 
   async #readThreadForReconciliation(
@@ -1995,6 +2191,67 @@ function stringField(
 ): string | undefined {
   const field = value?.[name];
   return typeof field === "string" ? field : undefined;
+}
+
+function isPermissionProfileSummary(value: unknown): value is {
+  allowed: boolean;
+  description?: string | null;
+  id: string;
+} {
+  const profile = asObject(value);
+  return (
+    typeof profile?.allowed === "boolean" &&
+    typeof profile.id === "string" &&
+    profile.id.length > 0 &&
+    (profile.description === undefined ||
+      profile.description === null ||
+      typeof profile.description === "string")
+  );
+}
+
+function activePermissionProfileId(
+  metadata: Record<string, unknown>,
+): string | undefined {
+  return stringField(objectField(metadata, "activePermissionProfile"), "id");
+}
+
+function approvalPolicyText(metadata: Record<string, unknown>): string {
+  const policy = metadata.approvalPolicy;
+  return typeof policy === "string"
+    ? policy
+    : asObject(policy)?.granular
+      ? "granular"
+      : "未知";
+}
+
+function sandboxTypeText(metadata: Record<string, unknown>): string {
+  return (
+    stringField(objectField(metadata, "sandbox"), "type") ??
+    stringField(objectField(metadata, "sandboxPolicy"), "type") ??
+    "未知"
+  );
+}
+
+function formatPermissionProfile(
+  index: number,
+  profile: { description?: string | null; id: string },
+): string {
+  const builtInLabel = permissionProfileLabel(profile.id);
+  return `${String(index)}. ${builtInLabel} (${profile.id})`;
+}
+
+function permissionProfileDisplayName(id: string): string {
+  return `${permissionProfileLabel(id)} (${id})`;
+}
+
+function permissionProfileLabel(id: string): string {
+  return id === ":read-only"
+    ? "只读"
+    : id === ":workspace"
+      ? "项目读写"
+      : id === ":danger-full-access"
+        ? "完全访问"
+        : "自定义";
 }
 
 function projectDisplayName(projectPath: string | null): string {

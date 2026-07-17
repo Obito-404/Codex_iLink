@@ -5,6 +5,8 @@ export type ApprovalDecisionResult =
   | { kind: "not-found"; index: number };
 
 export type PendingApproval = {
+  deliveryAttempts: number;
+  deliveryStatus: "delivered" | "pending" | "retrying";
   expiresAtMs: number;
   index: number;
   method: ApprovalMethod;
@@ -17,10 +19,15 @@ export type ApprovalCoordinatorOptions = {
   isLive?: (id: number | string) => boolean;
   notify: (text: string, clientId: string) => Promise<void>;
   now: () => number;
+  onExpired?: (
+    approval: PendingApproval,
+    reason: "request-lost" | "timeout",
+  ) => void;
   respond: (
     id: number | string,
     result: Record<string, unknown>,
   ) => boolean | void;
+  sleep?: (milliseconds: number) => Promise<void>;
   timeoutMs?: number;
 };
 
@@ -52,7 +59,9 @@ export class ApprovalCoordinator {
   readonly #live = new Map<number, LiveApproval>();
   readonly #notify: ApprovalCoordinatorOptions["notify"];
   readonly #now: ApprovalCoordinatorOptions["now"];
+  readonly #onExpired: ApprovalCoordinatorOptions["onExpired"];
   readonly #respond: ApprovalCoordinatorOptions["respond"];
+  readonly #sleep: NonNullable<ApprovalCoordinatorOptions["sleep"]>;
   readonly #timeoutMs: number;
   #nextIndex = 1;
 
@@ -60,7 +69,9 @@ export class ApprovalCoordinator {
     this.#isLive = options.isLive ?? (() => true);
     this.#notify = options.notify;
     this.#now = options.now;
+    this.#onExpired = options.onExpired;
     this.#respond = options.respond;
+    this.#sleep = options.sleep ?? retrySleep;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
@@ -77,6 +88,8 @@ export class ApprovalCoordinator {
     const timer = setTimeout(() => this.#expireIndex(index), this.#timeoutMs);
     timer.unref();
     const approval: LiveApproval = {
+      deliveryAttempts: 0,
+      deliveryStatus: "pending",
       expiresAtMs: this.#now() + this.#timeoutMs,
       id: event.id,
       index,
@@ -88,20 +101,11 @@ export class ApprovalCoordinator {
       turnId,
     };
     this.#live.set(index, approval);
-    try {
-      await this.#notify(
-        `Approval #${index}\n${approval.summary}\n/ok ${index} | /no ${index}`,
-        `codex-ilink:approval:${turnId}:${itemId}`,
-      );
-    } catch (error) {
-      this.#live.delete(index);
-      clearTimeout(timer);
-      this.#respond(event.id, denialResult(event.method));
-      throw error;
-    }
+    await this.#deliver(index);
     if (!this.#isLive(event.id) && this.#live.get(index) === approval) {
       this.#live.delete(index);
       clearTimeout(timer);
+      this.#emitExpired(approval, "request-lost");
     }
     return true;
   }
@@ -129,6 +133,7 @@ export class ApprovalCoordinator {
       if (!this.#isLive(approval.id)) {
         this.#live.delete(index);
         clearTimeout(approval.timer);
+        this.#emitExpired(approval, "request-lost");
         expired += 1;
         continue;
       }
@@ -136,6 +141,7 @@ export class ApprovalCoordinator {
       this.#live.delete(index);
       clearTimeout(approval.timer);
       this.#respond(approval.id, denialResult(approval.method));
+      this.#emitExpired(approval, "timeout");
       expired += 1;
     }
     return expired;
@@ -164,8 +170,78 @@ export class ApprovalCoordinator {
     const approval = this.#live.get(index);
     if (!approval) return;
     this.#live.delete(index);
-    if (this.#isLive(approval.id)) {
+    clearTimeout(approval.timer);
+    const live = this.#isLive(approval.id);
+    if (live) {
       this.#respond(approval.id, denialResult(approval.method));
+    }
+    this.#emitExpired(approval, live ? "timeout" : "request-lost");
+  }
+
+  async #deliver(index: number): Promise<void> {
+    const approval = this.#live.get(index);
+    if (!approval) return;
+    if (!this.#isLive(approval.id)) {
+      this.#live.delete(index);
+      clearTimeout(approval.timer);
+      this.#emitExpired(approval, "request-lost");
+      return;
+    }
+    if (approval.expiresAtMs <= this.#now()) {
+      this.#expireIndex(index);
+      return;
+    }
+
+    approval.deliveryAttempts += 1;
+    try {
+      await this.#notify(
+        `Approval #${index}\n${approval.summary}\n/ok ${index} | /no ${index}`,
+        `codex-ilink:approval:${approval.turnId}:${stringField(approval.params, "itemId") ?? "unknown"}`,
+      );
+      if (this.#live.get(index) === approval) {
+        approval.deliveryStatus = "delivered";
+      }
+    } catch {
+      if (this.#live.get(index) !== approval) {
+        return;
+      }
+      if (!this.#isLive(approval.id)) {
+        this.#live.delete(index);
+        clearTimeout(approval.timer);
+        this.#emitExpired(approval, "request-lost");
+        return;
+      }
+      approval.deliveryStatus = "retrying";
+      const delayMs = Math.min(
+        30_000,
+        1_000 * 2 ** Math.min(approval.deliveryAttempts - 1, 5),
+      );
+      void this.#sleep(delayMs)
+        .then(() => this.#deliver(index))
+        .catch(() => undefined);
+    }
+  }
+
+  #emitExpired(
+    approval: LiveApproval,
+    reason: "request-lost" | "timeout",
+  ): void {
+    try {
+      this.#onExpired?.(
+        {
+          deliveryAttempts: approval.deliveryAttempts,
+          deliveryStatus: approval.deliveryStatus,
+          expiresAtMs: approval.expiresAtMs,
+          index: approval.index,
+          method: approval.method,
+          summary: approval.summary,
+          threadId: approval.threadId,
+          turnId: approval.turnId,
+        },
+        reason,
+      );
+    } catch {
+      // Expiry is final; an optional diagnostic callback cannot revive it.
     }
   }
 }
@@ -220,6 +296,13 @@ function stringField(
 ): string | null {
   const field = value[name];
   return typeof field === "string" && field.length > 0 ? field : null;
+}
+
+function retrySleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, milliseconds);
+    timer.unref();
+  });
 }
 
 function recordField(

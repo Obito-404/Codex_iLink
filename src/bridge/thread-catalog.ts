@@ -26,11 +26,14 @@ export type ThreadCatalogPage = {
 };
 
 export type ThreadPreview = {
+  approvalPolicy: string | null;
   finalAgentText: string | null;
   id: string;
   latestUserText: string | null;
   model: string | null;
   permissionMode: string | null;
+  permissionProfileId: string | null;
+  sandboxType: string | null;
   status: string | null;
   title: string | null;
 };
@@ -223,7 +226,18 @@ export function buildThreadPreview(
   }
 
   const metadata = isRecord(rawThreadMetadata) ? rawThreadMetadata : {};
+  const activePermissionProfile = isRecord(metadata.activePermissionProfile)
+    ? metadata.activePermissionProfile
+    : {};
+  const sandbox = isRecord(metadata.sandbox) ? metadata.sandbox : {};
+  const rawApprovalPolicy = metadata.approvalPolicy;
   return {
+    approvalPolicy:
+      typeof rawApprovalPolicy === "string"
+        ? truncatePreviewText(rawApprovalPolicy)
+        : isRecord(rawApprovalPolicy) && isRecord(rawApprovalPolicy.granular)
+          ? "granular"
+          : null,
     finalAgentText: truncatePreviewText(finalAgentText),
     id,
     latestUserText: truncatePreviewText(latestUserText),
@@ -238,6 +252,10 @@ export function buildThreadPreview(
         stringField(rawThreadRead, "permissionMode") ??
         stringField(thread, "permissionMode"),
     ),
+    permissionProfileId: truncatePreviewText(
+      stringField(activePermissionProfile, "id"),
+    ),
+    sandboxType: truncatePreviewText(stringField(sandbox, "type")),
     status: truncatePreviewText(threadStatus(thread)),
     title: truncatePreviewText(
       stringField(thread, "name") ?? stringField(thread, "preview"),

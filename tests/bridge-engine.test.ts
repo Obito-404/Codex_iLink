@@ -3501,6 +3501,71 @@ test("a live Bridge approval can be decided once from WeChat", async () => {
   }
 });
 
+test("a transient approval notification failure stays pending instead of declining", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-approval-retry-"));
+  const state = new SqliteState(join(directory, "state.sqlite"));
+  const sent: SendInput[] = [];
+  const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  let failApprovalOnce = true;
+  const bridge = new BridgeEngine({
+    codex: {
+      respondToServerRequest(id, result) {
+        responses.push({ id, result });
+      },
+      async startTurn() {
+        assert.fail("approval commands must not start a turn");
+      },
+    },
+    ilink: {
+      async sendText(input) {
+        if (failApprovalOnce && input.text.startsWith("Approval #")) {
+          failApprovalOnce = false;
+          throw new Error("fetch failed");
+        }
+        sent.push(input);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    newId: () => "approval-retry-client",
+    now: () => 6_000,
+    session,
+    state,
+  });
+
+  try {
+    await bridge.ingestBatch({
+      cursor: "cursor-approval-retry-context",
+      messages: [textMessage(33, "/help")],
+    });
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        id: 78,
+        method: "item/fileChange/requestApproval",
+        params: {
+          itemId: "item-approval-retry",
+          reason: "write outside workspace",
+          threadId: "thread-approval-retry",
+          turnId: "turn-approval-retry",
+        },
+      }),
+      true,
+    );
+    assert.deepEqual(responses, []);
+
+    await bridge.ingestBatch({
+      cursor: "cursor-approval-retry-status",
+      messages: [textMessage(34, "/st")],
+    });
+    assert.match(sent.at(-1)?.text ?? "", /待审批：1（通知重试中：1）/u);
+    assert.match(sent.at(-1)?.text ?? "", /微信异常/u);
+  } finally {
+    bridge.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 async function withBridge(
   run: (input: {
     bridge: BridgeEngine;

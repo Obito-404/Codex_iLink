@@ -15,7 +15,7 @@ test("controller identity and database configuration survive reopening", () => {
     const first = new SqliteState(path);
     assert.deepEqual(first.storageDiagnostics(), {
       journalMode: "wal",
-      schemaVersion: 6,
+      schemaVersion: 7,
       synchronous: "full",
     });
     assert.deepEqual(
@@ -48,6 +48,41 @@ test("controller identity and database configuration survive reopening", () => {
       accountId: "bot-account",
       boundAtMs: 1_721_000_000_000,
       userId: "wechat-user",
+    });
+    reopened.close();
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("selected Codex permission profile survives Bridge reopening per thread", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-permissions-"));
+  const path = join(directory, "state.db");
+
+  try {
+    const first = new SqliteState(path);
+    first.setThreadPermissionProfile({
+      profileId: ":danger-full-access",
+      threadId: "thread-permission-a",
+      updatedAtMs: 100,
+    });
+    first.setThreadPermissionProfile({
+      profileId: ":read-only",
+      threadId: "thread-permission-b",
+      updatedAtMs: 200,
+    });
+    first.close();
+
+    const reopened = new SqliteState(path);
+    assert.deepEqual(reopened.getThreadPermissionProfile("thread-permission-a"), {
+      profileId: ":danger-full-access",
+      threadId: "thread-permission-a",
+      updatedAtMs: 100,
+    });
+    assert.deepEqual(reopened.getThreadPermissionProfile("thread-permission-b"), {
+      profileId: ":read-only",
+      threadId: "thread-permission-b",
+      updatedAtMs: 200,
     });
     reopened.close();
   } finally {
@@ -835,7 +870,7 @@ test("schema v6 deletes legacy plain-text scheduler payloads", () => {
     database.close();
 
     const state = new SqliteState(path);
-    assert.equal(state.storageDiagnostics().schemaVersion, 6);
+    assert.equal(state.storageDiagnostics().schemaVersion, 7);
     assert.deepEqual(state.listQueuedTurns(), []);
     assert.equal(state.getDispatchIntent("legacy-operation"), null);
     assert.equal(state.countActiveDispatches(), 0);

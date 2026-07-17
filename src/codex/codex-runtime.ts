@@ -8,6 +8,7 @@ import type {
   AppServerEvent,
   AppServerEventListener,
   JsonObject,
+  PermissionProfileListResult,
   ThreadListResult,
   ThreadReadResult,
   ThreadResumeResult,
@@ -29,6 +30,7 @@ export class CodexRuntime {
   #connection: AppServerConnection;
   #detachConnectionEvents: (() => void) | undefined;
   readonly #eventListeners = new Set<AppServerEventListener>();
+  readonly #loadedPermissionProfileIds = new Map<string, string>();
   readonly #loadedThreadIds = new Set<string>();
   readonly #options: CodexRuntimeOptions;
   readonly #serverRequestOwners = new Map<
@@ -78,17 +80,44 @@ export class CodexRuntime {
     })) as ThreadReadResult;
   }
 
+  async listPermissionProfiles(input: {
+    cwd?: string;
+  } = {}): Promise<PermissionProfileListResult> {
+    const params: JsonObject = {};
+    if (input.cwd !== undefined) params.cwd = input.cwd;
+    return (await this.#requestSafely(
+      "permissionProfile/list",
+      params,
+    )) as PermissionProfileListResult;
+  }
+
   async unarchiveThread(threadId: string): Promise<ThreadUnarchiveResult> {
     return (await this.#requestSafely("thread/unarchive", {
       threadId,
     })) as ThreadUnarchiveResult;
   }
 
-  async resumeThread(threadId: string): Promise<ThreadResumeResult> {
+  async resumeThread(
+    threadId: string,
+    options: { permissions?: string } = {},
+  ): Promise<ThreadResumeResult> {
     const result = (await this.#requestSafely("thread/resume", {
+      ...(options.permissions ? { permissions: options.permissions } : {}),
       threadId,
     })) as ThreadResumeResult;
     this.#loadedThreadIds.add(threadId);
+    const activeProfileId = permissionProfileId(result.activePermissionProfile);
+    if (
+      options.permissions &&
+      activeProfileId !== options.permissions
+    ) {
+      this.#loadedThreadIds.delete(threadId);
+      this.#loadedPermissionProfileIds.delete(threadId);
+      throw new Error("Codex did not activate the requested permission profile");
+    }
+    if (activeProfileId) {
+      this.#loadedPermissionProfileIds.set(threadId, activeProfileId);
+    }
     return result;
   }
 
@@ -97,18 +126,31 @@ export class CodexRuntime {
       cwd,
     })) as ThreadStartResult;
     this.#loadedThreadIds.add(result.thread.id);
+    const activeProfileId = permissionProfileId(result.activePermissionProfile);
+    if (activeProfileId) {
+      this.#loadedPermissionProfileIds.set(result.thread.id, activeProfileId);
+    }
     return result;
   }
 
-  async ensureThread(threadId: string): Promise<void> {
+  async ensureThread(
+    threadId: string,
+    options: { permissions?: string } = {},
+  ): Promise<void> {
     if (
       this.#connection.isTerminated() ||
       this.#reconnectRequired === this.#connection
     ) {
       await this.#reconnect(this.#connection);
     }
-    if (this.#loadedThreadIds.has(threadId)) return;
-    await this.resumeThread(threadId);
+    if (
+      this.#loadedThreadIds.has(threadId) &&
+      (!options.permissions ||
+        this.#loadedPermissionProfileIds.get(threadId) === options.permissions)
+    ) {
+      return;
+    }
+    await this.resumeThread(threadId, options);
   }
 
   async startTurn(input: {
@@ -266,6 +308,7 @@ export class CodexRuntime {
       this.#invalidateServerRequests(unavailable);
       unavailable.close();
       this.#connection = connection;
+      this.#loadedPermissionProfileIds.clear();
       this.#loadedThreadIds.clear();
       if (this.#reconnectRequired === unavailable) {
         this.#reconnectRequired = undefined;
@@ -320,4 +363,12 @@ export class CodexRuntime {
       this.#reconnectRequired !== owner.connection
     );
   }
+}
+
+function permissionProfileId(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const id = (value as Record<string, unknown>).id;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
 }

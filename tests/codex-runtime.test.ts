@@ -534,6 +534,59 @@ test("thread metadata operations use the stable public methods", async () => {
   }
 });
 
+test("native permission profiles are listed and selected through App Server", async () => {
+  const runtime = await CodexRuntime.create({
+    bridgeInstanceId: "bridge-instance-permissions",
+    command: [process.execPath, fakeRuntime],
+  });
+
+  try {
+    const profiles = await runtime.listPermissionProfiles({ cwd: "D:\\Fixture" });
+    const resumed = await runtime.resumeThread("thread-existing", {
+      permissions: ":danger-full-access",
+    });
+
+    assert.deepEqual(profiles.data, [
+      { allowed: true, description: null, id: ":read-only" },
+      { allowed: true, description: null, id: ":workspace" },
+      { allowed: true, description: null, id: ":danger-full-access" },
+    ]);
+    assert.deepEqual(resumed.activePermissionProfile, {
+      id: ":danger-full-access",
+    });
+    assert.equal(resumed.approvalPolicy, "never");
+    assert.deepEqual(resumed.sandbox, { type: "dangerFullAccess" });
+  } finally {
+    runtime.close();
+  }
+});
+
+test("ensureThread reapplies a changed native permission profile exactly once", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-runtime-permissions-"));
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const resumeCountPath = join(directory, "thread-resume.count");
+  const runtime = await CodexRuntime.create({
+    bridgeInstanceId: "bridge-instance-permission-reapply",
+    command: [
+      process.execPath,
+      fakeRuntime,
+      "--count-method",
+      "thread/resume",
+      resumeCountPath,
+    ],
+  });
+
+  try {
+    await runtime.resumeThread("thread-existing", { permissions: ":workspace" });
+    await runtime.ensureThread("thread-existing", { permissions: ":workspace" });
+    await runtime.ensureThread("thread-existing", { permissions: ":read-only" });
+
+    assert.equal(Number(readFileSync(resumeCountPath, "utf8")), 2);
+  } finally {
+    runtime.close();
+  }
+});
+
 test("existing threads inherit settings and new threads override only cwd", async () => {
   const runtime = await CodexRuntime.create({
     bridgeInstanceId: "bridge-instance-thread-start",

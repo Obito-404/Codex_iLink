@@ -227,8 +227,10 @@ test("/s pages the selected project's sessions and /s n binds the displayed sess
       },
     });
     codex.resumes.set("thread-01", {
+      activePermissionProfile: { id: ":workspace" },
       approvalPolicy: "on-request",
       model: "gpt-project",
+      sandbox: { type: "workspaceWrite" },
       thread: { id: "thread-01" },
     });
     state.putNotificationRoute({
@@ -253,7 +255,9 @@ test("/s pages the selected project's sessions and /s n binds the displayed sess
     assert.deepEqual(state.listLiveNotificationRoutes(50_001), []);
     assert.match(sent[2]?.text ?? "", /已进入会话：Task 1/u);
     assert.match(sent[2]?.text ?? "", /模型：gpt-project/u);
-    assert.match(sent[2]?.text ?? "", /权限：on-request/u);
+    assert.match(sent[2]?.text ?? "", /权限：项目读写 \(:workspace\)/u);
+    assert.match(sent[2]?.text ?? "", /审批：on-request/u);
+    assert.match(sent[2]?.text ?? "", /Sandbox：workspaceWrite/u);
     assert.match(sent[2]?.text ?? "", /最近提问：上次问题/u);
     assert.match(sent[2]?.text ?? "", /最近回复：上次答案/u);
   });
@@ -336,6 +340,9 @@ test("/new creates in the selected project, binds immediately, and /exit returns
     });
     assert.deepEqual(state.listLiveNotificationRoutes(10_001), []);
     assert.match(sent[0]?.text ?? "", /已新建并进入会话：thread-new-project/u);
+    assert.match(sent[0]?.text ?? "", /权限：项目读写 \(:workspace\)/u);
+    assert.match(sent[0]?.text ?? "", /审批：on-request/u);
+    assert.match(sent[0]?.text ?? "", /Sandbox：workspaceWrite/u);
 
     await ingest(bridge, 32, "new task question");
     assert.deepEqual(codex.startedTurns, [
@@ -375,6 +382,88 @@ test("/new without a project uses the reserved Inbox and stays product-level unp
     assert.deepEqual(codex.startedCwds, ["D:\\Codex-iLink\\Inbox"]);
     assert.equal(state.getBinding(1_001)?.projectPath, null);
     assert.equal(state.getBinding(1_001)?.threadId, "thread-new-inbox");
+  });
+});
+
+test("/perm lists and directly selects Codex native permission profiles", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
+    codex.resumes.set("wechat-main", {
+      activePermissionProfile: { id: ":workspace" },
+      approvalPolicy: "on-request",
+      cwd: "D:\\Codex-iLink\\Inbox",
+      sandbox: { type: "workspaceWrite" },
+      thread: { id: "wechat-main" },
+    });
+
+    await ingest(bridge, 45, "/perm");
+
+    assert.equal(
+      sent[0]?.text,
+      [
+        "当前权限：2. 项目读写 (:workspace)",
+        "审批：on-request",
+        "Sandbox：workspaceWrite",
+        "",
+        "1. 只读 (:read-only)",
+        "2. 项目读写 (:workspace)",
+        "3. 完全访问 (:danger-full-access)",
+        "使用 /perm <n> 直接切换当前任务权限。",
+      ].join("\n"),
+    );
+
+    await ingest(bridge, 46, "/perm 3");
+
+    assert.match(sent[1]?.text ?? "", /已切换当前任务权限/u);
+    assert.match(sent[1]?.text ?? "", /3\. 完全访问 \(:danger-full-access\)/u);
+    assert.match(sent[1]?.text ?? "", /审批：never/u);
+    assert.match(sent[1]?.text ?? "", /Sandbox：dangerFullAccess/u);
+    assert.deepEqual(codex.permissionSelections, [
+      { permissions: ":danger-full-access", threadId: "wechat-main" },
+    ]);
+    assert.deepEqual(state.getThreadPermissionProfile("wechat-main"), {
+      profileId: ":danger-full-access",
+      threadId: "wechat-main",
+      updatedAtMs: 1_000,
+    });
+
+    await ingest(bridge, 47, "use the selected permissions");
+    assert.deepEqual(codex.ensuredPermissions.at(-1), {
+      permissions: ":danger-full-access",
+      threadId: "wechat-main",
+    });
+  });
+});
+
+test("/perm can explicitly recover when a saved profile is no longer allowed", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
+    state.setThreadPermissionProfile({
+      profileId: ":danger-full-access",
+      threadId: "wechat-main",
+      updatedAtMs: 900,
+    });
+    codex.blockedPermissionProfiles.add(":danger-full-access");
+    codex.permissionProfiles[2] = {
+      allowed: false,
+      description: null,
+      id: ":danger-full-access",
+    };
+
+    await ingest(bridge, 48, "/perm");
+
+    assert.match(sent[0]?.text ?? "", /Codex 未能确认当前权限/u);
+    assert.match(
+      sent[0]?.text ?? "",
+      /3\. 完全访问 \(:danger-full-access\)（不可用）/u,
+    );
+
+    await ingest(bridge, 49, "/perm 2");
+
+    assert.match(sent[1]?.text ?? "", /已切换当前任务权限/u);
+    assert.deepEqual(state.getThreadPermissionProfile("wechat-main"), {
+      profileId: ":workspace",
+      threadId: "wechat-main",
+      updatedAtMs: 1_000,
+    });
   });
 });
 
@@ -457,6 +546,8 @@ test("/st reports current routing, every known active task, queues, and health",
     const reply = sent[0]?.text ?? "";
     assert.match(reply, /项目：Selected/u);
     assert.match(reply, /会话：thread-current（剩余 30 分钟）/u);
+    assert.match(reply, /权限：项目读写 \(:workspace\)/u);
+    assert.match(reply, /审批：on-request；Sandbox：workspaceWrite/u);
     assert.equal(
       state.getBinding(100_001)?.expiresAtMs,
       100_000 + 30 * 60 * 1_000,
@@ -488,11 +579,22 @@ type SendInput = {
 class FakeNavigationCodex implements CodexTurnStarter {
   activeThreads: unknown[] = [];
   archivedThreads: unknown[] = [];
+  blockedPermissionProfiles = new Set<string>();
   calls: string[] = [];
   reads = new Map<string, { thread: Record<string, unknown> }>();
   readFailures = new Set<string>();
   resumes = new Map<string, Record<string, unknown>>();
   nextStartedThreadId = "thread-new";
+  permissionProfiles = [
+    { allowed: true, description: null, id: ":read-only" },
+    { allowed: true, description: null, id: ":workspace" },
+    { allowed: true, description: null, id: ":danger-full-access" },
+  ];
+  permissionSelections: Array<{ permissions: string; threadId: string }> = [];
+  ensuredPermissions: Array<{
+    permissions: string | undefined;
+    threadId: string;
+  }> = [];
   startedCwds: string[] = [];
   startedTurns: Array<{ text: string; threadId: string }> = [];
   readonly loadedThreadIds = new Set<string>();
@@ -505,9 +607,16 @@ class FakeNavigationCodex implements CodexTurnStarter {
     };
   }
 
-  async ensureThread(threadId: string): Promise<void> {
+  async ensureThread(
+    threadId: string,
+    options: { permissions?: string } = {},
+  ): Promise<void> {
+    this.ensuredPermissions.push({
+      permissions: options.permissions,
+      threadId,
+    });
     if (this.loadedThreadIds.has(threadId)) return;
-    await this.resumeThread(threadId);
+    await this.resumeThread(threadId, options);
   }
 
   async startTurn(input: { text: string; threadId: string }): Promise<{ turn: { id: string } }> {
@@ -524,10 +633,48 @@ class FakeNavigationCodex implements CodexTurnStarter {
     return this.reads.get(input.threadId) ?? { thread: { id: input.threadId } };
   }
 
-  async resumeThread(threadId: string) {
+  async listPermissionProfiles(input: { cwd?: string }) {
+    this.calls.push(`permissionProfiles:${input.cwd ?? "default"}`);
+    return { data: this.permissionProfiles, nextCursor: null };
+  }
+
+  async resumeThread(threadId: string, options: { permissions?: string } = {}) {
     this.calls.push(`resume:${threadId}`);
     this.loadedThreadIds.add(threadId);
-    return this.resumes.get(threadId) ?? { thread: { id: threadId } };
+    if (
+      options.permissions &&
+      this.blockedPermissionProfiles.has(options.permissions)
+    ) {
+      throw new Error("permission profile is no longer allowed");
+    }
+    const current = this.resumes.get(threadId) ?? {
+      activePermissionProfile: { id: ":workspace" },
+      approvalPolicy: "on-request",
+      cwd: "D:\\Codex-iLink\\Inbox",
+      sandbox: { type: "workspaceWrite" },
+      thread: { id: threadId },
+    };
+    if (!options.permissions) return current;
+    this.permissionSelections.push({
+      permissions: options.permissions,
+      threadId,
+    });
+    const selected = {
+      ...current,
+      activePermissionProfile: { id: options.permissions },
+      approvalPolicy:
+        options.permissions === ":danger-full-access" ? "never" : "on-request",
+      sandbox: {
+        type:
+          options.permissions === ":danger-full-access"
+            ? "dangerFullAccess"
+            : options.permissions === ":read-only"
+              ? "readOnly"
+              : "workspaceWrite",
+      },
+    };
+    this.resumes.set(threadId, selected);
+    return selected;
   }
 
   async unarchiveThread(threadId: string) {
@@ -538,7 +685,12 @@ class FakeNavigationCodex implements CodexTurnStarter {
   async startThread(cwd: string) {
     this.startedCwds.push(cwd);
     this.loadedThreadIds.add(this.nextStartedThreadId);
-    return { thread: { cwd, id: this.nextStartedThreadId } };
+    return {
+      activePermissionProfile: { id: ":workspace" },
+      approvalPolicy: "on-request",
+      sandbox: { type: "workspaceWrite" },
+      thread: { cwd, id: this.nextStartedThreadId },
+    };
   }
 }
 

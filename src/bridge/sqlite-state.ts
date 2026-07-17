@@ -93,6 +93,12 @@ export type BridgeSettings = {
   selectedProjectPath: string | null;
 };
 
+export type ThreadPermissionProfile = {
+  profileId: string;
+  threadId: string;
+  updatedAtMs: number;
+};
+
 export type ProjectListSnapshot = {
   createdAtMs: number;
   expiresAtMs: number;
@@ -1241,6 +1247,39 @@ export class SqliteState {
       .run(projectPath);
   }
 
+  setThreadPermissionProfile(profile: ThreadPermissionProfile): void {
+    if (!profile.threadId) throw new Error("thread id is required");
+    if (!profile.profileId) throw new Error("permission profile id is required");
+    this.#database
+      .prepare(
+        `INSERT INTO thread_permission_profiles
+          (thread_id, profile_id, updated_at_ms)
+         VALUES (?, ?, ?)
+         ON CONFLICT (thread_id) DO UPDATE SET
+           profile_id = excluded.profile_id,
+           updated_at_ms = excluded.updated_at_ms`,
+      )
+      .run(profile.threadId, profile.profileId, profile.updatedAtMs);
+  }
+
+  getThreadPermissionProfile(threadId: string): ThreadPermissionProfile | null {
+    const row = this.#database
+      .prepare(
+        `SELECT thread_id, profile_id, updated_at_ms
+         FROM thread_permission_profiles WHERE thread_id = ?`,
+      )
+      .get(threadId) as
+      | { profile_id: string; thread_id: string; updated_at_ms: number }
+      | undefined;
+    return row
+      ? {
+          profileId: row.profile_id,
+          threadId: row.thread_id,
+          updatedAtMs: row.updated_at_ms,
+        }
+      : null;
+  }
+
   selectProjectForNavigation(projectPath: string): void {
     if (!projectPath) throw new Error("project path is required");
     this.#transaction(() => {
@@ -1442,7 +1481,7 @@ export class SqliteState {
       | { user_version: number }
       | undefined;
     let version = current?.user_version ?? 0;
-    if (version < 0 || version > 6) {
+    if (version < 0 || version > 7) {
       throw new Error(`unsupported schema version ${String(version)}`);
     }
     const migrations = [
@@ -1452,6 +1491,7 @@ export class SqliteState {
       "./migrations/004-desktop-observations.sql",
       "./migrations/005-desktop-observation-tombstones.sql",
       "./migrations/006-durable-turn-input.sql",
+      "./migrations/007-thread-permission-profiles.sql",
     ];
     while (version < migrations.length) {
       const nextVersion = version + 1;

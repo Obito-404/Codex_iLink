@@ -30,6 +30,17 @@ export type ThreadListResult = JsonObject & {
   nextCursor: string | null;
 };
 
+export type PermissionProfileSummary = JsonObject & {
+  allowed: boolean;
+  description?: string | null;
+  id: string;
+};
+
+export type PermissionProfileListResult = JsonObject & {
+  data: PermissionProfileSummary[];
+  nextCursor: string | null;
+};
+
 export type CodexThread = JsonObject & { id: string };
 export type CodexTurn = JsonObject & { id: string };
 

@@ -28,6 +28,11 @@ test("the documented short command table is parsed exactly", () => {
   assert.deepEqual(parseInboundText("/new"), { kind: "newSession" });
   assert.deepEqual(parseInboundText("/exit"), { kind: "exitSession" });
   assert.deepEqual(parseInboundText("/st"), { kind: "status" });
+  assert.deepEqual(parseInboundText("/perm"), { kind: "permissions" });
+  assert.deepEqual(parseInboundText("/perm 3"), {
+    index: 3,
+    kind: "selectPermission",
+  });
   assert.deepEqual(parseInboundText("/ok 3"), {
     index: 3,
     kind: "approve",
@@ -49,6 +54,9 @@ test("aliases, Chinese commands and malformed indices are not guessed", () => {
     "/s -1",
     "/s 1.5",
     "/p 01",
+    "/perm 0",
+    "/perm 01",
+    "/perm full",
     "/new now",
   ]) {
     assert.deepEqual(parseInboundText(text), { kind: "unknownCommand", text });

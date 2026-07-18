@@ -29,6 +29,12 @@ import type {
   PresenceObservation,
   PresenceState,
 } from "../windows/presence.ts";
+import {
+  outboundMediaDirectory,
+  outboundMediaPathKey,
+  parseOutboundPayload,
+  pruneOutboundMediaSnapshots,
+} from "../media/outbound-media.ts";
 
 export type DaemonCodexPort = CodexTurnStarter & {
   close(): void;
@@ -108,6 +114,32 @@ export class BridgeDaemon {
   async start(): Promise<void> {
     if (this.#started) return;
     mkdirSync(this.#options.inboxDirectory, { recursive: true });
+    const outboundDirectory = outboundMediaDirectory(
+      this.#options.inboxDirectory,
+    );
+
+    try {
+      const retainedPathKeys = new Set(
+        this.#options.state.listOutboundAttachmentPathKeys(),
+      );
+      for (const item of this.#options.state.listPendingOutbox()) {
+        if (!item.body) continue;
+        try {
+          const payload = parseOutboundPayload(item.body);
+          if (payload.type === "local-media" && payload.staged === true) {
+            retainedPathKeys.add(outboundMediaPathKey(payload.path));
+          }
+        } catch {
+          // A malformed outbox item is not a reference to a trusted snapshot.
+        }
+      }
+      pruneOutboundMediaSnapshots({
+        exportRoot: outboundDirectory,
+        retainedPathKeys,
+      });
+    } catch {
+      // Only trusted UUID snapshots are pruned; startup retries any cleanup.
+    }
 
     let mainThreadId = this.#options.state.getBridgeSettings().mainThreadId;
     if (!mainThreadId) {
@@ -161,6 +193,7 @@ export class BridgeDaemon {
     this.#outbox = new OutboxWorker({
       ilink: this.#options.ilink,
       now: this.#options.now,
+      outboundDirectory,
       routeOnConfirmed: (item, confirmedAtMs) => {
         const source = parseDesktopNotificationClientId(item.clientId);
         return source?.replyable &&

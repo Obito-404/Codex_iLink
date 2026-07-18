@@ -731,7 +731,7 @@ test("existing threads inherit settings and new threads override only cwd", asyn
   }
 });
 
-test("iLink threads receive the explicit file-send contract", async () => {
+test("iLink threads never use Markdown as a file-send fallback", async () => {
   const runtime = await CodexRuntime.create({
     bridgeInstanceId: "bridge-instance-file-tool",
     command: [process.execPath, fakeRuntime],
@@ -743,14 +743,18 @@ test("iLink threads receive the explicit file-send contract", async () => {
     const resumedParams = resumed.fixtureParams as Record<string, unknown>;
     const startedParams = started.fixtureParams as Record<string, unknown>;
 
-    assert.match(
+    assert.doesNotMatch(
       String(resumedParams.developerInstructions),
-      /独占一行.*Windows.*Markdown.*本地文件链接/u,
+      /Markdown.*本地文件链接/u,
     );
     assert.equal("dynamicTools" in resumedParams, false);
     assert.match(
       String(startedParams.developerInstructions),
-      /优先调用 send_file/u,
+      /必须调用 send_file/u,
+    );
+    assert.match(
+      String(resumedParams.developerInstructions),
+      /新建 iLink 任务/u,
     );
     assert.deepEqual(startedParams.dynamicTools, [
       {

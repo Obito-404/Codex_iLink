@@ -68,6 +68,7 @@ type SendTextFlight = {
 
 export type PrepareMediaInput = {
   media: LocalOutboundMedia;
+  plaintext?: Uint8Array;
   session: ILinkSession;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -423,7 +424,9 @@ export class ILinkClient {
         message: "prepareMedia cancelled before upload",
       });
     }
-    const plaintext = await readFile(input.media.path);
+    const plaintext = input.plaintext
+      ? Buffer.from(input.plaintext)
+      : await readFile(input.media.path);
     if (plaintext.length > OUTBOUND_MEDIA_MAX_BYTES) {
       throw new Error("E_OUTBOUND_MEDIA_TOO_LARGE");
     }

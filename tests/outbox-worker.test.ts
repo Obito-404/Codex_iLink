@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +16,7 @@ import type { ILinkSession } from "../src/ilink/protocol.ts";
 import {
   parseOutboundPayload,
   serializeOutboundPayload,
+  stageOutboundMedia,
 } from "../src/media/outbound-media.ts";
 
 const session: ILinkSession = {
@@ -278,15 +285,21 @@ test("concurrent drains share one in-flight delivery", async () => {
 });
 
 test("media is uploaded once, persisted before send, and blocks a false text claim", async () => {
-  await withState(async (state) => {
+  await withState(async (state, directory) => {
+    const outboundDirectory = join(directory, "Outbound");
+    const workspaceRoot = join(directory, "workspace");
+    const sourcePath = join(workspaceRoot, "image.png");
+    mkdirSync(workspaceRoot);
+    writeFileSync(sourcePath, "staged image");
+    const snapshot = stageOutboundMedia({
+      exportRoot: outboundDirectory,
+      label: "凭证.png",
+      path: sourcePath,
+      workspaceRoot,
+    });
+    const snapshotPath = snapshot.path;
     state.enqueueOutbox({
-      body: serializeOutboundPayload({
-        kind: "image",
-        name: "凭证.png",
-        path: "C:\\Desktop\\凭证.png",
-        type: "local-media",
-        v: 1,
-      }),
+      body: serializeOutboundPayload(snapshot),
       clientId: "codex-ilink:turn-media:final:part:1",
       contextToken: "ctx",
       createdAtMs: 1,
@@ -307,6 +320,11 @@ test("media is uploaded once, persisted before send, and blocks a false text cla
       ilink: {
         async prepareMedia(input) {
           prepareCalls += 1;
+          writeFileSync(snapshotPath, "changed after verified read");
+          assert.equal(
+            Buffer.from(input.plaintext ?? []).toString("utf8"),
+            "staged image",
+          );
           return {
             aesKeyBase64: "YWVzLWtleQ==",
             ciphertextSize: 32,
@@ -330,6 +348,7 @@ test("media is uploaded once, persisted before send, and blocks a false text cla
       },
       maxAttempts: 1,
       now: () => 2,
+      outboundDirectory,
       session,
       state,
     });
@@ -345,6 +364,7 @@ test("media is uploaded once, persisted before send, and blocks a false text cla
     const persisted = state.getOutbox("codex-ilink:turn-media:final:part:1");
     assert.ok(persisted?.body);
     assert.equal(parseOutboundPayload(persisted.body).type, "prepared-media");
+    assert.equal(existsSync(snapshotPath), false);
 
     available = true;
     assert.equal(worker.resetDeferred(), 1);
@@ -359,11 +379,58 @@ test("media is uploaded once, persisted before send, and blocks a false text cla
   });
 });
 
-async function withState(run: (state: SqliteState) => Promise<void>): Promise<void> {
+test("legacy local-media is replaced by a warning without reading the path", async () => {
+  await withState(async (state) => {
+    state.enqueueOutbox({
+      body: serializeOutboundPayload({
+        kind: "file",
+        name: "旧附件.txt",
+        path: "C:\\Users\\controller\\secret.txt",
+        type: "local-media",
+        v: 1,
+      }),
+      clientId: "legacy-local-media",
+      contextToken: "ctx",
+      createdAtMs: 1,
+      targetUserId: "controller-a",
+    });
+    const sent: string[] = [];
+    const worker = new OutboxWorker({
+      ilink: {
+        async prepareMedia() {
+          assert.fail("legacy paths must never be read or uploaded");
+        },
+        async sendMedia() {
+          assert.fail("legacy paths must never be sent");
+        },
+        async sendText(input) {
+          sent.push(input.text);
+          return { accepted: true, clientId: input.clientId };
+        },
+      },
+      now: () => 2,
+      session,
+      state,
+    });
+
+    assert.deepEqual(await worker.drain(), {
+      confirmed: 1,
+      deferred: 0,
+      failed: 0,
+    });
+    assert.match(sent[0] ?? "", /附件记录.*未发送/u);
+    assert.equal(state.getOutbox("legacy-local-media")?.status, "confirmed");
+    assert.equal(state.getOutbox("legacy-local-media")?.body, null);
+  });
+});
+
+async function withState(
+  run: (state: SqliteState, directory: string) => Promise<void>,
+): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-outbox-"));
   const state = new SqliteState(join(directory, "state.sqlite"));
   try {
-    await run(state);
+    await run(state, directory);
   } finally {
     state.close();
     rmSync(directory, { force: true, recursive: true });

@@ -171,7 +171,7 @@ flowchart LR
 - 语音优先使用 wire 中的 `voice_item.text` 作为文本；引用语音已有的转写作为引用上下文保留。没有转写时明确回复不支持且不提交回合；腾讯官方固定版本的 SILK → WAV 只是音频转码，不是 ASR，不能替代缺失的转写。
 - 单个媒体上限为 100 MiB；仅接受 HTTPS 微信 CDN 白名单地址和受限重定向。加密载荷使用 AES-128-ECB + PKCS#7，图片兼容官方允许的无密钥明文载荷；密钥格式、目标路径和文件名都必须校验。
 - 下载、HTTP、超时、URL/大小/密钥/路径校验、解密或落盘失败时推进已接收入站的游标并向微信返回明确的脱敏错误，不向 Codex 提交空消息；已排队媒体被外部删除后，App Server 的确定性拒绝必须结束该 Dispatch、清理媒体并明确回复，不能标为状态未知。当前不把 wire MD5、扩展名或 MIME 当作已验证的内容真实性。
-- iLink 新建 Codex 任务通过 App Server `dynamicTools` 注册显式 `send_file(path)`，并以 `developerInstructions` 要求模型优先调用；工具请求只有在 `threadId/turnId` 对应当前 Bridge 实例持有的 accepted Dispatch 时才可登记。由于 `thread/resume` 不能给旧任务补装动态工具，旧任务继续兼容独占一行的标准 Markdown Windows 本地文件链接；兼容 `C:\...`、`C:/...` 及链接后的装饰性 emoji，不得从普通自然语言路径、HTTP 链接、链接后的普通文字或其他非独占行链接猜测并外发文件。两种来源按规范化 Windows 路径去重，成功终态才与最终正文原子写入 Outbox；失败或中断终态只清理意图，不发送附件。图片、视频和普通文件按官方媒体流程发送，语音气泡不支持。
+- iLink 新建 Codex 任务通过 App Server `dynamicTools` 注册显式 `send_file(path)`；工具请求只有在 `threadId/turnId` 对应当前 Bridge 实例持有的 accepted Dispatch 时才可登记。Bridge 必须从当前 thread 读取 canonical `cwd`，只允许其中的普通单链接文件，拒绝 UNC、设备路径、ADS、Node 可识别的 symlink/junction 与 hardlink，并在登记时复制到 iLink 私有 `Outbound` 快照；快照名绑定 SHA-256，发送只消费稳定文件描述符读取并校验过的字节。Markdown 本地链接、普通自然语言路径和 URL 永不触发附件外发；`thread/resume` 无法补装动态工具的旧任务应明确提示新建 iLink 任务，不得回退到 Markdown。成功终态才把已登记快照与最终正文原子写入 Outbox；失败或中断终态清理未引用快照，上传信息持久化替换成功后清理对应快照；启动清理仅删除未被附件意图或待发 Outbox 引用的受信任 UUID 快照。SQLite v12 为附件意图增加快照来源标记：迁移前记录固定为 `legacy`，其路径 key 持久保护且不得读取、上传或删除；只有本版本登记的 `staged-v1` 快照可进入 Outbox 与清理流程。旧版本遗留的未标记本地媒体只发送安全提示。图片、视频和普通文件按官方媒体流程发送，语音气泡不支持。
 - 执行期间使用 iLink 自带状态，不发送“已开始”或中间过程。
 - 最终回复按完整 Unicode 字素拆分，每条最多 2000 UTF-8 字节、最多 3 条；仍然过长时截断并提示在 Desktop 查看完整内容。
 - `turn/completed.turn.error` 或最终 `error(willRetry=false)` 提供结构化失败时，失败文案优先于回合中残留的部分 `agentMessage`。网络失败明确显示“网络连接/请求失败”，有 HTTP 状态时一并显示；重试中的临时错误不提前通知。
@@ -219,7 +219,7 @@ flowchart LR
 - `inbound_messages`：去重、处理状态及待路由的版本化输入 payload
 - `queued_turns`：待处理的版本化输入 payload 和顺序
 - `dispatch_intents`：微信消息、版本化输入 payload 与 App Server `turn_id` 的提交边界
-- `outbound_attachment_intents`：`send_file` 已登记、等待随当前成功终态进入 Outbox 的短期附件意图
+- `outbound_attachment_intents`：`send_file` 已登记、等待随当前成功终态进入 Outbox 的短期附件意图；v12 以 `snapshot_provenance` 区分旧路径与本版本可信快照
 - `outbox`：未送达回复和通知
 - `notification_routes`：已送达主动通知与短期来源会话映射
 - `approvals`：Bridge 单次审批
@@ -228,7 +228,7 @@ flowchart LR
 
 版本化输入 payload 沿 `inbound_messages → queued_turns → dispatch_intents` 传递，只保存文本、附件种类、显示名和本地绝对路径；SQLite 不保存媒体二进制、CDN URL、AES 密钥或完整 Transcript。媒体二进制存放在 `%LOCALAPPDATA%\Codex_iLink\media\inbound\<sha256(dedupeKey)>`，至少保留到对应回合终态；提交状态未知时保留到公开接口对账完成，启动时只清理未被入站、队列或未完成 Dispatch Intent 引用的孤儿目录。
 
-`inbound_messages` 的输入在恢复责任已原子转移到 `queued_turns` 或 `dispatch_intents`，或失败回复已持久化后清除；Dispatch Intent 的输入在 App Server 明确接受且不再需要提交恢复后清除。`outbound_attachment_intents` 在成功终态与最终回复原子转入 Outbox，在失败或中断终态与 Dispatch 完成状态原子清理。出站正文在 iLink 明确确认发送后清除。中断或状态未知的 Dispatch Intent 在持久化诊断通知并完成必要对账后删除输入，由用户从原微信消息决定是否手动重发。Outbox 的每次重试复用同一 `client_id`。消息 ID、目标、状态和时间等去重元数据保留 30 天。SQLite 状态迁移使用事务和唯一约束，状态库不复制 Codex 完整历史。
+`inbound_messages` 的输入在恢复责任已原子转移到 `queued_turns` 或 `dispatch_intents`，或失败回复已持久化后清除；Dispatch Intent 的输入在 App Server 明确接受且不再需要提交恢复后清除。`outbound_attachment_intents` 在成功终态与最终回复原子转入 Outbox，在失败或中断终态与 Dispatch 完成状态原子清理；v12 迁移出的 legacy 路径仅保留不可外发、不可清理的规范化保护 key，防止后续孤儿扫描误删旧版原文件。出站正文在 iLink 明确确认发送后清除。中断或状态未知的 Dispatch Intent 在持久化诊断通知并完成必要对账后删除输入，由用户从原微信消息决定是否手动重发。Outbox 的每次重试复用同一 `client_id`。消息 ID、目标、状态和时间等去重元数据保留 30 天。SQLite 状态迁移使用事务和唯一约束，状态库不复制 Codex 完整历史。
 
 ## 12. IPC、日志与错误
 
@@ -296,7 +296,7 @@ flowchart LR
 21. 有 `voice_item.text` 的语音只提交转写文本，引用语音已有的转写不会丢失；无转写语音明确拒绝，不把 SILK → WAV 描述为语音识别。
 22. 媒体下载、HTTP、超时、大小、URL、解密和落盘失败都产生明确脱敏微信回复，不提交空回合；错误与日志不泄露 CDN query 或密钥。
 23. 版本化媒体 payload 能跨 `inbound_messages`、`queued_turns`、`dispatch_intents` 和进程重启恢复；媒体文件保留到回合终态或未知提交完成对账，孤儿目录可安全清理。
-24. iLink 新建任务可用 `send_file(path)` 显式发送图片、视频或普通文件；旧任务的最终文本仅兼容独占一行的标准 Markdown Windows 本地文件链接，普通本地路径不会触发附件外发，并兼容 `C:\...` 与 `C:/...`。
+24. iLink 新建任务可用 `send_file(path)` 显式发送当前 thread canonical `cwd` 内的图片、视频或普通文件；登记后只发送私有不可变快照。Markdown 本地链接、普通路径、URL、cwd 外文件以及链接/硬链接均不会触发附件外发；无法补装工具的旧任务必须新建 iLink 任务后再发送。
 
 ## 17. 开发门禁
 

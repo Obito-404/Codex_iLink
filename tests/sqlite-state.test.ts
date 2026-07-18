@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import {
+  spawn,
+  spawnSync,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +11,270 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 import { SqliteState } from "../src/bridge/sqlite-state.ts";
+
+test("a constructor waiting on a concurrent migration does not replay a stale schema version", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-race-"));
+  const path = join(directory, "state.db");
+  const database = new DatabaseSync(path);
+  let child: ChildProcessWithoutNullStreams | null = null;
+  let childExit: Promise<number | null> | null = null;
+
+  try {
+    database.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000");
+    applyMigrations(database, 1, 5);
+    database.exec("PRAGMA user_version = 5");
+
+    const stateModuleUrl = new URL(
+      "../src/bridge/sqlite-state.ts",
+      import.meta.url,
+    ).href;
+    child = spawn(
+      process.execPath,
+      [
+        "--disable-warning=ExperimentalWarning",
+        "--experimental-strip-types",
+        "--input-type=module",
+        "--eval",
+        `import { readSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
+const originalExec = DatabaseSync.prototype.exec;
+let configurationPaused = false;
+DatabaseSync.prototype.exec = function (sql) {
+  if (sql === "BEGIN IMMEDIATE") process.stdout.write("begin-attempt\\n");
+  if (!configurationPaused && sql.startsWith("PRAGMA busy_timeout = 5000")) {
+    const result = originalExec.call(this, sql);
+    configurationPaused = true;
+    process.stdout.write("configured\\n");
+    readSync(0, Buffer.alloc(1), 0, 1, null);
+    return result;
+  }
+  return originalExec.call(this, sql);
+};
+const { SqliteState } = await import(${JSON.stringify(stateModuleUrl)});
+try {
+  const state = new SqliteState(${JSON.stringify(path)});
+  process.stdout.write(JSON.stringify(state.storageDiagnostics()) + "\\n");
+  state.close();
+} catch (error) {
+  process.stderr.write(String(error instanceof Error ? error.stack : error));
+  process.exitCode = 1;
+}`,
+      ],
+      { stdio: "pipe", windowsHide: true },
+    );
+    childExit = new Promise<number | null>((resolveExit, rejectExit) => {
+      child!.once("error", rejectExit);
+      child!.once("close", resolveExit);
+    });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: string) => (stdout += chunk));
+    child.stderr.on("data", (chunk: string) => (stderr += chunk));
+
+    await waitFor(() => stdout.includes("configured\n"));
+    database.exec("BEGIN IMMEDIATE");
+    child.stdin.end("x");
+    await waitFor(() => stdout.includes("begin-attempt\n"));
+
+    applyMigrations(database, 6, 12);
+    database
+      .prepare(
+        `INSERT INTO queued_turns
+          (dedupe_key, thread_id, body, created_at_ms, context_token)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run("fresh-queue", "thread-race", "must survive", 1, "context-race");
+    database.exec("PRAGMA user_version = 12; COMMIT");
+
+    const exitCode = await childExit;
+    assert.equal(exitCode, 0, stderr);
+
+    const reopened = new SqliteState(path);
+    assert.deepEqual(reopened.storageDiagnostics(), {
+      journalMode: "wal",
+      schemaVersion: 12,
+      synchronous: "full",
+    });
+    assert.deepEqual(reopened.listQueuedTurns(), [
+      {
+        body: "must survive",
+        contextToken: "context-race",
+        createdAtMs: 1,
+        dedupeKey: "fresh-queue",
+        id: 1,
+        threadId: "thread-race",
+      },
+    ]);
+    reopened.close();
+  } finally {
+    if (child && child.exitCode === null) child.kill();
+    if (childExit) {
+      try {
+        await childExit;
+      } catch {}
+    }
+    if (database.isOpen) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {}
+      database.close();
+    }
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a failed migration rolls back the entire schema upgrade", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-rollback-"));
+  const path = join(directory, "state.db");
+  const database = new DatabaseSync(path);
+
+  try {
+    database.exec("PRAGMA journal_mode = WAL");
+    applyMigrations(database, 1, 5);
+    database
+      .prepare(
+        `INSERT INTO queued_turns
+          (dedupe_key, thread_id, body, created_at_ms, context_token)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run("legacy-queue", "thread-rollback", "must remain", 1, "context");
+    database.exec(
+      `CREATE TABLE thread_permission_profiles (
+        thread_id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+      ) STRICT;
+      PRAGMA user_version = 5;`,
+    );
+    database.close();
+
+    const stateModuleUrl = new URL(
+      "../src/bridge/sqlite-state.ts",
+      import.meta.url,
+    ).href;
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--disable-warning=ExperimentalWarning",
+        "--experimental-strip-types",
+        "--input-type=module",
+        "--eval",
+        `import { DatabaseSync } from "node:sqlite";
+import { SqliteState } from ${JSON.stringify(stateModuleUrl)};
+let migrationError = "";
+try {
+  new SqliteState(${JSON.stringify(path)});
+} catch (error) {
+  migrationError = String(error instanceof Error ? error.message : error);
+}
+const database = new DatabaseSync(${JSON.stringify(path)});
+const version = database.prepare("PRAGMA user_version").get().user_version;
+const queuedCount = database.prepare("SELECT COUNT(*) AS count FROM queued_turns").get().count;
+database.close();
+process.stdout.write(JSON.stringify({ migrationError, queuedCount, version }));`,
+      ],
+      { encoding: "utf8", windowsHide: true },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      migrationError: "table thread_permission_profiles already exists",
+      queuedCount: 1,
+      version: 5,
+    });
+  } finally {
+    if (database.isOpen) database.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("schema v11 attachment intents migrate as untrusted legacy paths", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-legacy-outbound-"));
+  const path = join(directory, "state.db");
+  const database = new DatabaseSync(path);
+  let migrated: SqliteState | null = null;
+
+  try {
+    database.exec("PRAGMA journal_mode = WAL");
+    applyMigrations(database, 1, 11);
+    database
+      .prepare(
+        `INSERT INTO outbound_attachment_intents
+          (operation_id, thread_id, turn_id, call_id, path, path_key,
+           name, kind, created_at_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "legacy-operation",
+        "legacy-thread",
+        "legacy-turn",
+        "legacy-call",
+        "C:\\legacy\\original.txt",
+        "c:\\legacy\\original.txt",
+        "original.txt",
+        "file",
+        1,
+      );
+    database.exec("PRAGMA user_version = 11");
+    database.close();
+
+    migrated = new SqliteState(path);
+    assert.equal(migrated.storageDiagnostics().schemaVersion, 12);
+    assert.equal(
+      migrated.listOutboundAttachmentIntents("legacy-turn")[0]
+        ?.snapshotProvenance,
+      "legacy",
+    );
+    assert.deepEqual(migrated.listOutboundAttachmentPathKeys(), [
+      "c:\\legacy\\original.txt",
+    ]);
+
+    migrated.close();
+    migrated = null;
+    const upgraded = new DatabaseSync(path);
+    try {
+      upgraded
+        .prepare(
+          `INSERT INTO outbound_attachment_intents
+            (operation_id, thread_id, turn_id, call_id, path, path_key,
+             name, kind, created_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "late-legacy-operation",
+          "late-legacy-thread",
+          "late-legacy-turn",
+          "late-legacy-call",
+          "C:\\legacy\\late.txt",
+          "c:\\legacy\\late.txt",
+          "late.txt",
+          "file",
+          2,
+        );
+      upgraded
+        .prepare("DELETE FROM outbound_attachment_intents WHERE turn_id = ?")
+        .run("late-legacy-turn");
+      const protectedPaths = upgraded
+        .prepare(
+          `SELECT path_key FROM protected_legacy_outbound_paths
+           ORDER BY path_key`,
+        )
+        .all() as Array<{ path_key: string }>;
+      assert.deepEqual(
+        protectedPaths.map(({ path_key }) => path_key),
+        ["c:\\legacy\\late.txt", "c:\\legacy\\original.txt"],
+      );
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    migrated?.close();
+    if (database.isOpen) database.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
 
 test("controller identity and database configuration survive reopening", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-"));
@@ -15,7 +284,7 @@ test("controller identity and database configuration survive reopening", () => {
     const first = new SqliteState(path);
     assert.deepEqual(first.storageDiagnostics(), {
       journalMode: "wal",
-      schemaVersion: 11,
+      schemaVersion: 12,
       synchronous: "full",
     });
     assert.deepEqual(
@@ -1366,3 +1635,40 @@ test("project and session list snapshots keep their displayed numbering for ten 
     rmSync(directory, { force: true, recursive: true });
   }
 });
+
+function applyMigrations(
+  database: DatabaseSync,
+  firstVersion: number,
+  lastVersion: number,
+): void {
+  const migrationNames = [
+    "initial",
+    "list-snapshots",
+    "turn-scheduler",
+    "desktop-observations",
+    "desktop-observation-tombstones",
+    "durable-turn-input",
+    "thread-permission-profiles",
+    "pending-desktop-notifications",
+    "outbound-attachment-intents",
+    "user-timing-settings",
+    "thread-permission-settings",
+    "outbound-attachment-provenance",
+  ];
+  const migrations = join(process.cwd(), "src", "bridge", "migrations");
+  for (let version = firstVersion; version <= lastVersion; version += 1) {
+    const name = migrationNames[version - 1];
+    assert.ok(name, `missing test migration ${String(version)}`);
+    const filename = `${String(version).padStart(3, "0")}-${name}.sql`;
+    database.exec(readFileSync(join(migrations, filename), "utf8"));
+  }
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  }
+  assert.fail("timed out waiting for concurrent migration process");
+}

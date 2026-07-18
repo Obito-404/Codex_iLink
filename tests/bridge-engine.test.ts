@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
-import { createCipheriv } from "node:crypto";
+import { createCipheriv, createHash } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -29,6 +32,7 @@ import {
   InboundMediaError,
   InboundMediaStore,
 } from "../src/media/inbound-media.ts";
+import { stageOutboundMedia } from "../src/media/outbound-media.ts";
 import type {
   ILinkSession,
   SendTextResult,
@@ -2905,7 +2909,7 @@ test("an oversized final reply is durably capped at three safe WeChat messages",
   }
 });
 
-test("a standalone Codex PDF link is delivered as a WeChat file", async () => {
+test("a standalone Codex local file link is never uploaded implicitly", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-final-media-"));
   const databasePath = join(directory, "state.sqlite");
   const filePath = join(directory, "报销单.pdf");
@@ -2951,7 +2955,8 @@ test("a standalone Codex PDF link is delivered as a WeChat file", async () => {
     },
     ilink: {
       async prepareMedia(input) {
-        assert.equal(input.media.path, filePath);
+        assert.notEqual(input.media.path, filePath);
+        assert.equal(readFileSync(input.media.path, "utf8"), "fixture workbook");
         assert.equal(input.media.kind, "file");
         return {
           aesKeyBase64: "YWVzLWtleQ==",
@@ -2999,7 +3004,11 @@ test("a standalone Codex PDF link is delivered as a WeChat file", async () => {
       }),
       true,
     );
-    assert.deepEqual(order, ["media:下载 v1.0.pdf", "text:已发给你。"]);
+    assert.equal(order.length, 1);
+    assert.match(
+      order[0] ?? "",
+      /^text:⚠️ 本地文件未发送[\s\S]*新建 iLink 任务[\s\S]*已发给你。/u,
+    );
     assert.equal(state.listPendingOutbox().length, 0);
   } finally {
     bridge.close();
@@ -3012,10 +3021,14 @@ test("a standalone Codex PDF link is delivered as a WeChat file", async () => {
 test("send_file registers and delivers one attachment for the accepted Bridge turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-send-file-"));
   const databasePath = join(directory, "state.sqlite");
-  const filePath = join(directory, "report.xlsx");
+  const workspaceRoot = join(directory, "workspace");
+  const filePath = join(workspaceRoot, "report.xlsx");
   const markdownPath = filePath.replaceAll("\\", "/");
-  const vanishingPath = join(directory, "vanishing.pdf");
+  const outsidePath = join(directory, "secret.txt");
+  const vanishingPath = join(workspaceRoot, "vanishing.pdf");
+  mkdirSync(workspaceRoot);
   writeFileSync(filePath, "fixture workbook");
+  writeFileSync(outsidePath, "not task output");
   writeFileSync(vanishingPath, "%PDF fixture");
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
@@ -3050,6 +3063,7 @@ test("send_file registers and delivers one attachment for the accepted Bridge tu
       async readThread() {
         return {
           thread: {
+            cwd: workspaceRoot,
             turns: [
               {
                 id: "turn-send-file",
@@ -3076,7 +3090,13 @@ test("send_file registers and delivers one attachment for the accepted Bridge tu
     },
     ilink: {
       async prepareMedia(input) {
-        assert.equal(input.media.path, filePath);
+        assert.notEqual(input.media.path, filePath);
+        assert.equal(
+          readFileSync(input.media.path, "utf8"),
+          input.media.name === "report.xlsx"
+            ? "fixture workbook"
+            : "%PDF fixture",
+        );
         return {
           aesKeyBase64: "YWVzLWtleQ==",
           ciphertextSize: 16,
@@ -3097,6 +3117,7 @@ test("send_file registers and delivers one attachment for the accepted Bridge tu
         return { accepted: true, clientId: input.clientId };
       },
     },
+    inboxDirectory: join(directory, "runtime", "Inbox"),
     leases,
     newId: () => "unused",
     now: () => 102,
@@ -3134,26 +3155,20 @@ test("send_file registers and delivers one attachment for the accepted Bridge tu
         },
       },
     ]);
-    assert.deepEqual(
-      state.listOutboundAttachmentIntents("turn-send-file").map(
-        ({ callId, kind, name, path }) => ({ callId, kind, name, path }),
-      ),
-      [
-        {
-          callId: "call-send-file",
-          kind: "file",
-          name: "report.xlsx",
-          path: filePath,
-        },
-      ],
-    );
+    const [registered] =
+      state.listOutboundAttachmentIntents("turn-send-file");
+    assert.equal(registered?.callId, "call-send-file");
+    assert.equal(registered?.kind, "file");
+    assert.equal(registered?.name, "report.xlsx");
+    assert.notEqual(registered?.path, filePath);
+    assert.equal(readFileSync(registered!.path, "utf8"), "fixture workbook");
     assert.equal(
       await bridge.ingestCodexEvent({
         id: "request-send-file-retry",
         method: "item/tool/call",
         params: {
           arguments: { path: filePath },
-          callId: "call-send-file-retry",
+          callId: "call-send-file",
           namespace: null,
           threadId: "thread-send-file",
           tool: "send_file",
@@ -3162,12 +3177,49 @@ test("send_file registers and delivers one attachment for the accepted Bridge tu
       }),
       true,
     );
+    assert.equal(responses.at(-1)?.result.success, true);
+    assert.deepEqual(
+      state.listOutboundAttachmentIntents("turn-send-file").map(
+        ({ callId, path: registeredPath }) => ({ callId, path: registeredPath }),
+      ),
+      [{ callId: "call-send-file", path: registered.path }],
+    );
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        id: "request-send-file-outside",
+        method: "item/tool/call",
+        params: {
+          arguments: { path: outsidePath },
+          callId: "call-send-file-outside",
+          namespace: null,
+          threadId: "thread-send-file",
+          tool: "send_file",
+          turnId: "turn-send-file",
+        },
+      }),
+      true,
+    );
+    assert.equal(responses.at(-1)?.result.success, false);
+    assert.match(
+      String(
+        (
+          responses.at(-1)?.result.contentItems as
+            | Array<{ text?: unknown }>
+            | undefined
+        )?.[0]?.text,
+      ),
+      /当前任务工作区/u,
+    );
+    assert.equal(
+      state.listOutboundAttachmentIntents("turn-send-file").length,
+      1,
+    );
     assert.equal(
       await bridge.ingestCodexEvent({
         id: "request-send-file-missing",
         method: "item/tool/call",
         params: {
-          arguments: { path: join(directory, "missing.xlsx") },
+          arguments: { path: join(workspaceRoot, "missing.xlsx") },
           callId: "call-send-file-missing",
           namespace: null,
           threadId: "thread-send-file",
@@ -3177,7 +3229,6 @@ test("send_file registers and delivers one attachment for the accepted Bridge tu
       }),
       true,
     );
-    assert.equal(responses.at(-2)?.result.success, true);
     assert.equal(responses.at(-1)?.result.success, false);
     assert.match(
       String(
@@ -3209,6 +3260,11 @@ test("send_file registers and delivers one attachment for the accepted Bridge tu
       true,
     );
     assert.equal(responses.at(-1)?.result.success, true);
+    const vanishing = state
+      .listOutboundAttachmentIntents("turn-send-file")
+      .find(({ callId }) => callId === "call-send-file-vanishing");
+    assert.ok(vanishing);
+    assert.equal(readFileSync(vanishing.path, "utf8"), "%PDF fixture");
     rmSync(vanishingPath);
     assert.equal(
       await bridge.ingestCodexEvent({
@@ -3220,11 +3276,16 @@ test("send_file registers and delivers one attachment for the accepted Bridge tu
       }),
       true,
     );
-    assert.equal(delivered[0], "media:report.xlsx");
+    assert.deepEqual(delivered.slice(0, 2), [
+      "media:report.xlsx",
+      "media:vanishing.pdf",
+    ]);
     assert.match(
-      delivered[1] ?? "",
-      /^text:已发给你。[\s\S]*vanishing\.pdf[\s\S]*路径不存在或不是文件/u,
+      delivered[2] ?? "",
+      /^text:⚠️ 已忽略回复中的本地路径[\s\S]*已发给你。/u,
     );
+    assert.equal(existsSync(registered!.path), false);
+    assert.equal(existsSync(vanishing.path), false);
     assert.deepEqual(state.listOutboundAttachmentIntents("turn-send-file"), []);
   } finally {
     bridge.close();
@@ -3315,8 +3376,18 @@ test("send_file refuses a turn not owned by this Bridge instance", async () => {
 test("a registered send_file attachment survives Bridge restart", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-send-file-restart-"));
   const databasePath = join(directory, "state.sqlite");
-  const filePath = join(directory, "restart.pdf");
+  const inboxDirectory = join(directory, "runtime", "Inbox");
+  const outboundDirectory = join(directory, "runtime", "Outbound");
+  const workspaceRoot = join(directory, "workspace");
+  const filePath = join(workspaceRoot, "restart.pdf");
+  mkdirSync(workspaceRoot, { recursive: true });
   writeFileSync(filePath, "%PDF fixture");
+  const snapshot = stageOutboundMedia({
+    exportRoot: outboundDirectory,
+    label: "restart.pdf",
+    path: filePath,
+    workspaceRoot,
+  });
   let state = new SqliteState(databasePath);
   let leases = new SqliteTurnLeaseStore(databasePath);
   state.createDispatchIntent({
@@ -3346,7 +3417,7 @@ test("a registered send_file attachment survives Bridge restart", async () => {
     kind: "file",
     name: "restart.pdf",
     operationId: "operation-send-file-restart",
-    path: filePath,
+    path: snapshot.path,
     threadId: "thread-send-file-restart",
     turnId: "turn-send-file-restart",
   });
@@ -3383,6 +3454,7 @@ test("a registered send_file attachment survives Bridge restart", async () => {
     },
     ilink: {
       async prepareMedia(input) {
+        assert.equal(readFileSync(input.media.path, "utf8"), "%PDF fixture");
         return {
           aesKeyBase64: "YWVzLWtleQ==",
           ciphertextSize: 16,
@@ -3403,6 +3475,7 @@ test("a registered send_file attachment survives Bridge restart", async () => {
         return { accepted: true, clientId: input.clientId };
       },
     },
+    inboxDirectory,
     leases,
     newId: () => "unused",
     now: () => 103,
@@ -3425,9 +3498,148 @@ test("a registered send_file attachment survives Bridge restart", async () => {
       "media:restart.pdf",
       "text:重启后发送完成。",
     ]);
+    assert.equal(existsSync(snapshot.path), false);
     assert.deepEqual(
       state.listOutboundAttachmentIntents("turn-send-file-restart"),
       [],
+    );
+  } finally {
+    bridge.close();
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a v11 attachment intent is never read, uploaded, or deleted after upgrade", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-send-file-legacy-"));
+  const databasePath = join(directory, "state.sqlite");
+  const inboxDirectory = join(directory, "runtime", "Inbox");
+  const outboundDirectory = join(directory, "runtime", "Outbound");
+  const contents = "legacy original must remain";
+  const hash = createHash("sha256").update(contents).digest("hex");
+  const originalPath = join(
+    outboundDirectory,
+    `11111111-1111-4111-8111-111111111111-${hash}.txt`,
+  );
+  mkdirSync(outboundDirectory, { recursive: true });
+  writeFileSync(originalPath, contents);
+
+  const legacy = new DatabaseSync(databasePath);
+  applyStateMigrationsThrough(legacy, 11);
+  legacy
+    .prepare(
+      `INSERT INTO outbound_attachment_intents
+        (operation_id, thread_id, turn_id, call_id, path, path_key,
+         name, kind, created_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "operation-send-file-legacy",
+      "thread-send-file-legacy",
+      "turn-send-file-legacy",
+      "call-send-file-legacy",
+      originalPath,
+      originalPath.toLowerCase(),
+      "legacy.txt",
+      "file",
+      100,
+    );
+  legacy.exec("PRAGMA user_version = 11");
+  legacy.close();
+
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  state.createDispatchIntent({
+    body: "finish without trusting the old attachment",
+    contextToken: "context-send-file-legacy",
+    createdAtMs: 100,
+    dedupeKey: "bot/user/send-file-legacy",
+    operationId: "operation-send-file-legacy",
+    threadId: "thread-send-file-legacy",
+  });
+  state.markDispatchAccepted(
+    "operation-send-file-legacy",
+    "turn-send-file-legacy",
+    101,
+  );
+  leases.tryAcquire({
+    createdAtMs: 100,
+    instanceId: "bridge-instance",
+    operationId: "operation-send-file-legacy",
+    owner: "bridge",
+    threadId: "thread-send-file-legacy",
+    turnId: "turn-send-file-legacy",
+  });
+  const delivered: string[] = [];
+  const bridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      async readThread() {
+        return {
+          thread: {
+            turns: [
+              {
+                id: "turn-send-file-legacy",
+                items: [
+                  {
+                    phase: "final_answer",
+                    text: "任务完成。",
+                    type: "agentMessage",
+                  },
+                ],
+                status: "completed",
+              },
+            ],
+          },
+        };
+      },
+      async startTurn() {
+        assert.fail("recovery must not start a duplicate turn");
+      },
+    },
+    ilink: {
+      async prepareMedia() {
+        assert.fail("legacy attachment paths must never be read or uploaded");
+      },
+      async sendMedia() {
+        assert.fail("legacy attachment paths must never be sent");
+      },
+      async sendText(input) {
+        delivered.push(input.text);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    inboxDirectory,
+    leases,
+    newId: () => "unused",
+    now: () => 103,
+    session,
+    state,
+  });
+
+  try {
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-send-file-legacy",
+          turn: { id: "turn-send-file-legacy" },
+        },
+      }),
+      true,
+    );
+    assert.equal(delivered.length, 1);
+    assert.match(delivered[0] ?? "", /旧版附件记录.*未发送/u);
+    assert.equal(readFileSync(originalPath, "utf8"), contents);
+    assert.deepEqual(
+      state.listOutboundAttachmentIntents("turn-send-file-legacy"),
+      [],
+    );
+    assert.ok(
+      state
+        .listOutboundAttachmentPathKeys()
+        .includes(originalPath.toLowerCase()),
     );
   } finally {
     bridge.close();
@@ -4312,6 +4524,23 @@ function rawVoiceMessage(id: number): WireWeixinMessage {
     ],
     message_id: id,
   };
+}
+
+function applyStateMigrationsThrough(
+  database: DatabaseSync,
+  lastVersion: number,
+): void {
+  const migrations = fileURLToPath(
+    new URL("../src/bridge/migrations/", import.meta.url),
+  );
+  const filenames = readdirSync(migrations)
+    .filter((filename) => /^\d{3}-.*\.sql$/u.test(filename))
+    .sort()
+    .slice(0, lastVersion);
+  assert.equal(filenames.length, lastVersion);
+  for (const filename of filenames) {
+    database.exec(readFileSync(join(migrations, filename), "utf8"));
+  }
 }
 
 function turnBody(text: string): string {

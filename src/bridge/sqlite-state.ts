@@ -98,6 +98,7 @@ export type OutboundAttachmentIntent = {
   operationId: string;
   path: string;
   pathKey: string;
+  snapshotProvenance: "legacy" | "staged-v1";
   threadId: string;
   turnId: string;
 };
@@ -1136,7 +1137,7 @@ export class SqliteState {
   }
 
   registerOutboundAttachmentIntent(
-    input: Omit<OutboundAttachmentIntent, "pathKey">,
+    input: Omit<OutboundAttachmentIntent, "pathKey" | "snapshotProvenance">,
   ): OutboundAttachmentIntent {
     return this.#transaction(() => {
       const pathKey = outboundMediaPathKey(input.path);
@@ -1182,8 +1183,8 @@ export class SqliteState {
         .prepare(
           `INSERT INTO outbound_attachment_intents
             (operation_id, thread_id, turn_id, call_id, path, path_key,
-             name, kind, created_at_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             name, kind, created_at_ms, snapshot_provenance)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged-v1')`,
         )
         .run(
           input.operationId,
@@ -1207,13 +1208,25 @@ export class SqliteState {
     const rows = this.#database
       .prepare(
         `SELECT operation_id, thread_id, turn_id, call_id, path, path_key,
-                name, kind, created_at_ms
+                 name, kind, created_at_ms, snapshot_provenance
          FROM outbound_attachment_intents
          WHERE turn_id = ?
          ORDER BY created_at_ms, call_id`,
       )
       .all(turnId) as OutboundAttachmentIntentRow[];
     return rows.map(outboundAttachmentIntentFromRow);
+  }
+
+  listOutboundAttachmentPathKeys(): string[] {
+    const rows = this.#database
+      .prepare(
+        `SELECT path_key FROM outbound_attachment_intents
+         UNION
+         SELECT path_key FROM protected_legacy_outbound_paths
+         ORDER BY path_key`,
+      )
+      .all() as Array<{ path_key: string }>;
+    return rows.map(({ path_key }) => path_key);
   }
 
   completeDispatchWithOutbox(input: {
@@ -1793,13 +1806,6 @@ export class SqliteState {
   }
 
   #migrate(): void {
-    const current = this.#database.prepare("PRAGMA user_version").get() as
-      | { user_version: number }
-      | undefined;
-    let version = current?.user_version ?? 0;
-    if (version < 0 || version > 11) {
-      throw new Error(`unsupported schema version ${String(version)}`);
-    }
     const migrations = [
       "./migrations/001-initial.sql",
       "./migrations/002-list-snapshots.sql",
@@ -1812,32 +1818,51 @@ export class SqliteState {
       "./migrations/009-outbound-attachment-intents.sql",
       "./migrations/010-user-timing-settings.sql",
       "./migrations/011-thread-permission-settings.sql",
+      "./migrations/012-outbound-attachment-provenance.sql",
     ];
-    while (version < migrations.length) {
-      const nextVersion = version + 1;
-      const resource = migrations[version];
-      if (!resource) throw new Error(`missing migration ${String(nextVersion)}`);
-      const packageRoot = process.env.CODEX_ILINK_PACKAGE_ROOT;
-      const migrationPath = packageRoot
-        ? join(
-            packageRoot,
-            "dist",
-            "bridge",
-            "migrations",
-            basename(resource),
-          )
-        : new URL(resource, import.meta.url);
-      const sql = readFileSync(migrationPath, "utf8");
-      this.#database.exec("BEGIN IMMEDIATE");
-      try {
+    const observed = this.#database.prepare("PRAGMA user_version").get() as
+      | { user_version: number }
+      | undefined;
+    const observedVersion = observed?.user_version ?? 0;
+    if (observedVersion < 0 || observedVersion > migrations.length) {
+      throw new Error(`unsupported schema version ${String(observedVersion)}`);
+    }
+    if (observedVersion === migrations.length) return;
+
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.#database.prepare("PRAGMA user_version").get() as
+        | { user_version: number }
+        | undefined;
+      let version = current?.user_version ?? 0;
+      if (version < 0 || version > migrations.length) {
+        throw new Error(`unsupported schema version ${String(version)}`);
+      }
+      while (version < migrations.length) {
+        const nextVersion = version + 1;
+        const resource = migrations[version];
+        if (!resource) {
+          throw new Error(`missing migration ${String(nextVersion)}`);
+        }
+        const packageRoot = process.env.CODEX_ILINK_PACKAGE_ROOT;
+        const migrationPath = packageRoot
+          ? join(
+              packageRoot,
+              "dist",
+              "bridge",
+              "migrations",
+              basename(resource),
+            )
+          : new URL(resource, import.meta.url);
+        const sql = readFileSync(migrationPath, "utf8");
         this.#database.exec(sql);
         this.#database.exec(`PRAGMA user_version = ${String(nextVersion)}`);
-        this.#database.exec("COMMIT");
         version = nextVersion;
-      } catch (error) {
-        this.#database.exec("ROLLBACK");
-        throw error;
       }
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
     }
   }
 
@@ -1878,7 +1903,7 @@ export class SqliteState {
     const row = this.#database
       .prepare(
         `SELECT operation_id, thread_id, turn_id, call_id, path, path_key,
-                name, kind, created_at_ms
+                 name, kind, created_at_ms, snapshot_provenance
          FROM outbound_attachment_intents
          WHERE turn_id = ? AND call_id = ?`,
       )
@@ -1893,7 +1918,7 @@ export class SqliteState {
     const row = this.#database
       .prepare(
         `SELECT operation_id, thread_id, turn_id, call_id, path, path_key,
-                name, kind, created_at_ms
+                 name, kind, created_at_ms, snapshot_provenance
          FROM outbound_attachment_intents
          WHERE turn_id = ? AND path_key = ?`,
       )
@@ -1945,6 +1970,7 @@ type OutboundAttachmentIntentRow = {
   operation_id: string;
   path: string;
   path_key: string;
+  snapshot_provenance: "legacy" | "staged-v1";
   thread_id: string;
   turn_id: string;
 };
@@ -2013,6 +2039,7 @@ function outboundAttachmentIntentFromRow(
     operationId: row.operation_id,
     path: row.path,
     pathKey: row.path_key,
+    snapshotProvenance: row.snapshot_provenance,
     threadId: row.thread_id,
     turnId: row.turn_id,
   };

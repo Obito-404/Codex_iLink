@@ -19,6 +19,7 @@ export type OutboxWorkerOptions = {
   ilink: ILinkSender;
   maxAttempts?: number;
   now: () => number;
+  outboundDirectory?: string;
   onConfirmed?: (
     item: Pick<
       OutboxItem,
@@ -41,6 +42,7 @@ export class OutboxWorker {
   readonly #ilink: ILinkSender;
   readonly #maxAttempts: number;
   readonly #now: () => number;
+  readonly #outboundDirectory: string | undefined;
   readonly #onConfirmed: OutboxWorkerOptions["onConfirmed"];
   readonly #routeOnConfirmed: OutboxWorkerOptions["routeOnConfirmed"];
   readonly #session: ILinkSession;
@@ -52,6 +54,7 @@ export class OutboxWorker {
     this.#ilink = options.ilink;
     this.#maxAttempts = options.maxAttempts ?? 3;
     this.#now = options.now;
+    this.#outboundDirectory = options.outboundDirectory;
     this.#onConfirmed = options.onConfirmed;
     this.#routeOnConfirmed = options.routeOnConfirmed;
     this.#session = options.session;
@@ -106,6 +109,9 @@ export class OutboxWorker {
             contextToken,
             ilink: this.#ilink,
             item: current,
+            ...(this.#outboundDirectory
+              ? { outboundDirectory: this.#outboundDirectory }
+              : {}),
             session: this.#session,
             ...(signal ? { signal } : {}),
             state: this.#state,

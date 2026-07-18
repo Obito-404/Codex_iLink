@@ -39,9 +39,12 @@ import {
   formatWechatFinalReply,
 } from "./wechat-output.ts";
 import {
-  localOutboundMedia,
-  outboundMediaPathKey,
+  parseOutboundPayload,
+  outboundMediaDirectory,
+  removeOutboundMediaSnapshot,
   serializeOutboundPayload,
+  stageOutboundMedia,
+  stagedOutboundMedia,
 } from "../media/outbound-media.ts";
 import {
   dispatchOutboxItem,
@@ -238,6 +241,8 @@ const MISSING_THREAD_TEXT =
   "原会话尚未写入 Codex 历史，已失效；请使用 new 重新创建并发送。";
 const CODEX_SLOW_TURN_TEXT =
   "⏳ Codex 任务仍在执行，已长时间没有结束；可能正在等待工具、审批或网络。任务未被取消，可用 st 查看或用 stop 停止。";
+const LEGACY_ATTACHMENT_REJECTED_TEXT =
+  "⚠️ 旧版附件记录未通过当前安全校验，未发送本机文件；请在新的 iLink 任务中重新发送。";
 
 export class BridgeEngine {
   readonly #approvals: ApprovalCoordinator | undefined;
@@ -247,6 +252,7 @@ export class BridgeEngine {
   readonly #codex: CodexTurnStarter | undefined;
   readonly #leases: SqliteTurnLeaseStore | undefined;
   readonly #mainThreadId: string | undefined;
+  readonly #outboundDirectory: string | undefined;
   readonly #media: InboundMediaPort | undefined;
   readonly #listProjects: BridgeEngineOptions["listProjects"];
   readonly #newId: () => string;
@@ -284,6 +290,9 @@ export class BridgeEngine {
     this.#inboxDirectory = options.inboxDirectory;
     this.#leases = options.leases;
     this.#mainThreadId = options.mainThreadId;
+    this.#outboundDirectory = options.inboxDirectory
+      ? outboundMediaDirectory(options.inboxDirectory)
+      : undefined;
     this.#media = options.media;
     this.#listProjects = options.listProjects;
     this.#newId = options.newId;
@@ -450,7 +459,7 @@ export class BridgeEngine {
       return true;
     }
     if (event.method === "item/tool/call") {
-      return this.#handleSendFileCall(event);
+      return await this.#handleSendFileCall(event);
     }
     if (this.#approvals && (await this.#approvals.ingest(event))) return true;
     if (event.method === "item/started") {
@@ -582,6 +591,9 @@ export class BridgeEngine {
       existingFinalOutbox[0]?.contextToken ||
       dispatch.contextToken ||
       this.#state.getILinkState(this.#session.botId)?.contextToken;
+    const attachmentIntents = mustPersistFinal
+      ? this.#state.listOutboundAttachmentIntents(turnId)
+      : [];
     const finalOutboxInput =
       mustPersistFinal && contextToken && !suppressInterruptedFinal
         ? this.#finalReplyInput(
@@ -591,7 +603,7 @@ export class BridgeEngine {
               CODEX_EMPTY_REPLY_TEXT,
             turnId,
             failureText === null && effectiveCompletionStatus === "completed"
-              ? this.#state.listOutboundAttachmentIntents(turnId)
+              ? attachmentIntents
               : [],
           )
         : null;
@@ -629,6 +641,7 @@ export class BridgeEngine {
     } else if (dispatch.completedAtMs === null) {
       this.#state.markDispatchCompleted(dispatch.operationId, turnId, this.#now());
     }
+    this.#removeDetachedAttachmentSnapshots(attachmentIntents, finalOutbox);
     await this.#cleanupMedia(dispatch.dedupeKey);
     this.#turnFailures.delete(turnFailureKey(threadId, turnId));
     this.#userStoppedTurns.delete(stoppedTurnKey);
@@ -644,7 +657,7 @@ export class BridgeEngine {
     return true;
   }
 
-  #handleSendFileCall(event: CodexEvent): boolean {
+  async #handleSendFileCall(event: CodexEvent): Promise<boolean> {
     if (stringField(event.params, "tool") !== "send_file") return false;
     const respond = this.#codex?.respondToServerRequest;
     if (event.id === undefined || !respond) return false;
@@ -652,6 +665,16 @@ export class BridgeEngine {
       respond.call(this.#codex, event.id!, {
         contentItems: [{ text, type: "inputText" }],
         success: false,
+      }) !== false;
+    const success = (): boolean =>
+      respond.call(this.#codex, event.id!, {
+        contentItems: [
+          {
+            text: "附件已登记，将随最终回复发送；不要再输出本地路径。",
+            type: "inputText",
+          },
+        ],
+        success: true,
       }) !== false;
     const threadId = stringField(event.params, "threadId");
     const turnId = stringField(event.params, "turnId");
@@ -689,10 +712,50 @@ export class BridgeEngine {
     ) {
       return failure("当前回合不属于微信入口，不能登记附件。");
     }
+    if (!this.#outboundDirectory) {
+      return failure("附件未登记：无法确认当前任务工作区。");
+    }
+    const existing = this.#state
+      .listOutboundAttachmentIntents(turnId)
+      .find((attachment) => attachment.callId === callId);
+    if (existing) {
+      if (existing.snapshotProvenance !== "staged-v1") {
+        return failure("附件未登记：旧版附件记录不再受信任，请重新调用。");
+      }
+      try {
+        stagedOutboundMedia({
+          exportRoot: this.#outboundDirectory,
+          label: existing.name,
+          path: existing.path,
+        });
+        return success();
+      } catch {
+        return failure("附件未登记：旧版附件记录不再受信任，请重新调用。");
+      }
+    }
+    if (!this.#codex?.readThread) {
+      return failure("附件未登记：无法确认当前任务工作区。");
+    }
+    let workspaceRoot: string | undefined;
     try {
-      const media = localOutboundMedia({
+      const current = await this.#codex.readThread({
+        includeTurns: false,
+        threadId,
+      });
+      workspaceRoot = stringField(current.thread, "cwd");
+    } catch {
+      return failure("附件未登记：无法确认当前任务工作区。");
+    }
+    if (!workspaceRoot) {
+      return failure("附件未登记：无法确认当前任务工作区。");
+    }
+    let media: ReturnType<typeof stageOutboundMedia> | undefined;
+    try {
+      media = stageOutboundMedia({
+        exportRoot: this.#outboundDirectory,
         label: win32.basename(path.trim()),
         path,
+        workspaceRoot,
       });
       this.#state.registerOutboundAttachmentIntent({
         callId,
@@ -705,6 +768,9 @@ export class BridgeEngine {
         turnId,
       });
     } catch (error) {
+      if (media) {
+        removeOutboundMediaSnapshot(media.path, this.#outboundDirectory);
+      }
       if (
         error instanceof OutboundAttachmentIntentError &&
         error.code === "TOO_MANY_ATTACHMENTS"
@@ -719,17 +785,7 @@ export class BridgeEngine {
       }
       return failure(`附件未登记：${outboundMediaFailureText(error)}。`);
     }
-    return (
-      respond.call(this.#codex, event.id, {
-        contentItems: [
-          {
-            text: "附件已登记，将随最终回复发送；不要再输出本地路径。",
-            type: "inputText",
-          },
-        ],
-        success: true,
-      }) !== false
-    );
+    return success();
   }
 
   close(): void {
@@ -1263,18 +1319,30 @@ export class BridgeEngine {
     const extracted = extractWechatLocalFileReferences(text);
     const mediaBodies: string[] = [];
     const mediaFailures: string[] = [];
+    if (extracted.references.length > 0) {
+      mediaFailures.push(
+        registeredAttachments.length > 0
+          ? "⚠️ 已忽略回复中的本地路径；附件仅按 send_file 的登记结果发送。"
+          : "⚠️ 本地文件未发送；请在微信中新建 iLink 任务后使用 send_file。",
+      );
+    }
+    if (
+      registeredAttachments.some(
+        ({ snapshotProvenance }) => snapshotProvenance !== "staged-v1",
+      )
+    ) {
+      mediaFailures.push(LEGACY_ATTACHMENT_REJECTED_TEXT);
+    }
     const uniqueReferences: Array<{ label: string; path: string }> = [];
     const seenPaths = new Set<string>();
     for (const reference of [
-      ...registeredAttachments.map((attachment) => ({
-        label: attachment.name,
-        path: attachment.path,
-        pathKey: attachment.pathKey,
-      })),
-      ...extracted.references.map((reference) => ({
-        ...reference,
-        pathKey: outboundMediaPathKey(reference.path),
-      })),
+      ...registeredAttachments
+        .filter(({ snapshotProvenance }) => snapshotProvenance === "staged-v1")
+        .map((attachment) => ({
+          label: attachment.name,
+          path: attachment.path,
+          pathKey: attachment.pathKey,
+        })),
     ]) {
       if (seenPaths.has(reference.pathKey)) continue;
       seenPaths.add(reference.pathKey);
@@ -1284,7 +1352,8 @@ export class BridgeEngine {
       try {
         mediaBodies.push(
           serializeOutboundPayload(
-            localOutboundMedia({
+            stagedOutboundMedia({
+              exportRoot: this.#outboundDirectory ?? "",
               label: reference.label,
               path: reference.path,
             }),
@@ -1299,7 +1368,7 @@ export class BridgeEngine {
     if (uniqueReferences.length > 2) {
       mediaFailures.push("⚠️ 单次回复最多发送 2 个附件，其余未发送。");
     }
-    const finalText = [extracted.text, ...mediaFailures]
+    const finalText = [...mediaFailures, extracted.text]
       .filter((part) => part.length > 0)
       .join("\n\n");
     const messages = formatWechatFinalReply(finalText, {
@@ -1329,11 +1398,42 @@ export class BridgeEngine {
         contextToken: item.contextToken,
         ilink: this.#ilink,
         item,
+        ...(this.#outboundDirectory
+          ? { outboundDirectory: this.#outboundDirectory }
+          : {}),
         session: this.#session,
         signal: this.#shutdown.signal,
         state: this.#state,
       });
       this.#state.confirmOutbox(item.clientId, this.#now());
+    }
+  }
+
+  #removeDetachedAttachmentSnapshots(
+    attachments: readonly OutboundAttachmentIntent[],
+    outbox: readonly OutboxItem[],
+  ): void {
+    if (!this.#outboundDirectory || attachments.length === 0) return;
+    const referenced = new Set<string>();
+    for (const item of outbox) {
+      if (!item.body) continue;
+      try {
+        const payload = parseOutboundPayload(item.body);
+        if (payload.type === "local-media" && payload.staged === true) {
+          referenced.add(payload.path.toLowerCase());
+        }
+      } catch {
+        // Invalid payloads do not authorize retaining a private snapshot.
+      }
+    }
+    for (const attachment of attachments) {
+      if (attachment.snapshotProvenance !== "staged-v1") continue;
+      if (!referenced.has(attachment.path.toLowerCase())) {
+        removeOutboundMediaSnapshot(
+          attachment.path,
+          this.#outboundDirectory,
+        );
+      }
     }
   }
 
@@ -3080,9 +3180,18 @@ function inboundMediaFailureCode(error: unknown): DurableInboundFailureCode {
 }
 
 function outboundMediaFailureText(error: unknown): string {
+  if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+    return "路径不存在或不是文件";
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (message === "E_OUTBOUND_MEDIA_TOO_LARGE") return "文件超过 100 MB";
   if (message === "E_OUTBOUND_MEDIA_NOT_FILE") return "路径不存在或不是文件";
+  if (message === "E_OUTBOUND_MEDIA_OUTSIDE_WORKSPACE") {
+    return "文件不在当前任务工作区";
+  }
+  if (message === "E_OUTBOUND_MEDIA_LINK") return "不允许发送链接或硬链接";
+  if (message === "E_OUTBOUND_MEDIA_CHANGED") return "文件在读取时发生变化";
+  if (message === "E_OUTBOUND_MEDIA_PATH") return "本地路径格式不安全";
   return "本地路径无效或不可访问";
 }
 

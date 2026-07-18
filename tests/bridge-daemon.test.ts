@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -13,6 +20,7 @@ import { serializeDurableTurnInput } from "../src/bridge/turn-input.ts";
 import { SqliteTurnLeaseStore } from "../src/coordination/turn-lease.ts";
 import { HookReceiver } from "../src/hooks/hook-receiver.ts";
 import type { ILinkSession } from "../src/ilink/protocol.ts";
+import { stageOutboundMedia } from "../src/media/outbound-media.ts";
 import { PowerRequestController } from "../src/windows/power-request.ts";
 
 const session: ILinkSession = {
@@ -222,6 +230,17 @@ test("daemon startup prunes media while protecting durable active dedupe keys", 
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
+  const inboxDirectory = join(directory, "Inbox");
+  const workspaceRoot = join(directory, "workspace");
+  const orphanSource = join(workspaceRoot, "orphan.txt");
+  mkdirSync(workspaceRoot);
+  writeFileSync(orphanSource, "orphan snapshot");
+  const orphanSnapshot = stageOutboundMedia({
+    exportRoot: join(directory, "Outbound"),
+    label: "orphan.txt",
+    path: orphanSource,
+    workspaceRoot,
+  });
   let protectedKeys: string[] = [];
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
   state.setMainThreadId("thread-main");
@@ -253,7 +272,7 @@ test("daemon startup prunes media while protecting durable active dedupe keys", 
         return { accepted: true as const, clientId: input.clientId };
       },
     },
-    inboxDirectory: join(directory, "Inbox"),
+    inboxDirectory,
     leases,
     media: {
       async cleanup() {},
@@ -274,6 +293,7 @@ test("daemon startup prunes media while protecting durable active dedupe keys", 
   try {
     await daemon.start();
     assert.deepEqual(protectedKeys, ["bot-a/controller-a/media-message"]);
+    assert.equal(existsSync(orphanSnapshot.path), false);
     await daemon.stop();
   } finally {
     leases.close();

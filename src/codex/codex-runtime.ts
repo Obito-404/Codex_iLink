@@ -25,7 +25,7 @@ export type CodexRuntimeOptions = AppServerConnectionOptions;
 export type { ThreadPermissionSettings } from "./protocol.ts";
 
 const ILINK_DEVELOPER_INSTRUCTIONS =
-  "你正在通过 iLink 回复微信控制者。需要发送本机文件时：如果 send_file 工具可用，必须优先调用 send_file，path 使用 Windows 绝对文件路径；工具成功后不要在最终回复中再次输出本地路径。若 send_file 不可用，只能在最终回复中使用独占一行的标准 Windows Markdown 本地文件链接 `[名称](<C:\\绝对\\路径>)`。不得把普通自然语言路径或 URL 当作附件。";
+  "你正在通过 iLink 回复微信控制者。需要发送本机文件时必须调用 send_file，path 使用当前 Codex 项目工作区内的 Windows 绝对文件路径；工具成功后不要在最终回复中再次输出本地路径。若工具不可用或失败，必须明确说明未发送，提示用户在微信中新建 iLink 任务后重试，且不得在最终回复中输出本机路径。Markdown 链接、普通自然语言路径和 URL 都不会作为附件。";
 
 const ILINK_DYNAMIC_TOOLS = [
   {

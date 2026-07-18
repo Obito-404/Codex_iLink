@@ -4,7 +4,7 @@ Bridge 使用 SQLite WAL 持久化绑定、队列、游标、审批、去重、D
 
 微信入站消息可以带媒体，因此 `inbound_messages`、`queued_turns` 和 `dispatch_intents` 的正文列保存同一种版本化输入 payload：文本、附件种类、显示名和本地绝对路径。图片最终映射为 Codex `localImage`，文件和视频映射为 `mention`。SQLite 不保存媒体二进制。
 
-iLink 新建任务通过 App Server `dynamicTools` 注册 `send_file(path)`；Bridge 仅接受当前实例持有的微信回合，并把已校验附件保存为短期 `outbound_attachment_intents`。App Server 不支持在 `thread/resume` 时给旧任务补装动态工具，因此旧任务仍以独占一行的 `[名称](<Windows 绝对路径>)` 或 `![名称](<Windows 绝对路径>)` 作为兼容契约，不扫描普通自然语言路径、HTTP URL 或行内链接。工具与 Markdown 来源按 Windows 路径去重，成功终态与最终正文原子进入 Outbox，失败或中断终态原子清理；路径在登记和 Outbox 提交前都必须指向当时存在且不超过 100 MiB 的普通文件，单次最多两个。原始本地附件 payload 先进入 Outbox，上传成功后原子替换为固定的 CDN `encrypt_query_param`、AES key、文件名和大小；这样 `sendmessage` 结果未知时仍以相同 `client_id` 和相同媒体 item 重试。确认发送后正文照常清空。
+iLink 新建任务通过 App Server `dynamicTools` 注册 `send_file(path)`；Bridge 仅接受当前实例持有的微信回合，并从 App Server 当前 thread 读取 canonical `cwd`。只有 cwd 子树内、当时存在且不超过 100 MiB 的普通单链接文件可登记；UNC、设备路径、ADS、Node 可识别的 symlink/junction、hardlink 与 cwd 外路径一律拒绝。授权后立即复制到 iLink 私有 `Outbound` 快照，UUID 文件名绑定内容 SHA-256，`outbound_attachment_intents` 和 Outbox 只引用快照；投递从稳定文件描述符读取并校验 hash 后直接把该字节副本交给上传器，避免登记后或校验后的 TOCTOU。Markdown 本地链接不再是附件契约；`thread/resume` 无法补装工具的旧任务需新建 iLink 任务。成功终态与最终正文原子进入 Outbox，失败或中断终态清理未引用快照；上传成功后先把固定 CDN 参数、AES key、文件名和大小持久化替换到 Outbox，再删除受信任根内的 UUID 快照。Daemon 启动以附件意图与待发 Outbox 为引用集，只清理未引用的受信任快照。SQLite v12 为附件意图增加 `snapshot_provenance`：迁移前记录固定为 `legacy`，其规范化路径 key 写入永久保护集；旧路径不得读取、上传或删除，只有新登记的 `staged-v1` 快照能进入 Outbox 和清理流程。旧版本遗留的未标记本地媒体只替换为安全提示；`sendmessage` 结果未知时仍以相同 `client_id` 和相同 prepared media 重试。确认发送后正文照常清空。
 
 媒体二进制单独保存在 `%LOCALAPPDATA%\Codex_iLink\media\inbound\<sha256(dedupeKey)>`。它至少保留到对应回合终态；提交状态未知时保留到公开 App Server 接口完成对账。启动清理只删除未被入站、队列或未完成 Dispatch Intent 引用的孤儿目录，不能按时间猜测删除仍可能被 Codex 读取的文件。
 

@@ -8,6 +8,7 @@ import {
   BridgeEngine,
   type CodexTurnStarter,
 } from "../src/bridge/bridge.ts";
+import { COMMAND_HELP } from "../src/bridge/commands.ts";
 import { SqliteState } from "../src/bridge/sqlite-state.ts";
 import { SqliteTurnLeaseStore } from "../src/coordination/turn-lease.ts";
 import { CodexOutcomeUnknownError } from "../src/codex/protocol.ts";
@@ -904,9 +905,10 @@ test("model and effort commands update only the current shared Codex session", a
     );
 
     await ingest(bridge, 52, "model:gpt-5.6-sol");
+    await ingest(bridge, 521, "把当前任务模型换成 Sol");
     await ingest(bridge, 53, "effort");
     assert.equal(
-      sent[3]?.text,
+      sent[4]?.text,
       [
         "当前模型：GPT-5.6 Sol (gpt-5.6-sol)",
         "当前推理强度：medium",
@@ -921,7 +923,7 @@ test("model and effort commands update only the current shared Codex session", a
     await ingest(bridge, 54, "effort:high");
     await ingest(bridge, 55, "effort:xhigh");
     assert.equal(
-      sent[5]?.text,
+      sent[6]?.text,
       [
         "已切换当前任务推理强度：xhigh",
         "模型：GPT-5.6 Sol (gpt-5.6-sol)",
@@ -939,10 +941,26 @@ test("model and effort commands update only the current shared Codex session", a
         model: "gpt-5.6-sol",
         threadId: "thread-current",
       },
+      {
+        effort: "medium",
+        model: "gpt-5.6-sol",
+        threadId: "thread-current",
+      },
       { effort: "high", threadId: "thread-current" },
       { effort: "xhigh", threadId: "thread-current" },
     ]);
     assert.equal(codex.resumes.has("wechat-main"), false);
+  });
+});
+
+test("ambiguous control-like text uses the isolated classifier fallback", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent }) => {
+    codex.controlClassification = { kind: "help" };
+
+    await ingest(bridge, 56, "帮我查看一下控制命令怎么用");
+
+    assert.deepEqual(codex.classifiedTexts, ["帮我查看一下控制命令怎么用"]);
+    assert.equal(sent[0]?.text, COMMAND_HELP);
   });
 });
 
@@ -1065,6 +1083,8 @@ class FakeNavigationCodex implements CodexTurnStarter {
   readFailures = new Set<string>();
   resumes = new Map<string, Record<string, unknown>>();
   nextStartedThreadId = "thread-new";
+  controlClassification: unknown = null;
+  classifiedTexts: string[] = [];
   models = [
     {
       defaultReasoningEffort: "medium",
@@ -1174,6 +1194,12 @@ class FakeNavigationCodex implements CodexTurnStarter {
 
   async listModels() {
     return { data: this.models, nextCursor: null };
+  }
+
+  async classifyControlIntent(input: { cwd: string; text: string }) {
+    assert.equal(input.cwd, "D:\\Codex-iLink\\Inbox");
+    this.classifiedTexts.push(input.text);
+    return this.controlClassification;
   }
 
   async resumeThread(threadId: string, options: { permissions?: string } = {}) {

@@ -12,6 +12,27 @@ import {
 
 const fakeRuntime = resolve("tests/fixtures/fake-codex-runtime.mjs");
 
+test("control intent classification uses an isolated ephemeral tool turn", async () => {
+  const runtime = await CodexRuntime.create({
+    bridgeInstanceId: "bridge-instance-control-router",
+    command: [process.execPath, fakeRuntime],
+  });
+  const events: unknown[] = [];
+  runtime.onEvent((event) => events.push(event));
+
+  try {
+    const classified = await runtime.classifyControlIntent({
+      cwd: "D:\\Codex-iLink\\Inbox",
+      text: "帮我查看一下控制命令怎么用",
+    });
+
+    assert.deepEqual(classified, { kind: "help" });
+    assert.deepEqual(events, []);
+  } finally {
+    runtime.close();
+  }
+});
+
 test("model catalog and session model settings use native App Server methods", async () => {
   const runtime = await CodexRuntime.create({
     bridgeInstanceId: "bridge-instance-model-settings",

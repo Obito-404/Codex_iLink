@@ -1,6 +1,11 @@
 import { win32 } from "node:path";
 
-import { parseInboundText, COMMAND_HELP } from "./commands.ts";
+import {
+  COMMAND_HELP,
+  looksLikeControlRequest,
+  parseInboundText,
+  routedControlIntent,
+} from "./commands.ts";
 import {
   ApprovalCoordinator,
   type PendingApproval,
@@ -100,6 +105,10 @@ export type ProjectNavigationEntry = {
 };
 
 export type CodexTurnStarter = {
+  classifyControlIntent?(input: {
+    cwd: string;
+    text: string;
+  }): Promise<unknown>;
   compactThread?(threadId: string): Promise<Record<string, unknown>>;
   ensureThread?(
     threadId: string,
@@ -880,6 +889,26 @@ export class BridgeEngine {
     turnInput: DurableTurnInput;
   }): Promise<number> {
     let intent = parseInboundText(input.turnInput.text);
+    if (
+      intent.kind === "message" &&
+      input.turnInput.attachments.length === 0 &&
+      this.#inboxDirectory &&
+      this.#codex?.classifyControlIntent &&
+      looksLikeControlRequest(input.turnInput.text)
+    ) {
+      try {
+        const classified = routedControlIntent(
+          await this.#codex.classifyControlIntent({
+            cwd: this.#inboxDirectory,
+            text: input.turnInput.text,
+          }),
+        );
+        if (classified) intent = classified;
+      } catch {
+        // Classification is only a convenience fallback. Normal task delivery
+        // remains available when the isolated router is unavailable.
+      }
+    }
     if (
       (intent.kind === "approve" || intent.kind === "deny") &&
       intent.code === null &&
@@ -1808,10 +1837,7 @@ export class BridgeEngine {
     if (selection.id !== undefined || selection.index !== undefined) {
       const selected =
         selection.id !== undefined
-          ? models.find(
-              (model) =>
-                model.id === selection.id || model.model === selection.id,
-            )
+          ? findModelByReference(models, selection.id)
           : models[(selection.index as number) - 1];
       if (!selected) return "模型不可用，请发送 model 查看当前可选模型。";
       const supportedEfforts = selected.supportedReasoningEfforts.map(
@@ -3073,6 +3099,28 @@ function isModelCatalogEntry(value: unknown): value is ModelCatalogEntry {
 
 function formatModel(model: ModelCatalogEntry): string {
   return `${model.displayName} (${model.id})`;
+}
+
+function findModelByReference(
+  models: readonly ModelCatalogEntry[],
+  reference: string,
+): ModelCatalogEntry | undefined {
+  const normalized = reference.trim().toLowerCase();
+  const exact = models.find(
+    (model) =>
+      model.id.toLowerCase() === normalized ||
+      model.model.toLowerCase() === normalized ||
+      model.displayName.toLowerCase() === normalized,
+  );
+  if (exact) return exact;
+
+  const aliases = models.filter((model) => {
+    const values = [model.id, model.model, model.displayName]
+      .map((value) => value.toLowerCase())
+      .flatMap((value) => [value, ...value.split(/[-_\s]+/u)]);
+    return values.includes(normalized);
+  });
+  return aliases.length === 1 ? aliases[0] : undefined;
 }
 
 function formatAmbiguousApprovals(

@@ -43,9 +43,64 @@ const ILINK_DYNAMIC_TOOLS = [
   },
 ] as const;
 
+const CONTROL_ROUTER_INSTRUCTIONS =
+  "仅识别明确的 iLink 控制请求并调用 route_ilink_control；否则调用 kind=message。不得回答用户。";
+
+const CONTROL_ROUTER_TOOLS = [
+  {
+    description:
+      "将微信文本映射为 iLink 控制意图。项目 projects/selectProject；任务 sessions/enterSession/newSession/clearSession/compactSession；stopTurn/exitSession/status；权限 permissions/selectPermission；模型 models/selectModel；推理 efforts/selectEffort；审批 approve/deny；帮助 help。普通工作请求必须用 message。",
+    inputSchema: {
+      additionalProperties: false,
+      properties: {
+        code: { type: "string" },
+        effort: { type: "string" },
+        id: { type: "string" },
+        index: { minimum: 1, type: "integer" },
+        kind: {
+          enum: [
+            "approve",
+            "clearSession",
+            "compactSession",
+            "deny",
+            "efforts",
+            "enterSession",
+            "exitSession",
+            "help",
+            "message",
+            "models",
+            "newSession",
+            "permissions",
+            "projects",
+            "selectEffort",
+            "selectModel",
+            "selectPermission",
+            "selectProject",
+            "sessions",
+            "status",
+            "stopTurn",
+          ],
+          type: "string",
+        },
+        page: { enum: ["archived", "first", "next"], type: "string" },
+      },
+      required: ["kind"],
+      type: "object",
+    },
+    name: "route_ilink_control",
+  },
+] as const;
+
 type ServerRequestOwner = {
   connection: AppServerConnection;
   serverId: number | string;
+};
+
+type ControlRouter = {
+  connection: AppServerConnection;
+  resolve: (value: unknown) => void;
+  settled: boolean;
+  timeout: NodeJS.Timeout;
 };
 
 export class CodexRuntime {
@@ -54,6 +109,7 @@ export class CodexRuntime {
   readonly #eventListeners = new Set<AppServerEventListener>();
   readonly #loadedPermissionProfileIds = new Map<string, string>();
   readonly #loadedThreadIds = new Set<string>();
+  readonly #controlRouters = new Map<string, ControlRouter>();
   readonly #options: CodexRuntimeOptions;
   readonly #serverRequestOwners = new Map<
     number | string,
@@ -61,6 +117,7 @@ export class CodexRuntime {
   >();
   #closed = false;
   #nextServerRequestToken = 1;
+  #nextControlRouterId = 1;
   #reconnectRequired: AppServerConnection | undefined;
   #reconnectPromise: Promise<AppServerConnection> | undefined;
 
@@ -117,6 +174,38 @@ export class CodexRuntime {
     const params: JsonObject = {};
     if (input.cursor !== undefined) params.cursor = input.cursor;
     return (await this.#requestSafely("model/list", params)) as ModelListResult;
+  }
+
+  async classifyControlIntent(input: {
+    cwd: string;
+    text: string;
+  }): Promise<unknown> {
+    const started = (await this.#requestOnceWithUnknownOutcome("thread/start", {
+      cwd: input.cwd,
+      developerInstructions: CONTROL_ROUTER_INSTRUCTIONS,
+      dynamicTools: CONTROL_ROUTER_TOOLS,
+      ephemeral: true,
+    })) as ThreadStartResult;
+    const threadId = started.thread.id;
+    const connection = this.#connection;
+
+    return new Promise<unknown>((resolve) => {
+      const router: ControlRouter = {
+        connection,
+        resolve,
+        settled: false,
+        timeout: setTimeout(() => {
+          this.#settleControlRouter(threadId, null, false);
+        }, 15_000),
+      };
+      router.timeout.unref();
+      this.#controlRouters.set(threadId, router);
+      void this.#requestOnceWithUnknownOutcome("turn/start", {
+        clientUserMessageId: `codex-ilink:control-router:${String(this.#nextControlRouterId++)}`,
+        input: [{ text: input.text, text_elements: [], type: "text" }],
+        threadId,
+      }).catch(() => this.#settleControlRouter(threadId, null, true));
+    });
   }
 
   async unarchiveThread(threadId: string): Promise<ThreadUnarchiveResult> {
@@ -314,6 +403,7 @@ export class CodexRuntime {
     this.#closed = true;
     this.#detachConnectionEvents?.();
     this.#detachConnectionEvents = undefined;
+    this.#invalidateControlRouters(this.#connection);
     this.#invalidateServerRequests(this.#connection);
     this.#connection.close();
   }
@@ -418,6 +508,7 @@ export class CodexRuntime {
         return this.#connection;
       }
       this.#detachConnectionEvents?.();
+      this.#invalidateControlRouters(unavailable);
       this.#invalidateServerRequests(unavailable);
       unavailable.close();
       this.#connection = connection;
@@ -442,9 +533,64 @@ export class CodexRuntime {
   #attachConnectionEvents(connection: AppServerConnection): void {
     this.#detachConnectionEvents = connection.onEvent((event) => {
       if (this.#connection !== connection || this.#closed) return;
+      if (this.#handleControlRouterEvent(connection, event)) return;
       const forwarded = this.#ownServerRequest(connection, event);
       for (const listener of this.#eventListeners) listener(forwarded);
     });
+  }
+
+  #handleControlRouterEvent(
+    connection: AppServerConnection,
+    event: AppServerEvent,
+  ): boolean {
+    const threadId = stringValue(event.params.threadId);
+    if (!threadId) return false;
+    const router = this.#controlRouters.get(threadId);
+    if (!router || router.connection !== connection) return false;
+
+    if (
+      event.method === "item/tool/call" &&
+      event.params.tool === "route_ilink_control" &&
+      event.id !== undefined
+    ) {
+      const argumentsValue = event.params.arguments;
+      connection.respondToServerRequest(event.id, {
+        contentItems: [
+          { text: "控制意图已接收。", type: "inputText" },
+        ],
+        success: true,
+      });
+      this.#settleControlRouter(threadId, argumentsValue, false);
+      return true;
+    }
+    if (event.method === "turn/completed") {
+      this.#settleControlRouter(threadId, null, true);
+      return true;
+    }
+    return true;
+  }
+
+  #settleControlRouter(
+    threadId: string,
+    value: unknown,
+    remove: boolean,
+  ): void {
+    const router = this.#controlRouters.get(threadId);
+    if (!router) return;
+    if (!router.settled) {
+      router.settled = true;
+      router.resolve(value);
+    }
+    if (!remove) return;
+    clearTimeout(router.timeout);
+    this.#controlRouters.delete(threadId);
+  }
+
+  #invalidateControlRouters(connection: AppServerConnection): void {
+    for (const [threadId, router] of this.#controlRouters) {
+      if (router.connection !== connection) continue;
+      this.#settleControlRouter(threadId, null, true);
+    }
   }
 
   #ownServerRequest(
@@ -497,4 +643,8 @@ function permissionProfileId(value: unknown): string | undefined {
   }
   const id = (value as Record<string, unknown>).id;
   return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }

@@ -308,19 +308,24 @@ lines.on("line", (line) => {
   }
 
   if (message.method === "thread/start") {
+    const isControlRouter = message.params.ephemeral === true;
     if (
-      !hasExactKeys(message.params, [
-        "cwd",
-        "developerInstructions",
-        "dynamicTools",
-      ])
+      !hasExactKeys(
+        message.params,
+        isControlRouter
+          ? ["cwd", "developerInstructions", "dynamicTools", "ephemeral"]
+          : ["cwd", "developerInstructions", "dynamicTools"],
+      )
     ) {
       rejectUnexpectedParams(message);
       return;
     }
     respond(message.id, {
       fixtureParams: message.params,
-      thread: { cwd: message.params.cwd, id: "thread-new" },
+      thread: {
+        cwd: message.params.cwd,
+        id: isControlRouter ? "thread-control-router" : "thread-new",
+      },
     });
     return;
   }
@@ -334,6 +339,36 @@ lines.on("line", (line) => {
       ])
     ) {
       rejectUnexpectedParams(message);
+      return;
+    }
+    if (message.params.threadId === "thread-control-router") {
+      process.stdout.write(
+        `${JSON.stringify({
+          id: "control-router-tool-request",
+          method: "item/tool/call",
+          params: {
+            arguments: { kind: "help" },
+            callId: "control-router-call",
+            namespace: null,
+            threadId: message.params.threadId,
+            tool: "route_ilink_control",
+            turnId: "turn-control-router",
+          },
+        })}\n`,
+      );
+      respond(message.id, {
+        fixtureParams: message.params,
+        turn: { id: "turn-control-router" },
+      });
+      process.stdout.write(
+        `${JSON.stringify({
+          method: "turn/completed",
+          params: {
+            threadId: message.params.threadId,
+            turn: { id: "turn-control-router", status: "completed" },
+          },
+        })}\n`,
+      );
       return;
     }
     if (process.argv.includes("--request-then-hang-turn-start")) {

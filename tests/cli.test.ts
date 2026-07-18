@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { CLI_HELP, runCli, type CliCommands } from "../src/cli/ilink.ts";
+import {
+  CLI_HELP,
+  configureCodexPlugin,
+  runCli,
+  runSetupInstallation,
+  type CliCommands,
+  type SetupActions,
+} from "../src/cli/ilink.ts";
 
 function fixtureCommands(calls: string[]): CliCommands {
   return {
@@ -20,6 +27,10 @@ function fixtureCommands(calls: string[]): CliCommands {
     login: async () => {
       calls.push("login");
       return 11;
+    },
+    setup: async () => {
+      calls.push("setup");
+      return 15;
     },
     start: async () => {
       calls.push("start");
@@ -36,11 +47,12 @@ function fixtureCommands(calls: string[]): CliCommands {
   };
 }
 
-test("CLI exposes its six public commands", async () => {
+test("CLI exposes its seven public commands", async () => {
   for (const [command, expectedCode] of [
     ["config", 9],
     ["doctor", 10],
     ["login", 11],
+    ["setup", 15],
     ["start", 12],
     ["status", 13],
     ["stop", 14],
@@ -74,7 +86,15 @@ test("CLI help is concise and does not invoke a command", async () => {
   assert.equal(code, 0);
   assert.deepEqual(calls, []);
   assert.deepEqual(output, [CLI_HELP]);
-  for (const command of ["config", "login", "start", "status", "doctor", "stop"]) {
+  for (const command of [
+    "config",
+    "login",
+    "setup",
+    "start",
+    "status",
+    "doctor",
+    "stop",
+  ]) {
     assert.match(CLI_HELP, new RegExp(`\\b${command}\\b`, "u"));
   }
 });
@@ -105,6 +125,140 @@ test("CLI reports unknown commands and command failures without a stack trace", 
   assert.equal(errors.at(-1), "stable failure");
 });
 
+test("setup installs the Guard, binds WeChat, and starts the Bridge", async () => {
+  const calls: string[] = [];
+  const output: string[] = [];
+  const actions: SetupActions = {
+    configurePlugin: async () => {
+      calls.push("plugin");
+    },
+    hasUsableSession: () => false,
+    login: async () => {
+      calls.push("login");
+      return 0;
+    },
+    start: async () => {
+      calls.push("start");
+      return 0;
+    },
+  };
+
+  const code = await runSetupInstallation(
+    { error: (message) => output.push(`error:${message}`), log: (message) => output.push(message) },
+    actions,
+  );
+
+  assert.equal(code, 0);
+  assert.deepEqual(calls, ["plugin", "login", "start"]);
+  assert.match(output.join("\n"), /安装 Codex iLink Guard/u);
+  assert.match(output.join("\n"), /绑定微信/u);
+  assert.match(output.at(-1) ?? "", /安装完成/u);
+});
+
+test("setup installs a missing Codex marketplace and Guard plugin", async () => {
+  const calls: string[][] = [];
+  await configureCodexPlugin({
+    packageRoot: "C:\\npm\\node_modules\\codex-ilink",
+    pluginVersion: "0.1.3+codex.20260716141315",
+    runCodex: (args) => {
+      calls.push([...args]);
+      const command = args.join(" ");
+      if (command === "plugin marketplace list") {
+        return { status: 0, stderr: "", stdout: "MARKETPLACE ROOT\nopenai-bundled C:\\openai\n" };
+      }
+      if (command === "plugin list") {
+        return {
+          status: 0,
+          stderr: "",
+          stdout: "PLUGIN STATUS VERSION PATH\ncodex-ilink-probe@codex-ilink not installed\n",
+        };
+      }
+      return { status: 0, stderr: "", stdout: "" };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["plugin", "marketplace", "list"],
+    ["plugin", "marketplace", "add", "C:\\npm\\node_modules\\codex-ilink"],
+    ["plugin", "list"],
+    ["plugin", "add", "codex-ilink-probe@codex-ilink"],
+  ]);
+});
+
+test("setup replaces a Codex iLink marketplace that points to an older installation", async () => {
+  const calls: string[][] = [];
+  await configureCodexPlugin({
+    packageRoot: "C:\\npm\\node_modules\\codex-ilink",
+    pluginVersion: "0.1.3+codex.20260716141315",
+    runCodex: (args) => {
+      calls.push([...args]);
+      const command = args.join(" ");
+      if (command === "plugin marketplace list") {
+        return {
+          status: 0,
+          stderr: "",
+          stdout: "MARKETPLACE ROOT\ncodex-ilink D:\\old\\codex-ilink\n",
+        };
+      }
+      if (command === "plugin list") {
+        return {
+          status: 0,
+          stderr: "",
+          stdout:
+            "PLUGIN STATUS VERSION PATH\n" +
+            "codex-ilink-probe@codex-ilink installed, enabled 0.1.2 D:\\old\\plugin\n",
+        };
+      }
+      return { status: 0, stderr: "", stdout: "" };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["plugin", "marketplace", "list"],
+    ["plugin", "list"],
+    ["plugin", "remove", "codex-ilink-probe@codex-ilink"],
+    ["plugin", "marketplace", "remove", "codex-ilink"],
+    ["plugin", "marketplace", "add", "C:\\npm\\node_modules\\codex-ilink"],
+    ["plugin", "add", "codex-ilink-probe@codex-ilink"],
+  ]);
+});
+
+test("setup refreshes an older Guard plugin from the current npm package", async () => {
+  const calls: string[][] = [];
+  await configureCodexPlugin({
+    packageRoot: "C:\\npm\\node_modules\\codex-ilink",
+    pluginVersion: "0.1.3+codex.20260716141315",
+    runCodex: (args) => {
+      calls.push([...args]);
+      const command = args.join(" ");
+      if (command === "plugin marketplace list") {
+        return {
+          status: 0,
+          stderr: "",
+          stdout: "MARKETPLACE ROOT\ncodex-ilink C:\\npm\\node_modules\\codex-ilink\n",
+        };
+      }
+      if (command === "plugin list") {
+        return {
+          status: 0,
+          stderr: "",
+          stdout:
+            "PLUGIN STATUS VERSION PATH\n" +
+            "codex-ilink-probe@codex-ilink installed, enabled 0.1.2 D:\\old\\plugin\n",
+        };
+      }
+      return { status: 0, stderr: "", stdout: "" };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["plugin", "marketplace", "list"],
+    ["plugin", "list"],
+    ["plugin", "remove", "codex-ilink-probe@codex-ilink"],
+    ["plugin", "add", "codex-ilink-probe@codex-ilink"],
+  ]);
+});
+
 test("published package exposes a runnable ilink executable", () => {
   const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
     bin?: Record<string, string>;
@@ -120,6 +274,7 @@ test("published package exposes a runnable ilink executable", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, "");
   assert.match(result.stdout, /用法: ilink <command>/u);
+  assert.match(result.stdout, /setup\s+完成插件安装/u);
 });
 
 test("ilink config shows the default session and away timeouts", (t) => {

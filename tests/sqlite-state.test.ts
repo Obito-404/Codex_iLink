@@ -1235,6 +1235,37 @@ test("iLink session persists only the caller-protected token for the controller"
   }
 });
 
+test("an invalid iLink session can be cleared without changing the controller", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-"));
+  const state = new SqliteState(join(directory, "state.db"));
+
+  try {
+    state.bindController({
+      accountId: "bot-id",
+      boundAtMs: 400,
+      userId: "wechat-user",
+    });
+    state.saveILinkSession({
+      baseUrl: "https://ilink.example.test",
+      botId: "bot-id",
+      controllerUserId: "wechat-user",
+      protectedToken: "invalid-protected-token",
+    });
+
+    state.clearILinkSession();
+
+    assert.equal(state.getILinkSession(), null);
+    assert.deepEqual(state.getController(), {
+      accountId: "bot-id",
+      boundAtMs: 400,
+      userId: "wechat-user",
+    });
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("main thread, project selection, and explicit navigation state persist", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-"));
   const path = join(directory, "state.db");

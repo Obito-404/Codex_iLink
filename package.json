@@ -38,7 +38,7 @@
     "win32"
   ],
   "engines": {
-    "node": ">=24"
+    "node": ">=24 <25"
   },
   "packageManager": "pnpm@11.7.0",
   "scripts": {

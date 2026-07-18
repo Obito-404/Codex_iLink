@@ -13,6 +13,9 @@ if (packageJson.version === "0.0.0") {
 if (packageJson.bin?.ilink !== "./dist/cli/ilink.js") {
   errors.push("bin.ilink 必须指向 ./dist/cli/ilink.js");
 }
+if (packageJson.engines?.node !== ">=24 <25") {
+  errors.push("engines.node 必须限定为已经完整验证的 Node.js 24.x");
+}
 if (!packageJson.author) {
   errors.push("缺少 author；请填写 npm 发布者或组织");
 }

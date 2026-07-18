@@ -71,10 +71,7 @@ npm install --global --prefix $smoke .\codex-ilink-0.1.0-beta.1.tgz
 还应在一台干净 Windows 环境验证：
 
 ```powershell
-$packageRoot = Join-Path $smoke "node_modules\codex-ilink"
-codex plugin marketplace add $packageRoot
-codex plugin add codex-ilink-probe@codex-ilink
-& "$smoke\ilink.cmd" doctor
+& "$smoke\ilink.cmd" setup
 ```
 
 验收完成后移除测试插件与 marketplace，避免影响日常 Codex 配置。
@@ -89,8 +86,8 @@ npm view codex-ilink version dist-tags --registry=https://registry.npmjs.org/
 随后从 npm 官方源重新安装验证：
 
 ```powershell
-npm install --global codex-ilink@next
-ilink --help
+npm install --global codex-ilink@next --registry=https://registry.npmjs.org/
+ilink setup
 ```
 
 ## 7. 发布稳定版

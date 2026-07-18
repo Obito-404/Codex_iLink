@@ -1767,6 +1767,10 @@ export class SqliteState {
       );
   }
 
+  clearILinkSession(): void {
+    this.#database.prepare("DELETE FROM ilink_session WHERE singleton = 1").run();
+  }
+
   getILinkSession(): ILinkSession | null {
     const row = this.#database
       .prepare(

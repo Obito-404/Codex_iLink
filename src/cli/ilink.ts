@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
   closeSync,
   mkdirSync,
   openSync,
+  readFileSync,
   realpathSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -39,6 +40,7 @@ const STATUS_RETRY_MS = 100;
 export const CLI_HELP = `用法: ilink <command>
 
   config  查看或修改超时配置
+  setup   完成插件安装、微信绑定并启动 Bridge
   login   扫码绑定唯一微信用户
   start   在后台启动微信 Bridge
   status  查看 Bridge 状态
@@ -54,10 +56,134 @@ export type CliCommands = {
   config(args: readonly string[]): Promise<number>;
   doctor(): Promise<number>;
   login(): Promise<number>;
+  setup(): Promise<number>;
   start(): Promise<number>;
   status(): Promise<number>;
   stop(): Promise<number>;
 };
+
+export type SetupActions = {
+  configurePlugin(): Promise<void>;
+  hasUsableSession(): boolean;
+  login(): Promise<number>;
+  start(): Promise<number>;
+};
+
+export type CodexCommandResult = {
+  status: number | null;
+  stderr: string;
+  stdout: string;
+};
+
+export type CodexCommandRunner = (
+  args: readonly string[],
+) => CodexCommandResult;
+
+export async function configureCodexPlugin(input: {
+  packageRoot: string;
+  pluginVersion: string;
+  runCodex: CodexCommandRunner;
+}): Promise<void> {
+  const marketplaces = input.runCodex(["plugin", "marketplace", "list"]);
+  requireCodexCommandSuccess(marketplaces, "读取 Codex Marketplace 失败");
+  const marketplaceRoot = codexILinkMarketplaceRoot(marketplaces.stdout);
+  if (marketplaceRoot && !sameRealPath(marketplaceRoot, input.packageRoot)) {
+    const plugins = input.runCodex(["plugin", "list"]);
+    requireCodexCommandSuccess(plugins, "读取 Codex 插件状态失败");
+    if (/^codex-ilink-probe@codex-ilink\s+installed,/mu.test(plugins.stdout)) {
+      requireCodexCommandSuccess(
+        input.runCodex(["plugin", "remove", "codex-ilink-probe@codex-ilink"]),
+        "移除旧 Codex iLink Guard 失败",
+      );
+    }
+    requireCodexCommandSuccess(
+      input.runCodex(["plugin", "marketplace", "remove", "codex-ilink"]),
+      "移除旧 Codex iLink Marketplace 失败",
+    );
+    requireCodexCommandSuccess(
+      input.runCodex(["plugin", "marketplace", "add", input.packageRoot]),
+      "添加 Codex iLink Marketplace 失败",
+    );
+    requireCodexCommandSuccess(
+      input.runCodex(["plugin", "add", "codex-ilink-probe@codex-ilink"]),
+      "安装 Codex iLink Guard 失败",
+    );
+    return;
+  }
+
+  if (!marketplaceRoot) {
+    requireCodexCommandSuccess(
+      input.runCodex(["plugin", "marketplace", "add", input.packageRoot]),
+      "添加 Codex iLink Marketplace 失败",
+    );
+  }
+
+  const plugins = input.runCodex(["plugin", "list"]);
+  requireCodexCommandSuccess(plugins, "读取 Codex 插件状态失败");
+  if (installedGuardVersion(plugins.stdout) !== input.pluginVersion) {
+    if (/^codex-ilink-probe@codex-ilink\s+installed,/mu.test(plugins.stdout)) {
+      requireCodexCommandSuccess(
+        input.runCodex(["plugin", "remove", "codex-ilink-probe@codex-ilink"]),
+        "移除旧 Codex iLink Guard 失败",
+      );
+    }
+    requireCodexCommandSuccess(
+      input.runCodex(["plugin", "add", "codex-ilink-probe@codex-ilink"]),
+      "安装 Codex iLink Guard 失败",
+    );
+  }
+}
+
+function installedGuardVersion(output: string): string | null {
+  for (const line of output.split(/\r?\n/u)) {
+    const match =
+      /^codex-ilink-probe@codex-ilink\s+installed,\s+enabled\s+(\S+)/u.exec(
+        line.trim(),
+      );
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
+function codexILinkMarketplaceRoot(output: string): string | null {
+  for (const line of output.split(/\r?\n/u)) {
+    const match = /^codex-ilink\s+(.+)$/u.exec(line.trim());
+    if (match?.[1]) return match[1].trim();
+  }
+  return null;
+}
+
+function requireCodexCommandSuccess(
+  result: CodexCommandResult,
+  summary: string,
+): void {
+  if (result.status === 0) return;
+  const detail = result.stderr.trim() || result.stdout.trim();
+  throw new Error(detail ? `${summary}：${detail}` : summary);
+}
+
+export async function runSetupInstallation(
+  io: CliIo,
+  actions: SetupActions,
+): Promise<number> {
+  io.log("[1/3] 正在安装 Codex iLink Guard…");
+  await actions.configurePlugin();
+
+  if (actions.hasUsableSession()) {
+    io.log("[2/3] 微信已绑定，跳过扫码。");
+  } else {
+    io.log("[2/3] 正在绑定微信…");
+    const loginCode = await actions.login();
+    if (loginCode !== 0) return loginCode;
+  }
+
+  io.log("[3/3] 正在启动 Bridge…");
+  const startCode = await actions.start();
+  if (startCode !== 0) return startCode;
+
+  io.log("安装完成。请刷新 Codex Desktop 并信任 Codex iLink Guard Hooks，然后即可在微信使用。");
+  return 0;
+}
 
 export async function runCli(
   argv: readonly string[],
@@ -80,6 +206,7 @@ export async function runCli(
   try {
     if (command === "config") return await commands.config(argv.slice(1));
     if (command === "login") return await commands.login();
+    if (command === "setup") return await commands.setup();
     if (command === "start") return await commands.start();
     if (command === "status") return await commands.status();
     if (command === "doctor") return await commands.doctor();
@@ -232,10 +359,84 @@ function productionCommands(io: CliIo): CliCommands {
     config: (args) => configCommand(io, args),
     doctor: () => doctorCommand(io),
     login: () => loginCommand(io),
+    setup: () => setupCommand(io),
     start: () => startCommand(io),
     status: () => statusCommand(io),
     stop: () => stopCommand(io),
   };
+}
+
+async function setupCommand(io: CliIo): Promise<number> {
+  assertWindows();
+  requireLocalAppData();
+  const packageRoot = installedPackageRoot();
+  const codexExecutable = findDesktopCodexExecutable();
+  const pluginVersion = installedPluginVersion(packageRoot);
+  return runSetupInstallation(io, {
+    configurePlugin: () =>
+      configureCodexPlugin({
+        packageRoot,
+        pluginVersion,
+        runCodex: (args) => runCodexCommand(codexExecutable, args),
+      }),
+    hasUsableSession: () => hasUsableILinkSession(),
+    login: () => loginCommand(io),
+    start: () => startCommand(io),
+  });
+}
+
+function installedPackageRoot(): string {
+  return realpathSync.native(fileURLToPath(new URL("../..", import.meta.url)));
+}
+
+function installedPluginVersion(packageRoot: string): string {
+  const manifestPath = join(
+    packageRoot,
+    "plugins",
+    "codex-ilink-probe",
+    ".codex-plugin",
+    "plugin.json",
+  );
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    version?: unknown;
+  };
+  if (typeof manifest.version !== "string" || !manifest.version) {
+    throw new Error("E_PLUGIN_VERSION_INVALID");
+  }
+  return manifest.version;
+}
+
+function runCodexCommand(
+  executable: string,
+  args: readonly string[],
+): CodexCommandResult {
+  const result = spawnSync(executable, [...args], {
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true,
+  });
+  return {
+    status: result.status,
+    stderr: result.error ? errorMessage(result.error) : (result.stderr ?? ""),
+    stdout: result.stdout ?? "",
+  };
+}
+
+function hasUsableILinkSession(): boolean {
+  const state = new SqliteState(runtimePaths().stateDatabasePath);
+  try {
+    const session = state.getILinkSession();
+    if (!session) return false;
+    try {
+      unprotectForCurrentUser(session.protectedToken);
+      return true;
+    } catch {
+      state.clearILinkSession();
+      return false;
+    }
+  } finally {
+    state.close();
+  }
 }
 
 async function configCommand(
@@ -565,17 +766,17 @@ function errorMessage(error: unknown): string {
 }
 
 const invokedPath = process.argv[1];
-if (invokedPath && sameExecutablePath(fileURLToPath(import.meta.url), invokedPath)) {
+if (invokedPath && sameRealPath(fileURLToPath(import.meta.url), invokedPath)) {
   process.exitCode = await runCli(process.argv.slice(2));
 }
 
-function sameExecutablePath(modulePath: string, invokedPath: string): boolean {
+function sameRealPath(leftPath: string, rightPath: string): boolean {
   try {
     return (
-      realpathSync.native(modulePath).toLowerCase() ===
-      realpathSync.native(invokedPath).toLowerCase()
+      realpathSync.native(leftPath).toLowerCase() ===
+      realpathSync.native(rightPath).toLowerCase()
     );
   } catch {
-    return modulePath.toLowerCase() === invokedPath.toLowerCase();
+    return leftPath.toLowerCase() === rightPath.toLowerCase();
   }
 }

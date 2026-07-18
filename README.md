@@ -1,237 +1,178 @@
 # Codex iLink
 
-把微信变成 Windows 本机 Codex 的轻量入口。微信与 Codex Desktop 使用同一份任务历史；Bridge 只负责控制路由、并发仲裁和可靠送达，不复制对话，也不创建第二个 Agent。
+把微信变成 Windows 本机 Codex 的远程入口。微信与 Codex Desktop 使用同一份任务历史，可以查看项目、进入任务、继续对话、切换模型与权限，以及收发图片和文件。
 
-> 当前为开发预览版。文本链路、共享任务、权限/模型控制和媒体收发已实现；真实微信媒体、离开状态通知与长期后台运行仍需最终验收。
+> 当前为开发预览版，仅支持 Windows。Bridge 只负责连接和路由，不复制 Codex 对话。
 
-## 核心能力
+## 安装并启动
 
-- 在微信查看项目、进入或新建 Codex 任务
-- 读取并更新当前共享任务的模型、推理强度和会话权限模式
-- 通过 Codex App Server 恢复同一 `thread_id`，Desktop 可继续查看和操作
-- 使用 SQLite 租约避免 Desktop 与微信同时写入同一任务
-- 入站图片、文件、视频和微信语音转写；出站本机附件
-- 同一任务 FIFO 串行、不同任务最多并行 3 个；消息去重、队列与回包均可恢复
-- DPAPI 加密凭证，只接受已绑定的单一微信控制者
-
-## 用户安装
-
-### 兼容性
+### 1. 准备环境
 
 | 项目 | 要求 |
 | --- | --- |
-| 操作系统 | Windows |
-| Node.js | 24 或更高版本 |
-| Codex | 已登录 Codex Desktop，且 PowerShell 可运行 `codex --version` |
-| Shell | PowerShell |
+| 系统 | Windows 10/11 |
+| Node.js | 24.x |
+| Codex | 已安装并登录 Codex Desktop |
+| 终端 | PowerShell |
 
-如果没有 `codex` 命令，先按官方方式安装：
-
-```powershell
-npm install --global @openai/codex
-```
-
-### 本地预览安装
-
-本地源码安装额外需要 pnpm 11.7。
-
-1. 在 GitHub 页面选择 **Code → Download ZIP**，解压到一个长期保留的目录。
-2. 在该目录打开 PowerShell，依次执行：
+先确认 Node.js 版本：
 
 ```powershell
-pnpm install --frozen-lockfile
-pnpm build
-npm install --global .
-codex plugin marketplace add .
-codex plugin add codex-ilink-probe@codex-ilink
-ilink doctor
-ilink login
-ilink start
+node --version
+npm --version
 ```
 
-扫码绑定后，向机器人发送“查看项目”或 `p` 即可开始。插件安装或升级后，需要刷新 Codex Desktop，并审核、信任 `Codex iLink Guard` Hooks。
+`node --version` 必须显示 `v24.x`。没有 Node.js 时，请从 [Node.js 官网](https://nodejs.org/) 安装 24 LTS。
+
+### 2. 从 npm 安装
+
+首个公开预览版使用 `next` 标签：
 
 ```powershell
-ilink status   # 查看运行状态
-ilink stop     # 停止后台 Bridge
-ilink start    # 再次启动
+npm install --global codex-ilink@next --registry=https://registry.npmjs.org/
+ilink setup
 ```
 
-上面的本地全局安装会让 `ilink` 和插件引用解压目录，请勿移动或删除它。
+`ilink setup` 会自动完成：
 
-### npm 安装
+1. 安装或更新 `Codex iLink Guard` 插件。
+2. 打开微信二维码并等待扫码绑定。
+3. 启动后台 Bridge。
 
-首个公开版本将先使用 `next` 标签发布。npm 页面确认已经存在该版本后，再执行：
+安装完成后，刷新或重启 Codex Desktop，在信任页面审核并允许 `Codex iLink Guard` Hooks。
+
+### 3. 开始使用
+
+向已绑定的微信机器人发送：
+
+```text
+查看项目
+```
+
+也可以发送短命令 `p`。收到项目列表后即可选择项目和任务。
+
+## 常用管理命令
 
 ```powershell
-npm install --global codex-ilink@next
-$packageRoot = Join-Path (npm root --global) "codex-ilink"
-codex plugin marketplace add $packageRoot
-codex plugin add codex-ilink-probe@codex-ilink
-ilink doctor
-ilink login
-ilink start
+ilink setup    # 首次安装或修复配置
+ilink status   # 查看 Bridge 状态
+ilink doctor   # 检查环境、绑定和状态库
+ilink stop     # 停止 Bridge
+ilink start    # 启动 Bridge
+ilink config   # 查看超时配置
 ```
 
-请先在 npm 官方页面确认版本存在，并只从 npm 官方 Registry 安装。
+Bridge 在当前 Windows 用户会话中后台运行，日志位于：
 
-早期本地预览版曾使用 marketplace 名称 `personal`。升级前先执行
-`codex plugin remove codex-ilink-probe@personal`；再用
-`codex plugin marketplace list` 确认 `personal` 是否只属于本项目。只有确认没有承载其他插件时，才移除该 marketplace，避免误删用户自己的配置。
+```text
+%LOCALAPPDATA%\Codex_iLink\logs\bridge.log
+```
 
-### 升级与卸载
+当前版本不会自动设置开机启动。
 
-升级预览版：
+## 升级
 
 ```powershell
 ilink stop
-npm install --global codex-ilink@next
-codex plugin remove codex-ilink-probe@codex-ilink
-codex plugin add codex-ilink-probe@codex-ilink
-ilink doctor
-ilink start
+npm install --global codex-ilink@next --registry=https://registry.npmjs.org/
+ilink setup
 ```
 
-卸载程序和插件：
+升级或插件发生变化后，需要刷新 Codex Desktop，并重新审核 Hooks。
+
+## 微信命令
+
+微信支持自然语言，也支持以下短命令：
+
+| 功能 | 命令 | 示例 |
+| --- | --- | --- |
+| 项目 | `p`、`p<n>` | `p`、`p2` |
+| 任务 | `s`、`s+`、`sarc`、`s<n>` | `s`、`s3` |
+| 新建/清理 | `new`、`clear`、`compact` | `new` |
+| 停止/退出 | `stop`、`exit` | `stop` |
+| 状态 | `st` | `st` |
+| 权限 | `perm`、`perm<n>` | `perm2` |
+| 模型 | `model`、`model<n>`、`model:<id>` | `model2` |
+| 推理强度 | `effort`、`effort:<level>` | `effort:high` |
+| 审批 | `ok[code]`、`no[code]` | `okA7C9E2` |
+| 帮助 | `help` | `help` |
+
+短命令不带 `/`，命令和编号之间不加空格。
+
+## 超时配置
+
+默认会话绑定保持 30 分钟，未锁屏时连续 5 分钟没有键鼠输入会判定为离开：
 
 ```powershell
-ilink stop
-codex plugin remove codex-ilink-probe@codex-ilink
-codex plugin marketplace remove codex-ilink
-npm uninstall --global codex-ilink
-```
-
-卸载不会自动删除 `%LOCALAPPDATA%\Codex_iLink` 中的绑定、状态和日志。确认不再需要后再手动清理该目录。
-
-### 源码开发
-
-额外要求：pnpm 11.7。
-
-```powershell
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm test
-pnpm ilink doctor
-```
-
-Bridge 在当前 Windows 用户会话中后台运行，日志位于 `%LOCALAPPDATA%\Codex_iLink\logs\bridge.log`。当前版本不会自动注册开机启动。
-
-### 超时配置
-
-默认会话绑定超时为 30 分钟，未锁屏时连续 5 分钟无键鼠输入会判定为离开。可在 Bridge 运行时修改，设置会立即生效：
-
-```powershell
-ilink config
 ilink config set session-timeout 60m
 ilink config set away-timeout 10m
 ilink config reset
 ```
 
-会话绑定范围为 5～1440 分钟，离开判定范围为 1～60 分钟。锁屏一经检测会立即判定离开，不受 `away-timeout` 影响。会话绑定超时或主动 `exit` 只改变后续消息路由，原会话和运行中的任务仍会保留；Bridge 会向微信发送一次明确提醒。
+锁屏会立即判定为离开，不受 `away-timeout` 影响。
 
-### 常见排查
+## 常见问题
+
+### `ilink` 命令不存在
+
+关闭并重新打开 PowerShell，然后检查：
 
 ```powershell
-node --version
-codex --version
-codex plugin list
+npm root --global
+ilink --help
+```
+
+### Bridge 无法启动
+
+```powershell
 ilink doctor
 ilink status
 ```
 
-优先查看 `ilink doctor` 的稳定错误码和 `%LOCALAPPDATA%\Codex_iLink\logs\bridge.log`。插件安装或升级后需要刷新 Codex Desktop，并重新审核 Hooks；不要把 npm 密码、OTP、恢复码或本机凭证发到聊天中。
+然后查看 `%LOCALAPPDATA%\Codex_iLink\logs\bridge.log`。
 
-## 微信控制
+### 微信消息无法进入 Codex
 
-| 功能 | 短命令 | 自然语言示例 |
-| --- | --- | --- |
-| 项目 | `p`、`p<n>` | “查看项目”“切换到第二个项目” |
-| 任务 | `s`、`s+`、`sarc`、`s<n>` | “最近任务”“打开第 3 个会话” |
-| 新建/清理 | `new`、`clear`、`compact` | “新建任务”“清空上下文”“压缩上下文” |
-| 停止/退出 | `stop`、`exit` | “停止当前微信回合”“返回主会话” |
-| 状态 | `st` | “查看当前状态” |
-| 权限 | `perm`、`perm<n>` | “查看权限”“切换到第三个权限” |
-| 模型 | `model`、`model<n>`、`model:<id>` | “把当前任务模型换成 Sol” |
-| 推理强度 | `effort`、`effort<n>`、`effort:<level>` | “推理强度调到 xhigh” |
-| 审批 | `ok[code]`、`no[code]` | “批准当前审批”“拒绝审批 A7C9E2” |
-| 帮助 | `help` | “查看命令列表” |
-
-短命令不带 `/`，也不在命令和编号之间加空格。`p<n>`、`s<n>` 没有有效列表快照时，会按当前项目列表或当前项目第一页解释；显式列表产生的编号固定 10 分钟，进入任务后的绑定按 `session-timeout` 滑动保持，默认 30 分钟。
-
-一条消息可包含最多 4 个明确控制动作，例如“返回主会话，然后查看状态”。Bridge 按原顺序执行、遇到失败立即停止，并只发送一条汇总回复。
-
-### 权限与审批
-
-`perm` 展示 Codex 当前实际返回的 Profile、审批策略、审批人和 Sandbox；`perm<n>` 只修改当前共享任务，不影响其他任务或全局默认值。三个内置模式采用固定组合：
-
-| 模式 | Profile | 审批策略 | 审批人 |
-| --- | --- | --- | --- |
-| 只读 | `:read-only` | `on-request` | `user` |
-| 工作区（推荐） | `:workspace` | `on-request` | `user` |
-| 完全访问 | `:danger-full-access` | `never` | `user` |
-
-完全访问在控制者明确选择后直接生效，不再逐项请求审批。自定义 Profile 只转交 Profile ID，不由 Bridge 猜测或改写其审批策略。Bridge 会保存用户明确选择的会话级组合，并在 App Server 重连时恢复；从旧版本迁移的记录没有审批策略字段，因此只恢复原 Profile，不会自动扩展为 `never`。
-
-需要用户处理的 Bridge 审批会立即发送微信；发送失败会使用同一事件标识退避重试，等待 60 秒和 5 分钟仍未处理时分别提醒一次，30 分钟后自动拒绝。`st` 可查看微信接口接收/重试状态、发送次数、提醒次数和最短剩余时间。这里的“微信接口已接收”只表示接口确认接收，不代表用户已经阅读。
-
-### 混合路由
-
-1. 精确短命令直接执行。
-2. 明确且无歧义的中文由本地规则解析。
-3. 仍疑似控制请求的文本交给独立、临时的 Codex 工具回合分类。
-4. 只有通过白名单校验的结构化 Intent 才执行；其余文本进入原业务任务。
-
-分类回合不读取或写入业务任务历史，控制 Prompt 也不会注入 Desktop 的共享任务。项目约定仍应放在官方支持的 `AGENTS.md`；全局默认值和 MCP 等持久设置仍由 `config.toml` 管理，只有控制者明确执行 `model`、`effort` 或 `perm` 时，Bridge 才修改当前共享任务的对应会话级设置。
-
-## 架构与流程
-
-### 系统架构
-
-![Codex iLink 系统架构](./docs/assets/codex-ilink-architecture.svg)
-
-Codex 持久化任务是唯一历史事实源。微信与 Desktop 使用同一个 `thread_id` 继续任务；Bridge 只承担传输、路由、并发仲裁和可靠送达。
-
-### 消息调度
-
-![Codex iLink 消息调度流程](./docs/assets/codex-ilink-message-flow.svg)
-
-同一 `thread_id` 一次只运行一个回合，后续消息进入持久 FIFO 队列；不同任务可以并行，Bridge 全局最多同时执行 3 个微信回合。切换会话只改变后续消息的目标，不影响已经运行或排队的任务。
-
-图表由 [Archify](https://github.com/tt-a1i/archify) 生成，支持深浅色主题；可交互版本和源文件位于 [`docs/diagrams`](./docs/diagrams)。
-
-## 行为边界
-
-- `stop` 只中断当前会话中由微信发起的活动回合；Desktop 发起的回合需在 Desktop 停止。
-- `exit` 返回持久化的微信主任务，不重建任务，也不改写模型和权限。
-- `model`、`effort` 和 `perm` 修改当前共享任务，Desktop 中同一任务同步生效；`perm` 对内置模式同时设置 Profile、审批策略和审批人，不会修改其他任务或全局默认值。
-- `clear` 新建空白任务，原历史仍可通过 `s` 找回；`compact` 使用 Codex 原生上下文压缩。
-- SQLite 只保存路由、租约、送达状态和用户明确选择的会话设置，不保存完整对话；Codex 持久化任务是事实源。
-- 项目列表只读取 Codex Desktop 已保存工作区，不扫描全部历史目录。
-
-## 媒体
-
-- 图片下载解密后作为 App Server `localImage` 输入。
-- 文件和视频作为本地 `mention` 及明确路径提交，仍受任务 Sandbox 与审批策略约束。
-- 有微信转写的语音按文本提交；没有转写时明确拒绝，不伪装成本地语音识别。
-- 新任务通过 `send_file(path)` 发送本机图片、视频或普通附件；单文件不超过 100 MiB，单次最多 2 个。
-
-媒体协议以腾讯官方 [`Tencent/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) `v2.4.6` 的固定提交 [`cef0bfc`](https://github.com/Tencent/openclaw-weixin/commit/cef0bfc390393f716903e16d50408118047f87e0) 为基线。
-
-## 设计依据
-
-- [Codex App Server](https://learn.chatgpt.com/docs/app-server.md)：官方面向深度集成的本地接口，提供任务历史、审批和流式事件。
-- [AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md)：仓库内持久指令的官方入口。
-- [Codex configuration](https://learn.chatgpt.com/docs/config-file/config-basic)：CLI、IDE 与 Desktop 共享的配置层。
-
-详细实现、失败语义与验证证据见 [SPEC.md](./SPEC.md)、[可行性说明](./docs/feasibility.md) 和 [ADR](./docs/adr)。
-
-## 开发验证
+刷新或重启 Codex Desktop，确认 `Codex iLink Guard` 已安装并启用，并在信任页面允许其 Hooks。随后重新执行：
 
 ```powershell
+ilink setup
+```
+
+### Node.js 版本不兼容
+
+本项目要求 Node.js 24.x。Node.js 22 的 SQLite 仍会产生实验性警告，且没有通过本项目完整测试。
+
+## 卸载
+
+先在 Codex Desktop 的插件管理中移除 `Codex iLink Guard` 和 `codex-ilink` Marketplace，然后执行：
+
+```powershell
+ilink stop
+npm uninstall --global codex-ilink
+```
+
+卸载不会自动删除 `%LOCALAPPDATA%\Codex_iLink` 中的绑定、状态和日志。
+
+## 安全与隐私
+
+- 只接受扫码绑定的单一微信控制者。
+- 微信凭证使用当前 Windows 用户的 DPAPI 加密。
+- Codex 持久化任务是唯一对话事实源，Bridge 不保存完整聊天历史。
+- 不要向他人发送 npm 密码、OTP、恢复码或本机凭证。
+
+## 源码开发
+
+源码开发需要 Node.js 24.x 和 pnpm 11.7：
+
+```powershell
+git clone https://github.com/Obito-404/Codex_iLink.git
+cd Codex_iLink
+pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
 ```
 
-`pnpm probe:lease` 与 `pnpm probe:resume` 会创建真实 Codex 任务并产生模型用量，不属于普通安装流程。
+实现细节与发布流程见 [SPEC](./SPEC.md)、[ADR](./docs/adr)、[可行性说明](./docs/feasibility.md) 和 [npm 发布流程](./docs/npm-publishing.md)。
 
-npm 维护者流程、首次发布的人工作业和 tarball 验收步骤见 [npm 发布流程](./docs/npm-publishing.md)。本项目采用 [MIT License](./LICENSE)。
+本项目采用 [MIT License](./LICENSE)。

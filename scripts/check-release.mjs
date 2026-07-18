@@ -10,11 +10,11 @@ if (packageJson.private === true) {
 if (packageJson.version === "0.0.0") {
   errors.push("必须设置正式或预览版本号");
 }
-if (packageJson.bin?.ilink !== "./dist/cli/ilink.js") {
-  errors.push("bin.ilink 必须指向 ./dist/cli/ilink.js");
+if (packageJson.bin?.ilink !== "./dist/cli/launcher.js") {
+  errors.push("bin.ilink 必须指向 ./dist/cli/launcher.js");
 }
-if (packageJson.engines?.node !== ">=24 <25") {
-  errors.push("engines.node 必须限定为已经完整验证的 Node.js 24.x");
+if (packageJson.engines?.node !== ">=22.13.0") {
+  errors.push("engines.node 必须包含已完整验证的 Node.js 22 LTS");
 }
 if (!packageJson.author) {
   errors.push("缺少 author；请填写 npm 发布者或组织");

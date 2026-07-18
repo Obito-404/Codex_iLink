@@ -41,8 +41,14 @@ test("UserPromptSubmit emits telemetry only after the guard decides to fail open
     (group) => group.hooks ?? [],
   );
   assert.equal(commands.length, 1);
-  assert.match(commands[0]?.command ?? "", /turn-lifecycle-hook\.mjs/u);
-  assert.match(commands[0]?.commandWindows ?? "", /turn-lifecycle-hook\.mjs/u);
+  assert.equal(
+    commands[0]?.command,
+    "ilink __hook turn UserPromptSubmit",
+  );
+  assert.equal(
+    commands[0]?.commandWindows,
+    "ilink __hook turn UserPromptSubmit",
+  );
 });
 
 test("Desktop Stop is reconciled only after the exact turn is terminal", () => {

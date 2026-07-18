@@ -663,7 +663,8 @@ function requestLifetime(
       timedOut = true;
       controller.abort(new DOMException("Timed out", "TimeoutError"));
     }, timeoutMs);
-    timeout.unref();
+    // The request promise depends on this timer firing, so it must keep the
+    // process alive until the request progresses, completes, or times out.
   };
   if (externalSignal?.aborted) {
     onAbort();

@@ -6,30 +6,49 @@
 
 ## 安装并启动
 
-### 1. 准备环境
+只需满足以下公共要求：
 
 | 项目 | 要求 |
 | --- | --- |
 | 系统 | Windows 10/11 |
-| Node.js | 24.x |
 | Codex | 已安装并登录 Codex Desktop |
 | 终端 | PowerShell |
 
-先确认 Node.js 版本：
+安装方式任选一种即可。
+
+### 方式一：PowerShell 安装（推荐，无需 Node.js）
+
+与 Codex CLI 的安装方式相同，一条命令下载最新 GitHub Release、校验 SHA-256，并安装为当前用户命令：
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Obito-404/Codex_iLink/main/scripts/install.ps1 | iex"
+```
+
+安装脚本会把独立的 `ilink.exe` 放入 `%LOCALAPPDATA%\Programs\Codex-iLink` 并加入用户 `PATH`。该版本自带 Node.js 运行时，用户电脑不需要安装 Node.js 或 pnpm。
+
+### 方式二：npm 安装
+
+已经安装 Node.js 22 的用户可以使用标准 npm 全局安装：
 
 ```powershell
 node --version
-npm --version
+npm install --global codex-ilink
+ilink setup
 ```
 
-`node --version` 必须显示 `v24.x`。没有 Node.js 时，请从 [Node.js 官网](https://nodejs.org/) 安装 24 LTS。
+npm 版本要求 Node.js `>=22.13.0`，支持 Node.js 22 LTS 系列，不要求 Node.js 24。预览版本可使用 `npm install --global codex-ilink@next`。
 
-### 2. 从 npm 安装
+### 方式三：GitHub Release
 
-首个公开预览版使用 `next` 标签：
+也可以从项目的 [GitHub Releases](https://github.com/Obito-404/Codex_iLink/releases) 手动下载：
+
+1. 下载 `codex-ilink-x86_64-pc-windows-msvc.exe` 和对应的 `.sha256` 文件。
+2. 校验 SHA-256 后把程序重命名为 `ilink.exe`。
+3. 将其放入一个已加入 `PATH` 的目录。
+
+然后运行：
 
 ```powershell
-npm install --global codex-ilink@next --registry=https://registry.npmjs.org/
 ilink setup
 ```
 
@@ -41,7 +60,7 @@ ilink setup
 
 安装完成后，刷新或重启 Codex Desktop，在信任页面审核并允许 `Codex iLink Guard` Hooks。
 
-### 3. 开始使用
+### 开始使用
 
 向已绑定的微信机器人发送：
 
@@ -72,9 +91,18 @@ Bridge 在当前 Windows 用户会话中后台运行，日志位于：
 
 ## 升级
 
+PowerShell / 独立版直接重新运行安装命令：
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Obito-404/Codex_iLink/main/scripts/install.ps1 | iex"
+ilink setup
+```
+
+npm 版本使用：
+
 ```powershell
 ilink stop
-npm install --global codex-ilink@next --registry=https://registry.npmjs.org/
+npm install --global codex-ilink@latest
 ilink setup
 ```
 
@@ -118,9 +146,11 @@ ilink config reset
 关闭并重新打开 PowerShell，然后检查：
 
 ```powershell
-npm root --global
+Get-Command ilink
 ilink --help
 ```
+
+如果刚运行过 PowerShell 安装脚本，请重新打开终端，让新的用户 `PATH` 生效。
 
 ### Bridge 无法启动
 
@@ -141,16 +171,27 @@ ilink setup
 
 ### Node.js 版本不兼容
 
-本项目要求 Node.js 24.x。Node.js 22 的 SQLite 仍会产生实验性警告，且没有通过本项目完整测试。
+npm 安装要求 Node.js `>=22.13.0`，并已在 Node.js 22 上通过完整测试。PowerShell 安装和 GitHub Release 独立版自带运行时，不受用户电脑 Node.js 版本影响。
 
 ## 卸载
 
-先在 Codex Desktop 的插件管理中移除 `Codex iLink Guard` 和 `codex-ilink` Marketplace，然后执行：
+先在 Codex Desktop 的插件管理中移除 `Codex iLink Guard` 和 `codex-ilink` Marketplace。
+
+npm 安装的版本执行：
 
 ```powershell
 ilink stop
 npm uninstall --global codex-ilink
 ```
+
+独立版执行：
+
+```powershell
+ilink stop
+Remove-Item -LiteralPath "$env:LOCALAPPDATA\Programs\Codex-iLink" -Recurse -Force
+```
+
+然后从当前用户的 `PATH` 中移除 `%LOCALAPPDATA%\Programs\Codex-iLink`。
 
 卸载不会自动删除 `%LOCALAPPDATA%\Codex_iLink` 中的绑定、状态和日志。
 
@@ -163,16 +204,19 @@ npm uninstall --global codex-ilink
 
 ## 源码开发
 
-源码开发需要 Node.js 24.x 和 pnpm 11.7：
+源码开发最低需要 Node.js 22.13，CI 与独立版发布固定使用 Node.js 22.23.1 和 pnpm 11.7：
 
 ```powershell
 git clone https://github.com/Obito-404/Codex_iLink.git
 cd Codex_iLink
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm test
+corepack pnpm install --frozen-lockfile
+npm run typecheck
+npm test
+npm run build:sea
 ```
 
-实现细节与发布流程见 [SPEC](./SPEC.md)、[ADR](./docs/adr)、[可行性说明](./docs/feasibility.md) 和 [npm 发布流程](./docs/npm-publishing.md)。
+`build:sea` 仅在 Windows x64 上构建，并在 `artifacts/` 生成独立 exe 与 SHA-256 文件。
+
+实现细节与发布流程见 [SPEC](./SPEC.md)、[ADR](./docs/adr)、[可行性说明](./docs/feasibility.md) 和 [发布与分发流程](./docs/npm-publishing.md)。
 
 本项目采用 [MIT License](./LICENSE)。

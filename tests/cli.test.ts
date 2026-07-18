@@ -265,8 +265,8 @@ test("published package exposes a runnable ilink executable", () => {
     scripts?: Record<string, string>;
   };
 
-  assert.equal(packageJson.bin?.ilink, "./dist/cli/ilink.js");
-  assert.match(packageJson.scripts?.ilink ?? "", /src\/cli\/ilink\.ts/u);
+  assert.equal(packageJson.bin?.ilink, "./dist/cli/launcher.js");
+  assert.match(packageJson.scripts?.ilink ?? "", /src\/cli\/main\.ts/u);
 
   const result = spawnSync(process.execPath, [packageJson.bin.ilink], {
     encoding: "utf8",
@@ -281,7 +281,7 @@ test("ilink config shows the default session and away timeouts", (t) => {
   const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-"));
   t.after(() => rmSync(localAppData, { force: true, recursive: true }));
 
-  const result = spawnSync(process.execPath, ["dist/cli/ilink.js", "config"], {
+  const result = spawnSync(process.execPath, ["dist/cli/main.js", "config"], {
     encoding: "utf8",
     env: { ...process.env, LOCALAPPDATA: localAppData },
   });
@@ -296,7 +296,7 @@ test("ilink config set persists timing settings across CLI processes", (t) => {
   const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-set-"));
   t.after(() => rmSync(localAppData, { force: true, recursive: true }));
   const run = (...args: string[]) =>
-    spawnSync(process.execPath, ["dist/cli/ilink.js", "config", ...args], {
+    spawnSync(process.execPath, ["dist/cli/main.js", "config", ...args], {
       encoding: "utf8",
       env: { ...process.env, LOCALAPPDATA: localAppData },
     });
@@ -319,7 +319,7 @@ test("ilink config reset restores safe defaults", (t) => {
   const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-reset-"));
   t.after(() => rmSync(localAppData, { force: true, recursive: true }));
   const run = (...args: string[]) =>
-    spawnSync(process.execPath, ["dist/cli/ilink.js", "config", ...args], {
+    spawnSync(process.execPath, ["dist/cli/main.js", "config", ...args], {
       encoding: "utf8",
       env: { ...process.env, LOCALAPPDATA: localAppData },
     });
@@ -339,7 +339,7 @@ test("ilink config rejects unsafe timeout values without changing settings", (t)
   const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-range-"));
   t.after(() => rmSync(localAppData, { force: true, recursive: true }));
   const run = (...args: string[]) =>
-    spawnSync(process.execPath, ["dist/cli/ilink.js", "config", ...args], {
+    spawnSync(process.execPath, ["dist/cli/main.js", "config", ...args], {
       encoding: "utf8",
       env: { ...process.env, LOCALAPPDATA: localAppData },
     });

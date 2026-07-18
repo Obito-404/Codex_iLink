@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
   closeSync,
@@ -8,8 +6,8 @@ import {
   readFileSync,
   realpathSync,
 } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { SqliteState } from "../bridge/sqlite-state.ts";
 import {
@@ -19,6 +17,11 @@ import {
   SESSION_TIMEOUT_MINUTES_RANGE,
 } from "../domain/user-settings.ts";
 import { ILinkClient } from "../ilink/ilink-client.ts";
+import {
+  isStandaloneExecutable,
+  runtimeEntrypoint,
+  runtimePackageRoot,
+} from "../runtime/package-assets.ts";
 import {
   protectForCurrentUser,
   unprotectForCurrentUser,
@@ -199,7 +202,7 @@ export async function runCli(
     io.log(CLI_HELP);
     return 0;
   }
-  if (command !== "config" && argv.length !== 1) {
+  if (command !== "config" && command !== "__hook" && argv.length !== 1) {
     io.error(`参数过多。\n${CLI_HELP}`);
     return 2;
   }
@@ -212,6 +215,7 @@ export async function runCli(
     if (command === "doctor") return await commands.doctor();
     if (command === "stop") return await commands.stop();
     if (command === "__run") return await runDaemonProcess(io);
+    if (command === "__hook") return await runInternalHook(argv.slice(1));
   } catch (error) {
     io.error(errorMessage(error));
     return 1;
@@ -386,7 +390,7 @@ async function setupCommand(io: CliIo): Promise<number> {
 }
 
 function installedPackageRoot(): string {
-  return realpathSync.native(fileURLToPath(new URL("../..", import.meta.url)));
+  return runtimePackageRoot();
 }
 
 function installedPluginVersion(packageRoot: string): string {
@@ -560,9 +564,10 @@ async function startCommand(io: CliIo): Promise<number> {
   const log = openSync(logPath, "a");
   let child: ChildProcess;
   try {
+    const launch = daemonLaunch();
     child = spawn(
-      process.execPath,
-      ["--experimental-strip-types", fileURLToPath(import.meta.url), "__run"],
+      launch.executable,
+      launch.args,
       {
         detached: true,
         env: process.env,
@@ -590,6 +595,52 @@ async function startCommand(io: CliIo): Promise<number> {
   }
   io.log(`Bridge 已启动：PID ${status.pid}`);
   return 0;
+}
+
+function daemonLaunch(): { args: string[]; executable: string } {
+  return isStandaloneExecutable()
+    ? { args: ["__run"], executable: process.execPath }
+    : {
+        args: [
+          "--disable-warning=ExperimentalWarning",
+          runtimeEntrypoint(),
+          "__run",
+        ],
+        executable: process.execPath,
+      };
+}
+
+async function runInternalHook(argv: readonly string[]): Promise<number> {
+  const kind = argv[0];
+  const script =
+    kind === "lifecycle"
+      ? "lifecycle-notify.mjs"
+      : kind === "turn"
+        ? "turn-lifecycle-hook.mjs"
+        : null;
+  if (!script) return 2;
+
+  const previousEvent = process.env.CODEX_ILINK_HOOK_EVENT;
+  if (kind === "turn" && argv[1]) {
+    process.env.CODEX_ILINK_HOOK_EVENT = argv[1];
+  }
+  try {
+    const scriptPath = join(
+      runtimePackageRoot(),
+      "plugins",
+      "codex-ilink-probe",
+      "scripts",
+      script,
+    );
+    await import(pathToFileURL(scriptPath).href);
+    return 0;
+  } finally {
+    if (previousEvent === undefined) {
+      delete process.env.CODEX_ILINK_HOOK_EVENT;
+    } else {
+      process.env.CODEX_ILINK_HOOK_EVENT = previousEvent;
+    }
+  }
 }
 
 async function statusCommand(io: CliIo): Promise<number> {
@@ -765,10 +816,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-const invokedPath = process.argv[1];
-if (invokedPath && sameRealPath(fileURLToPath(import.meta.url), invokedPath)) {
-  process.exitCode = await runCli(process.argv.slice(2));
-}
 
 function sameRealPath(leftPath: string, rightPath: string): boolean {
   try {

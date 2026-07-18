@@ -17,7 +17,8 @@ const BLOCK_OUTPUT = {
 main();
 
 function main() {
-  const expectedEvent = process.argv[2] ?? "";
+  const expectedEvent =
+    process.env.CODEX_ILINK_HOOK_EVENT ?? process.argv[2] ?? "";
   const input = readInput();
   const eventName = stringField(input, "hook_event_name");
   const configuredPath = process.env.CODEX_ILINK_LEASE_DB;

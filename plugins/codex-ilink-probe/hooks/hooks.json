@@ -5,8 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/scripts/lifecycle-notify.mjs\"",
-            "commandWindows": "node.exe \"${PLUGIN_ROOT}/scripts/lifecycle-notify.mjs\"",
+            "command": "ilink __hook lifecycle",
+            "commandWindows": "ilink __hook lifecycle",
             "timeout": 1
           }
         ]
@@ -17,8 +17,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/scripts/turn-lifecycle-hook.mjs\" UserPromptSubmit",
-            "commandWindows": "node.exe \"${PLUGIN_ROOT}/scripts/turn-lifecycle-hook.mjs\" UserPromptSubmit",
+            "command": "ilink __hook turn UserPromptSubmit",
+            "commandWindows": "ilink __hook turn UserPromptSubmit",
             "timeout": 5
           }
         ]
@@ -29,14 +29,14 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/scripts/lifecycle-notify.mjs\"",
-            "commandWindows": "node.exe \"${PLUGIN_ROOT}/scripts/lifecycle-notify.mjs\"",
+            "command": "ilink __hook lifecycle",
+            "commandWindows": "ilink __hook lifecycle",
             "timeout": 1
           },
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/scripts/turn-lifecycle-hook.mjs\" Stop",
-            "commandWindows": "node.exe \"${PLUGIN_ROOT}/scripts/turn-lifecycle-hook.mjs\" Stop",
+            "command": "ilink __hook turn Stop",
+            "commandWindows": "ilink __hook turn Stop",
             "timeout": 5
           }
         ]
@@ -47,8 +47,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/scripts/lifecycle-notify.mjs\"",
-            "commandWindows": "node.exe \"${PLUGIN_ROOT}/scripts/lifecycle-notify.mjs\"",
+            "command": "ilink __hook lifecycle",
+            "commandWindows": "ilink __hook lifecycle",
             "timeout": 1
           }
         ]

@@ -14,7 +14,7 @@
   },
   "type": "module",
   "bin": {
-    "ilink": "./dist/cli/ilink.js"
+    "ilink": "./dist/cli/launcher.js"
   },
   "files": [
     ".agents/plugins/marketplace.json",
@@ -38,18 +38,19 @@
     "win32"
   ],
   "engines": {
-    "node": ">=24 <25"
+    "node": ">=22.13.0"
   },
   "packageManager": "pnpm@11.7.0",
   "scripts": {
-    "ilink": "node --experimental-strip-types src/cli/ilink.ts",
+    "ilink": "node --disable-warning=ExperimentalWarning --experimental-strip-types src/cli/main.ts",
     "build": "tsc -p tsconfig.build.json && node scripts/copy-build-assets.mjs",
-    "test": "pnpm build && node --experimental-strip-types --test tests/*.test.ts",
+    "build:sea": "npm run build --silent && node scripts/build-sea.mjs",
+    "test": "npm run build --silent && node --disable-warning=ExperimentalWarning --experimental-strip-types --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "release:metadata": "node scripts/check-release.mjs",
-    "release:check": "pnpm release:metadata && pnpm typecheck && pnpm test && npm pack --dry-run --ignore-scripts",
-    "prepublishOnly": "pnpm release:metadata && pnpm typecheck && pnpm test",
-    "prepack": "pnpm build",
+    "release:check": "npm run release:metadata --silent && npm run typecheck --silent && npm test --silent && npm pack --dry-run --ignore-scripts",
+    "prepublishOnly": "npm run release:metadata --silent && npm run typecheck --silent && npm test --silent",
+    "prepack": "npm run build --silent",
     "probe:lease": "node --experimental-strip-types src/probes/lease-arbitration.ts",
     "probe:resume": "node --experimental-strip-types src/probes/resume-thread.ts"
   },
@@ -58,7 +59,9 @@
     "registry": "https://registry.npmjs.org/"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^22.13.0",
+    "esbuild": "^0.28.1",
+    "postject": "1.0.0-alpha.6",
     "typescript": "^5.9.0"
   }
 }

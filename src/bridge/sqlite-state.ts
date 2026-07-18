@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { outboundMediaPathKey } from "../media/outbound-media.ts";
@@ -181,13 +181,10 @@ export class SqliteState {
 
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true });
-    this.#database = new DatabaseSync(path, {
-      allowExtension: false,
-      enableDoubleQuotedStringLiterals: false,
-      enableForeignKeyConstraints: true,
-      timeout: 5_000,
-    });
-    this.#database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
+    this.#database = new DatabaseSync(path);
+    this.#database.exec(
+      "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;",
+    );
     this.#migrate();
   }
 
@@ -1820,7 +1817,17 @@ export class SqliteState {
       const nextVersion = version + 1;
       const resource = migrations[version];
       if (!resource) throw new Error(`missing migration ${String(nextVersion)}`);
-      const sql = readFileSync(new URL(resource, import.meta.url), "utf8");
+      const packageRoot = process.env.CODEX_ILINK_PACKAGE_ROOT;
+      const migrationPath = packageRoot
+        ? join(
+            packageRoot,
+            "dist",
+            "bridge",
+            "migrations",
+            basename(resource),
+          )
+        : new URL(resource, import.meta.url);
+      const sql = readFileSync(migrationPath, "utf8");
       this.#database.exec("BEGIN IMMEDIATE");
       try {
         this.#database.exec(sql);

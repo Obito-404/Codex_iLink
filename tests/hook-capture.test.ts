@@ -14,7 +14,7 @@ test("hook script captures only routing metadata and stays silent", () => {
 
   try {
     const result = spawnSync(
-      "pwsh",
+      process.env.CODEX_ILINK_PWSH ?? "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-File", script],
       {
         encoding: "utf8",

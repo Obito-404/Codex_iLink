@@ -4,3 +4,4 @@ dist/
 .probe-output-desktop-runtime/
 *.log
 tmp/
+artifacts/

@@ -147,7 +147,11 @@ async function startWindowsPowerRequestHelper(
   command: readonly [string, ...string[]],
 ): Promise<PowerRequestHelper> {
   const [executable, ...args] = command;
-  const child = spawn(executable, [...args, script], {
+  const scriptArgument =
+    args.at(-1)?.toLowerCase() === "-encodedcommand"
+      ? Buffer.from(script, "utf16le").toString("base64")
+      : script;
+  const child = spawn(executable, [...args, scriptArgument], {
     shell: false,
     stdio: "pipe",
     windowsHide: true,
@@ -185,11 +189,11 @@ async function startWindowsPowerRequestHelper(
 
 function defaultPowerRequestHelperCommand(): readonly [string, ...string[]] {
   return [
-    process.env.CODEX_ILINK_PWSH ?? "pwsh.exe",
+    process.env.CODEX_ILINK_PWSH ?? "powershell.exe",
     "-NoLogo",
     "-NoProfile",
     "-NonInteractive",
-    "-Command",
+    "-EncodedCommand",
   ];
 }
 

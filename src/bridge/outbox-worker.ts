@@ -176,6 +176,7 @@ function abortableSleep(
       reject(signal?.reason);
     };
     signal?.addEventListener("abort", abort, { once: true });
-    timer.unref();
+    // A later caller can join drain(), so the retry must keep the process alive
+    // until the shared promise settles on every supported Node version.
   });
 }

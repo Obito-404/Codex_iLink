@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.1"
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify npm release
+        run: pnpm release:check
+      - name: Build standalone executable
+        run: pnpm build:sea
+      - name: Smoke test standalone executable
+        shell: pwsh
+        run: '& ".\artifacts\codex-ilink-x86_64-pc-windows-msvc.exe" --help'
+      - name: Publish GitHub Release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $exe = ".\artifacts\codex-ilink-x86_64-pc-windows-msvc.exe"
+          $checksum = "$exe.sha256"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $exe $checksum --clobber
+          } else {
+            gh release create $tag $exe $checksum --generate-notes --verify-tag
+          }

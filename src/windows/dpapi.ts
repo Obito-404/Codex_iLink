@@ -4,6 +4,7 @@ const ENTROPY = "Codex_iLink/v1";
 
 const PROTECT_SCRIPT = `
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Security
 $raw = [Console]::In.ReadToEnd().Trim()
 $plain = [Convert]::FromBase64String($raw)
 $entropy = [Text.Encoding]::UTF8.GetBytes("${ENTROPY}")
@@ -17,6 +18,7 @@ $cipher = [Security.Cryptography.ProtectedData]::Protect(
 
 const UNPROTECT_SCRIPT = `
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Security
 $raw = [Console]::In.ReadToEnd().Trim()
 $cipher = [Convert]::FromBase64String($raw)
 $entropy = [Text.Encoding]::UTF8.GetBytes("${ENTROPY}")
@@ -49,20 +51,43 @@ export function unprotectForCurrentUser(protectedValue: string): string {
 }
 
 function runDpapi(script: string, input: string, errorCode: string): string {
-  const result = spawnSync(
-    process.env.CODEX_ILINK_PWSH ?? "pwsh.exe",
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-    {
-      encoding: "utf8",
-      input,
-      maxBuffer: 1024 * 1024,
-      timeout: 10_000,
-      windowsHide: true,
-    },
-  );
-  const output = result.stdout.trim();
-  if (result.status !== 0 || !output) throw new Error(errorCode);
-  return output;
+  const configuredShell = process.env.CODEX_ILINK_PWSH;
+  const shells = configuredShell
+    ? [configuredShell]
+    : ["pwsh.exe", "powershell.exe"];
+
+  for (const shell of shells) {
+    const result = spawnSync(
+      shell,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        encodePowerShellCommand(script),
+      ],
+      {
+        encoding: "utf8",
+        input,
+        maxBuffer: 1024 * 1024,
+        timeout: 10_000,
+        windowsHide: true,
+      },
+    );
+    if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+      continue;
+    }
+
+    const output = result.stdout?.trim() ?? "";
+    if (result.status !== 0 || !output) throw new Error(errorCode);
+    return output;
+  }
+
+  throw new Error(errorCode);
+}
+
+function encodePowerShellCommand(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
 }
 
 function assertWindows(): void {

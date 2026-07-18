@@ -143,8 +143,14 @@ export async function getPresenceObservation(
 function runPresencePowerShell(script: string): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
-      process.env.CODEX_ILINK_PWSH ?? "pwsh.exe",
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+      process.env.CODEX_ILINK_PWSH ?? "powershell.exe",
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        Buffer.from(script, "utf16le").toString("base64"),
+      ],
       {
         encoding: "utf8",
         maxBuffer: 64 * 1_024,

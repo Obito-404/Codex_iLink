@@ -41,6 +41,22 @@ export type PermissionProfileListResult = JsonObject & {
   nextCursor: string | null;
 };
 
+export type ModelSummary = JsonObject & {
+  defaultReasoningEffort: string;
+  displayName: string;
+  hidden: boolean;
+  id: string;
+  model: string;
+  supportedReasoningEfforts: Array<
+    JsonObject & { description: string; reasoningEffort: string }
+  >;
+};
+
+export type ModelListResult = JsonObject & {
+  data: ModelSummary[];
+  nextCursor: string | null;
+};
+
 export type CodexThread = JsonObject & { id: string };
 export type CodexTurn = JsonObject & { id: string };
 

@@ -862,6 +862,90 @@ test("perm can explicitly recover when a saved profile is no longer allowed", as
   });
 });
 
+test("model and effort commands update only the current shared Codex session", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
+    state.setBinding({
+      expiresAtMs: 31 * 60 * 1_000,
+      projectPath: "D:\\Selected",
+      threadId: "thread-current",
+      updatedAtMs: 1_000,
+    });
+    codex.resumes.set("thread-current", {
+      activePermissionProfile: { id: ":workspace" },
+      approvalPolicy: "on-request",
+      cwd: "D:\\Codex-iLink\\Inbox",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      sandbox: { type: "workspaceWrite" },
+      thread: { id: "thread-current" },
+    });
+
+    await ingest(bridge, 50, "model");
+    assert.equal(
+      sent[0]?.text,
+      [
+        "当前模型：1. GPT-5.6 Sol (gpt-5.6-sol)",
+        "推理强度：medium",
+        "",
+        "1. GPT-5.6 Sol (gpt-5.6-sol) · medium/high/xhigh",
+        "2. GPT-5.6 Terra (gpt-5.6-terra) · low/medium/high",
+        "使用 model<n> 或 model:<id> 切换当前任务模型。",
+      ].join("\n"),
+    );
+
+    await ingest(bridge, 51, "model2");
+    assert.equal(
+      sent[1]?.text,
+      [
+        "已切换当前任务模型：GPT-5.6 Terra (gpt-5.6-terra)",
+        "推理强度：medium",
+        "此设置属于当前共享会话，Desktop 同一任务也会生效。",
+      ].join("\n"),
+    );
+
+    await ingest(bridge, 52, "model:gpt-5.6-sol");
+    await ingest(bridge, 53, "effort");
+    assert.equal(
+      sent[3]?.text,
+      [
+        "当前模型：GPT-5.6 Sol (gpt-5.6-sol)",
+        "当前推理强度：medium",
+        "",
+        "1. medium — Balanced",
+        "2. high — Deep",
+        "3. xhigh — Extra deep",
+        "使用 effort<n> 或 effort:<level> 切换当前任务推理强度。",
+      ].join("\n"),
+    );
+
+    await ingest(bridge, 54, "effort:high");
+    await ingest(bridge, 55, "effort:xhigh");
+    assert.equal(
+      sent[5]?.text,
+      [
+        "已切换当前任务推理强度：xhigh",
+        "模型：GPT-5.6 Sol (gpt-5.6-sol)",
+        "此设置属于当前共享会话，Desktop 同一任务也会生效。",
+      ].join("\n"),
+    );
+    assert.deepEqual(codex.modelSettingSelections, [
+      {
+        effort: "medium",
+        model: "gpt-5.6-terra",
+        threadId: "thread-current",
+      },
+      {
+        effort: "medium",
+        model: "gpt-5.6-sol",
+        threadId: "thread-current",
+      },
+      { effort: "high", threadId: "thread-current" },
+      { effort: "xhigh", threadId: "thread-current" },
+    ]);
+    assert.equal(codex.resumes.has("wechat-main"), false);
+  });
+});
+
 test("st reports current routing, every known active task, queues, and health", async () => {
   await withNavigationBridge(async ({ bridge, clock, codex, leases, sent, state }) => {
     clock.value = 100_000;
@@ -981,6 +1065,37 @@ class FakeNavigationCodex implements CodexTurnStarter {
   readFailures = new Set<string>();
   resumes = new Map<string, Record<string, unknown>>();
   nextStartedThreadId = "thread-new";
+  models = [
+    {
+      defaultReasoningEffort: "medium",
+      displayName: "GPT-5.6 Sol",
+      hidden: false,
+      id: "gpt-5.6-sol",
+      model: "gpt-5.6-sol",
+      supportedReasoningEfforts: [
+        { description: "Balanced", reasoningEffort: "medium" },
+        { description: "Deep", reasoningEffort: "high" },
+        { description: "Extra deep", reasoningEffort: "xhigh" },
+      ],
+    },
+    {
+      defaultReasoningEffort: "medium",
+      displayName: "GPT-5.6 Terra",
+      hidden: false,
+      id: "gpt-5.6-terra",
+      model: "gpt-5.6-terra",
+      supportedReasoningEfforts: [
+        { description: "Quick", reasoningEffort: "low" },
+        { description: "Balanced", reasoningEffort: "medium" },
+        { description: "Deep", reasoningEffort: "high" },
+      ],
+    },
+  ];
+  modelSettingSelections: Array<{
+    effort?: string;
+    model?: string;
+    threadId: string;
+  }> = [];
   permissionProfiles = [
     { allowed: true, description: null, id: ":read-only" },
     { allowed: true, description: null, id: ":workspace" },
@@ -1057,6 +1172,10 @@ class FakeNavigationCodex implements CodexTurnStarter {
     return { data: this.permissionProfiles, nextCursor: null };
   }
 
+  async listModels() {
+    return { data: this.models, nextCursor: null };
+  }
+
   async resumeThread(threadId: string, options: { permissions?: string } = {}) {
     this.calls.push(`resume:${threadId}`);
     this.loadedThreadIds.add(threadId);
@@ -1115,6 +1234,21 @@ class FakeNavigationCodex implements CodexTurnStarter {
               ? "readOnly"
               : "workspaceWrite",
       },
+    };
+    this.resumes.set(threadId, selected);
+    return selected;
+  }
+
+  async updateThreadModelSettings(
+    threadId: string,
+    settings: { effort?: string; model?: string },
+  ) {
+    const current = await this.resumeThread(threadId);
+    this.modelSettingSelections.push({ ...settings, threadId });
+    const selected = {
+      ...current,
+      ...(settings.model ? { model: settings.model } : {}),
+      ...(settings.effort ? { reasoningEffort: settings.effort } : {}),
     };
     this.resumes.set(threadId, selected);
     return selected;

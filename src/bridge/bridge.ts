@@ -113,6 +113,20 @@ export type CodexTurnStarter = {
     }>;
     nextCursor: string | null;
   }>;
+  listModels?(input?: { cursor?: string | null }): Promise<{
+    data: Array<{
+      defaultReasoningEffort: string;
+      displayName: string;
+      hidden: boolean;
+      id: string;
+      model: string;
+      supportedReasoningEfforts: Array<{
+        description: string;
+        reasoningEffort: string;
+      }>;
+    }>;
+    nextCursor: string | null;
+  }>;
   listThreads?(input: {
     archived: boolean;
     cursor?: string;
@@ -141,6 +155,10 @@ export type CodexTurnStarter = {
     threadId: string,
     permissions: string,
   ): Promise<Record<string, unknown>>;
+  updateThreadModelSettings?(
+    threadId: string,
+    settings: { effort?: string; model?: string },
+  ): Promise<Record<string, unknown>>;
   unarchiveThread?(threadId: string): Promise<Record<string, unknown>>;
   startTurn(input: {
     attachments?: readonly DurableTurnAttachment[];
@@ -159,6 +177,18 @@ export type CodexEvent = {
 type CodexTurnFailure = {
   category: "network" | "other";
   httpStatusCode: number | undefined;
+};
+
+type ModelCatalogEntry = {
+  defaultReasoningEffort: string;
+  displayName: string;
+  hidden: boolean;
+  id: string;
+  model: string;
+  supportedReasoningEfforts: Array<{
+    description: string;
+    reasoningEffort: string;
+  }>;
 };
 
 const MAX_ACTIVE_BRIDGE_TURNS = 3;
@@ -955,6 +985,42 @@ export class BridgeEngine {
         );
       }
     }
+    if (intent.kind === "models" || intent.kind === "selectModel") {
+      try {
+        const reply = await this.#modelReply(
+          intent.kind === "selectModel"
+            ? "id" in intent
+              ? { id: intent.id }
+              : { index: intent.index }
+            : {},
+        );
+        return this.#replyToCommand(input.contextToken, input.messageId, reply);
+      } catch {
+        return this.#replyToCommand(
+          input.contextToken,
+          input.messageId,
+          "模型命令执行失败，请稍后重试。",
+        );
+      }
+    }
+    if (intent.kind === "efforts" || intent.kind === "selectEffort") {
+      try {
+        const reply = await this.#effortReply(
+          intent.kind === "selectEffort"
+            ? "effort" in intent
+              ? { effort: intent.effort }
+              : { index: intent.index }
+            : {},
+        );
+        return this.#replyToCommand(input.contextToken, input.messageId, reply);
+      } catch {
+        return this.#replyToCommand(
+          input.contextToken,
+          input.messageId,
+          "推理强度命令执行失败，请稍后重试。",
+        );
+      }
+    }
     if (
       intent.kind === "newSession" ||
       intent.kind === "exitSession" ||
@@ -1718,6 +1784,155 @@ export class BridgeEngine {
       ),
       "使用 perm<n> 直接切换当前任务权限。",
     ].join("\n");
+  }
+
+  async #modelReply(selection: {
+    id?: string;
+    index?: number;
+  }): Promise<string> {
+    if (
+      !this.#codex?.listModels ||
+      !this.#codex.resumeThread ||
+      !this.#codex.updateThreadModelSettings
+    ) {
+      throw new Error("model settings are not configured");
+    }
+    const threadId = this.#currentThreadId();
+    const [models, current] = await Promise.all([
+      this.#availableModels(),
+      this.#resumeThreadForControl(threadId),
+    ]);
+    const currentModel = stringField(current, "model");
+    const currentEffort = stringField(current, "reasoningEffort");
+
+    if (selection.id !== undefined || selection.index !== undefined) {
+      const selected =
+        selection.id !== undefined
+          ? models.find(
+              (model) =>
+                model.id === selection.id || model.model === selection.id,
+            )
+          : models[(selection.index as number) - 1];
+      if (!selected) return "模型不可用，请发送 model 查看当前可选模型。";
+      const supportedEfforts = selected.supportedReasoningEfforts.map(
+        (option) => option.reasoningEffort,
+      );
+      const effort =
+        currentEffort && supportedEfforts.includes(currentEffort)
+          ? currentEffort
+          : supportedEfforts.includes(selected.defaultReasoningEffort)
+            ? selected.defaultReasoningEffort
+            : supportedEfforts[0];
+      const changed = await this.#codex.updateThreadModelSettings(threadId, {
+        ...(effort ? { effort } : {}),
+        model: selected.model,
+      });
+      return [
+        `已切换当前任务模型：${formatModel(selected)}`,
+        `推理强度：${stringField(changed, "reasoningEffort") ?? "未知"}`,
+        "此设置属于当前共享会话，Desktop 同一任务也会生效。",
+      ].join("\n");
+    }
+
+    const activeIndex = models.findIndex(
+      (model) => model.model === currentModel || model.id === currentModel,
+    );
+    const activeModel = activeIndex >= 0 ? models[activeIndex] : undefined;
+    return [
+      `当前模型：${
+        activeModel
+          ? `${String(activeIndex + 1)}. ${formatModel(activeModel)}`
+          : (currentModel ?? "未知")
+      }`,
+      `推理强度：${currentEffort ?? "未知"}`,
+      "",
+      ...models.map(
+        (model, index) =>
+          `${String(index + 1)}. ${formatModel(model)} · ${model.supportedReasoningEfforts
+            .map((option) => option.reasoningEffort)
+            .join("/")}`,
+      ),
+      "使用 model<n> 或 model:<id> 切换当前任务模型。",
+    ].join("\n");
+  }
+
+  async #effortReply(selection: {
+    effort?: string;
+    index?: number;
+  }): Promise<string> {
+    if (
+      !this.#codex?.listModels ||
+      !this.#codex.resumeThread ||
+      !this.#codex.updateThreadModelSettings
+    ) {
+      throw new Error("model settings are not configured");
+    }
+    const threadId = this.#currentThreadId();
+    const [models, current] = await Promise.all([
+      this.#availableModels(),
+      this.#resumeThreadForControl(threadId),
+    ]);
+    const currentModel = stringField(current, "model");
+    const model = models.find(
+      (candidate) =>
+        candidate.model === currentModel || candidate.id === currentModel,
+    );
+    if (!model) return "当前模型不在可选目录中，无法切换推理强度。";
+    const options = model.supportedReasoningEfforts;
+
+    if (selection.effort !== undefined || selection.index !== undefined) {
+      const selected =
+        selection.effort !== undefined
+          ? options.find(
+              (option) => option.reasoningEffort === selection.effort,
+            )
+          : options[(selection.index as number) - 1];
+      if (!selected) {
+        return `推理强度不可用，请发送 effort 查看 ${formatModel(model)} 支持的选项。`;
+      }
+      await this.#codex.updateThreadModelSettings(threadId, {
+        effort: selected.reasoningEffort,
+      });
+      return [
+        `已切换当前任务推理强度：${selected.reasoningEffort}`,
+        `模型：${formatModel(model)}`,
+        "此设置属于当前共享会话，Desktop 同一任务也会生效。",
+      ].join("\n");
+    }
+
+    return [
+      `当前模型：${formatModel(model)}`,
+      `当前推理强度：${stringField(current, "reasoningEffort") ?? "未知"}`,
+      "",
+      ...options.map(
+        (option, index) =>
+          `${String(index + 1)}. ${option.reasoningEffort}${
+            option.description ? ` — ${option.description}` : ""
+          }`,
+      ),
+      "使用 effort<n> 或 effort:<level> 切换当前任务推理强度。",
+    ].join("\n");
+  }
+
+  async #availableModels(): Promise<ModelCatalogEntry[]> {
+    if (!this.#codex?.listModels) throw new Error("model list is not configured");
+    const models: ModelCatalogEntry[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | null | undefined;
+    do {
+      const page = await this.#codex.listModels(
+        cursor === undefined ? {} : { cursor },
+      );
+      models.push(
+        ...page.data.filter(isModelCatalogEntry).filter((model) => !model.hidden),
+      );
+      cursor = page.nextCursor;
+      if (cursor !== null) {
+        if (seenCursors.has(cursor)) throw new Error("model list cursor repeated");
+        seenCursors.add(cursor);
+      }
+    } while (cursor !== null);
+    return models;
   }
 
   #exitSessionReply(): string {
@@ -2832,6 +3047,32 @@ function isPermissionProfileSummary(value: unknown): value is {
       profile.description === null ||
       typeof profile.description === "string")
   );
+}
+
+function isModelCatalogEntry(value: unknown): value is ModelCatalogEntry {
+  const model = asObject(value);
+  return (
+    typeof model?.defaultReasoningEffort === "string" &&
+    typeof model.displayName === "string" &&
+    typeof model.hidden === "boolean" &&
+    typeof model.id === "string" &&
+    model.id.length > 0 &&
+    typeof model.model === "string" &&
+    model.model.length > 0 &&
+    Array.isArray(model.supportedReasoningEfforts) &&
+    model.supportedReasoningEfforts.every((option) => {
+      const effort = asObject(option);
+      return (
+        typeof effort?.description === "string" &&
+        typeof effort.reasoningEffort === "string" &&
+        effort.reasoningEffort.length > 0
+      );
+    })
+  );
+}
+
+function formatModel(model: ModelCatalogEntry): string {
+  return `${model.displayName} (${model.id})`;
 }
 
 function formatAmbiguousApprovals(

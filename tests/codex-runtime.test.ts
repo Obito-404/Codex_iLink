@@ -12,6 +12,41 @@ import {
 
 const fakeRuntime = resolve("tests/fixtures/fake-codex-runtime.mjs");
 
+test("model catalog and session model settings use native App Server methods", async () => {
+  const runtime = await CodexRuntime.create({
+    bridgeInstanceId: "bridge-instance-model-settings",
+    command: [process.execPath, fakeRuntime],
+  });
+
+  try {
+    const listed = await runtime.listModels();
+    assert.deepEqual(listed.data, [
+      {
+        defaultReasoningEffort: "medium",
+        displayName: "GPT-5.6 Sol",
+        hidden: false,
+        id: "gpt-5.6-sol",
+        model: "gpt-5.6-sol",
+        supportedReasoningEfforts: [
+          { description: "Fast", reasoningEffort: "high" },
+          { description: "Deep", reasoningEffort: "xhigh" },
+        ],
+      },
+    ]);
+
+    await runtime.resumeThread("thread-model-settings");
+    const updated = await runtime.updateThreadModelSettings(
+      "thread-model-settings",
+      { effort: "xhigh", model: "gpt-5.6-sol" },
+    );
+
+    assert.equal(updated.model, "gpt-5.6-sol");
+    assert.equal(updated.reasoningEffort, "xhigh");
+  } finally {
+    runtime.close();
+  }
+});
+
 test("turn interruption and thread compaction use the native App Server methods", async () => {
   const runtime = await CodexRuntime.create({
     bridgeInstanceId: "bridge-instance-controls",

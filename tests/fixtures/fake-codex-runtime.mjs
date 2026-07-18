@@ -53,6 +53,8 @@ if (recordStartIndex !== -1) {
 let initializeCount = 0;
 let experimentalApi = false;
 const activePermissionProfiles = new Map();
+const activeModels = new Map();
+const activeReasoningEfforts = new Map();
 const lines = readline.createInterface({ input: process.stdin });
 
 lines.on("line", (line) => {
@@ -195,6 +197,30 @@ lines.on("line", (line) => {
     return;
   }
 
+  if (message.method === "model/list") {
+    if (!hasExactKeys(message.params, [])) {
+      rejectUnexpectedParams(message);
+      return;
+    }
+    respond(message.id, {
+      data: [
+        {
+          defaultReasoningEffort: "medium",
+          displayName: "GPT-5.6 Sol",
+          hidden: false,
+          id: "gpt-5.6-sol",
+          model: "gpt-5.6-sol",
+          supportedReasoningEfforts: [
+            { description: "Fast", reasoningEffort: "high" },
+            { description: "Deep", reasoningEffort: "xhigh" },
+          ],
+        },
+      ],
+      nextCursor: null,
+    });
+    return;
+  }
+
   if (message.method === "thread/resume") {
     if (message.params.permissions && !experimentalApi) {
       respondError(message.id, -32600, "experimentalApi capability required");
@@ -229,6 +255,9 @@ lines.on("line", (line) => {
           ? "never"
           : "on-request",
       cwd: "D:\\Fixture",
+      model: activeModels.get(message.params.threadId) ?? "gpt-fixture",
+      reasoningEffort:
+        activeReasoningEfforts.get(message.params.threadId) ?? "medium",
       sandbox: {
         type:
           activePermissionProfile === ":danger-full-access"
@@ -246,7 +275,15 @@ lines.on("line", (line) => {
       respondError(message.id, -32600, "experimentalApi capability required");
       return;
     }
-    if (!hasExactKeys(message.params, ["permissions", "threadId"])) {
+    const isPermissionUpdate = hasExactKeys(message.params, [
+      "permissions",
+      "threadId",
+    ]);
+    const isModelUpdate =
+      hasExactKeys(message.params, ["model", "threadId"]) ||
+      hasExactKeys(message.params, ["effort", "threadId"]) ||
+      hasExactKeys(message.params, ["effort", "model", "threadId"]);
+    if (!isPermissionUpdate && !isModelUpdate) {
       rejectUnexpectedParams(message);
       return;
     }
@@ -254,10 +291,18 @@ lines.on("line", (line) => {
       respondError(message.id, -32602, "thread is not loaded");
       return;
     }
-    activePermissionProfiles.set(
-      message.params.threadId,
-      message.params.permissions,
-    );
+    if (isPermissionUpdate) {
+      activePermissionProfiles.set(
+        message.params.threadId,
+        message.params.permissions,
+      );
+    }
+    if (message.params.model) {
+      activeModels.set(message.params.threadId, message.params.model);
+    }
+    if (message.params.effort) {
+      activeReasoningEfforts.set(message.params.threadId, message.params.effort);
+    }
     respond(message.id, {});
     return;
   }

@@ -8,7 +8,7 @@
 
 - 单一微信控制者、单聊文本，以及受控的入站图片、语音转写、文件和视频
 - `p` 按 Desktop 当前保存顺序只显示项目名，`s` 浏览任务，`s<n>` 进入任务
-- `new` 新建任务，`exit` 返回微信主任务，`st` 查看状态，`perm` 查看或切换当前任务的 Codex 原生权限 Profile
+- `new` 新建任务，`exit` 返回微信主任务，`st` 查看状态，`model` / `effort` 切换当前共享任务的模型与推理强度，`perm` 查看或切换 Codex 原生权限 Profile
 - App Server 可按 `thread_id` 恢复任务，持久化的继续记录可由 Desktop 任务记录读取
 - 30 分钟滑动任务绑定；项目或任务列表显示后，其编号映射固定 10 分钟
 - 同一 `thread_id` 的 Desktop/Bridge SQLite 原子租约；Bridge 停止时 Hook 仍以 fail-open 方式记录在途 Desktop 回合，关闭启动并发窗
@@ -69,6 +69,12 @@ exit            return to main
 st              status
 perm            list current Codex permission profiles
 perm<n>         select a Codex permission profile
+model           list available models
+model<n>        select a model by current list index
+model:<id>      select a model by stable model id
+effort          list reasoning efforts for the current model
+effort<n>       select an effort by current list index
+effort:<level>  select an effort such as high or xhigh
 ok | no         decide the only pending approval
 ok<code>        approve one of multiple pending requests
 no<code>        deny one of multiple pending requests
@@ -79,9 +85,11 @@ help            commands
 
 `stop` 只中断当前会话里由微信 Bridge 发起且已取得 Turn ID 的活动回合，不停止后台 Bridge，也不回滚已经完成的文件修改；Desktop 发起的回合仍需回到电脑端停止。`clear` 仅在当前会话没有执行中或排队任务时创建并绑定一个全新会话；项目会话的原历史可通过 `s` 找回，微信主会话则可通过 `exit` 返回。`compact` 通过 Codex 原生 `thread/compact/start` 压缩当前会话上下文，并在压缩完成前持有同一会话租约；期间收到的新消息会排队。
 
-微信不能切换模型或 reasoning effort。`perm` 通过 Codex 原生 `permissionProfile/list` 展示当前项目实际允许的 Profile；`perm<n>` 对已加载任务使用 `thread/settings/update.permissions`，首次加载或重连时使用 `thread/resume.permissions`。Bridge 只保存任务 ID 到原生 Profile ID 的映射，以便自身重连后重新桥接，不自建 Sandbox 或审批规则，也不修改 Desktop 全局设置、其他任务或已经开始的回合。微信主任务首次创建时采用当时 Codex 运行时的默认配置；之后 `exit` 只返回这个持久化任务，不会重建或改写其模型。`new` 只显式传入所选项目的 `cwd`，采用创建时的 Codex 运行时默认配置，不读取该项目其他任务或 Desktop 最近选择的模型；`s<n>` 恢复目标旧任务及 Bridge 已为该任务选择的原生权限 Profile。Desktop 回合的审批仍只能在 Desktop 完成；控制者离开电脑时，同一 Desktop 回合最多向微信提醒一次，微信只处理 Bridge 自己发起且仍在线等待的单次审批。
+`model` 通过 Codex 原生 `model/list` 展示当前账号实际可用的模型；`model<n>` 或 `model:<id>` 通过 `thread/settings/update` 修改当前共享会话的后续回合。`effort` 只展示当前模型支持的推理强度，`effort<n>` 或 `effort:<level>`（例如 `effort:high`、`effort:xhigh`）切换当前共享会话。模型与推理强度由 Codex 会话自身持久化，因此 Desktop 中的同一任务也会生效；Bridge 不保存第二份设置，不修改项目或全局默认值，也不影响其他任务或已经开始的回合。
 
-Bridge 启动 App Server 时只声明 Codex 权限 Profile API 所要求的 `experimentalApi` 客户端能力，不覆盖 Codex 的功能开关、模型、插件配置，也不实现权限判定；微信回合使用 Codex 原生 Profile 解析出的 Sandbox 和审批策略。仅由 Desktop UI 宿主提供的能力在后台 App Server 中仍可能不可用。状态读取超时只结束本次读取，不会杀掉仍在执行任务的 App Server；回合超过约 2 分钟仍未结束时，微信只收到一次“仍在执行”提示，任务不会因此被自动取消或重试，控制者可显式发送 `stop`。
+`perm` 通过 Codex 原生 `permissionProfile/list` 展示当前项目实际允许的 Profile；`perm<n>` 对已加载任务使用 `thread/settings/update.permissions`，首次加载或重连时使用 `thread/resume.permissions`。Bridge 只保存任务 ID 到原生 Profile ID 的映射，以便自身重连后重新桥接，不自建 Sandbox 或审批规则，也不修改 Desktop 全局设置、其他任务或已经开始的回合。微信主任务首次创建时采用当时 Codex 运行时的默认配置；之后 `exit` 只返回这个持久化任务，不会重建或改写其模型。`new` 只显式传入所选项目的 `cwd`，采用创建时的 Codex 运行时默认配置，不读取该项目其他任务或 Desktop 最近选择的模型；`s<n>` 恢复目标旧任务及 Bridge 已为该任务选择的原生权限 Profile。Desktop 回合的审批仍只能在 Desktop 完成；控制者离开电脑时，同一 Desktop 回合最多向微信提醒一次，微信只处理 Bridge 自己发起且仍在线等待的单次审批。
+
+Bridge 启动 App Server 时只声明 Codex 权限 Profile API 所要求的 `experimentalApi` 客户端能力，不覆盖 Codex 的功能开关、插件配置或项目/全局模型默认值，也不实现权限判定；微信回合使用 Codex 原生 Profile 解析出的 Sandbox 和审批策略。仅由 Desktop UI 宿主提供的能力在后台 App Server 中仍可能不可用。状态读取超时只结束本次读取，不会杀掉仍在执行任务的 App Server；回合超过约 2 分钟仍未结束时，微信只收到一次“仍在执行”提示，任务不会因此被自动取消或重试，控制者可显式发送 `stop`。
 
 ## 媒体能力与边界
 

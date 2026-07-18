@@ -8,6 +8,7 @@ import type {
   AppServerEvent,
   AppServerEventListener,
   JsonObject,
+  ModelListResult,
   PermissionProfileListResult,
   ThreadListResult,
   ThreadReadResult,
@@ -112,6 +113,12 @@ export class CodexRuntime {
     )) as PermissionProfileListResult;
   }
 
+  async listModels(input: { cursor?: string | null } = {}): Promise<ModelListResult> {
+    const params: JsonObject = {};
+    if (input.cursor !== undefined) params.cursor = input.cursor;
+    return (await this.#requestSafely("model/list", params)) as ModelListResult;
+  }
+
   async unarchiveThread(threadId: string): Promise<ThreadUnarchiveResult> {
     return (await this.#requestSafely("thread/unarchive", {
       threadId,
@@ -165,6 +172,34 @@ export class CodexRuntime {
     const result = await this.resumeThread(threadId);
     if (permissionProfileId(result.activePermissionProfile) !== permissions) {
       throw new Error("Codex did not activate the requested permission profile");
+    }
+    return result;
+  }
+
+  async updateThreadModelSettings(
+    threadId: string,
+    settings: { effort?: string; model?: string },
+  ): Promise<ThreadResumeResult> {
+    if (!settings.model && !settings.effort) {
+      throw new Error("model or effort is required");
+    }
+    if (!this.#loadedThreadIds.has(threadId)) {
+      await this.resumeThread(threadId);
+    }
+    await this.#requestSafely("thread/settings/update", {
+      ...(settings.effort ? { effort: settings.effort } : {}),
+      ...(settings.model ? { model: settings.model } : {}),
+      threadId,
+    });
+    const result = await this.resumeThread(threadId);
+    if (settings.model && result.model !== settings.model) {
+      throw new Error("Codex did not activate the requested model");
+    }
+    if (
+      settings.effort &&
+      result.reasoningEffort !== settings.effort
+    ) {
+      throw new Error("Codex did not activate the requested reasoning effort");
     }
     return result;
   }

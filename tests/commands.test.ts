@@ -36,6 +36,24 @@ test("the documented short command table is parsed exactly", () => {
     index: 3,
     kind: "selectPermission",
   });
+  assert.deepEqual(parseInboundText("model"), { kind: "models" });
+  assert.deepEqual(parseInboundText("model2"), {
+    index: 2,
+    kind: "selectModel",
+  });
+  assert.deepEqual(parseInboundText("model:gpt-5.6-sol"), {
+    id: "gpt-5.6-sol",
+    kind: "selectModel",
+  });
+  assert.deepEqual(parseInboundText("effort"), { kind: "efforts" });
+  assert.deepEqual(parseInboundText("effort4"), {
+    index: 4,
+    kind: "selectEffort",
+  });
+  assert.deepEqual(parseInboundText("effort:xhigh"), {
+    effort: "xhigh",
+    kind: "selectEffort",
+  });
   assert.deepEqual(parseInboundText("ok"), {
     code: null,
     kind: "approve",
@@ -69,6 +87,14 @@ test("legacy slash commands, spaced forms, aliases and malformed indices are rej
     "p01",
     "perm0",
     "perm01",
+    "model0",
+    "model01",
+    "model:",
+    "model gpt-5.6-sol",
+    "effort0",
+    "effort01",
+    "effort:",
+    "effort:very high",
   ]) {
     assert.deepEqual(parseInboundText(text), { kind: "unknownCommand", text });
   }
@@ -106,5 +132,13 @@ test("ordinary text stays ordinary and preserves its content", () => {
   assert.deepEqual(parseInboundText("permfull"), {
     kind: "message",
     text: "permfull",
+  });
+  assert.deepEqual(parseInboundText("model architecture"), {
+    kind: "message",
+    text: "model architecture",
+  });
+  assert.deepEqual(parseInboundText("effort estimate"), {
+    kind: "message",
+    text: "effort estimate",
   });
 });

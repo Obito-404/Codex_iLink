@@ -69,6 +69,7 @@ flowchart LR
 
 - 所有微信回合由同一个常驻 App Server 执行；Bridge 不覆盖 Codex 的功能开关、模型、权限、审批策略、Sandbox 或插件配置，也不改写任何 Desktop 任务配置。工具是否可用由 Codex 自己根据任务与当前用户配置决定。
 - 进入既有会话时按 `thread_id` 调用 `thread/resume`，并在 `thread/resume` 与 `turn/start` 中都不覆盖模型、reasoning effort、目录、审批者、审批策略或 Sandbox。
+- 仅在控制者显式发送 `model<n>`、`model:<id>`、`effort<n>` 或 `effort:<level>` 时，通过 `model/list` 校验当前账号与当前模型实际可用的选项，再用 `thread/settings/update` 修改当前共享会话的后续回合；不保存 Bridge 私有副本，不修改项目或全局默认值。
 - `/new` 使用当前 Codex 运行时默认配置；选择项目时只显式设置该项目的 `cwd`，不假设存在公开的“Desktop 项目默认模型”。
 - 微信主会话和无项目 `/new` 使用专用空白 Inbox 工作目录；微信产品上标记为“无项目”，但底层仍有合法 `cwd`，Desktop 可能按该物理路径分组显示。
 - Bridge 对自己发起的同一会话回合严格串行；若租约或 Desktop 活动观察显示目标任务正在执行，则消息排队。
@@ -95,7 +96,7 @@ flowchart LR
 - 只接受该控制者发来的单聊文本和受支持入站媒体，其他发送者和群消息静默丢弃且不下载媒体，不进入命令、队列或 Codex，也不泄露项目与会话信息；所有主动发送也只面向该控制者。
 - 更换设备时重新部署并扫码。
 - iLink Token 使用 Windows DPAPI 的 CurrentUser 范围加密，数据目录使用当前用户 ACL。
-- 微信不能更改会话的权限模式、模型或 reasoning effort。
+- 微信可显式更改当前共享会话的 Codex 原生权限 Profile、模型和 reasoning effort；Desktop 中的同一任务同步生效，其他会话、项目默认值和全局默认值不受影响。
 - 微信只能批准 Bridge App Server 发起且仍然在线等待的单次审批；30 分钟未处理自动拒绝。
 - “替我审批”由会话的自动审批者处理；只有实际路由给用户的 Bridge 审批才生成 `/ok`、`/no` 编号。
 - Bridge 或 App Server 重启后，失去在线回调的审批一律作废，不把数据库中的旧批准重放到新进程。
@@ -255,7 +256,7 @@ flowchart LR
 - Codex → 微信语音气泡、任意远程 URL 媒体发送或从普通自然语言路径猜测附件
 - 保证 Codex 能读取任意 `mention` 文件格式或越过目标会话的 Sandbox/审批策略
 - Desktop 回合远程审批或远程停止
-- 微信切换模型、reasoning effort 或权限模式
+- 修改项目或全局的模型、reasoning effort 或权限默认值
 - 扫描磁盘发现项目或读取 Desktop 私有数据库
 - 中文命令、命令别名和自然语言路由
 - 推理、命令或工具执行过程直播

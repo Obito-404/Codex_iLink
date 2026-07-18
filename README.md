@@ -11,29 +11,122 @@
 - 通过 Codex App Server 恢复同一 `thread_id`，Desktop 可继续查看和操作
 - 使用 SQLite 租约避免 Desktop 与微信同时写入同一任务
 - 入站图片、文件、视频和微信语音转写；出站本机附件
-- iLink 消息去重、排队、断点恢复和稳定重试
+- 同一任务 FIFO 串行、不同任务最多并行 3 个；消息去重、队列与回包均可恢复
 - DPAPI 加密凭证，只接受已绑定的单一微信控制者
 
-## 快速开始
+## 用户安装
 
-要求：Windows、Node.js 24+、pnpm 11.7、已登录 Codex Desktop。
+### 兼容性
+
+| 项目 | 要求 |
+| --- | --- |
+| 操作系统 | Windows |
+| Node.js | 24 或更高版本 |
+| Codex | 已登录 Codex Desktop，且 PowerShell 可运行 `codex --version` |
+| Shell | PowerShell |
+
+如果没有 `codex` 命令，先按官方方式安装：
+
+```powershell
+npm install --global @openai/codex
+```
+
+### 本地预览安装
+
+本地源码安装额外需要 pnpm 11.7。
+
+1. 在 GitHub 页面选择 **Code → Download ZIP**，解压到一个长期保留的目录。
+2. 在该目录打开 PowerShell，依次执行：
 
 ```powershell
 pnpm install --frozen-lockfile
-codex plugin add codex-ilink-probe@personal
-pnpm ilink doctor
-pnpm ilink login
-pnpm ilink start
+pnpm build
+npm install --global .
+codex plugin marketplace add .
+codex plugin add codex-ilink-probe@codex-ilink
+ilink doctor
+ilink login
+ilink start
 ```
 
-插件安装或升级后，需要在 Codex Desktop 中审核并信任 `Codex iLink Guard` Hooks。
+扫码绑定后，向机器人发送“查看项目”或 `p` 即可开始。插件安装或升级后，需要刷新 Codex Desktop，并审核、信任 `Codex iLink Guard` Hooks。
 
 ```powershell
-pnpm ilink status
-pnpm ilink stop
+ilink status   # 查看运行状态
+ilink stop     # 停止后台 Bridge
+ilink start    # 再次启动
+```
+
+当前版本尚未发布到 npm Registry。上面的本地全局安装会让 `ilink` 和插件引用解压目录，请勿移动或删除它。
+
+### npm 安装（发布后）
+
+首个公开版本将先使用 `next` 标签发布。npm 页面确认已经存在该版本后，再执行：
+
+```powershell
+npm install --global codex-ilink@next
+$packageRoot = Join-Path (npm root --global) "codex-ilink"
+codex plugin marketplace add $packageRoot
+codex plugin add codex-ilink-probe@codex-ilink
+ilink doctor
+ilink login
+ilink start
+```
+
+不要在 npm 尚未发布时执行上述安装命令，也不要从非官方 Registry 安装同名包。
+
+早期本地预览版曾使用 marketplace 名称 `personal`。升级前先执行
+`codex plugin remove codex-ilink-probe@personal`；再用
+`codex plugin marketplace list` 确认 `personal` 是否只属于本项目。只有确认没有承载其他插件时，才移除该 marketplace，避免误删用户自己的配置。
+
+### 升级与卸载
+
+升级预览版：
+
+```powershell
+ilink stop
+npm install --global codex-ilink@next
+codex plugin remove codex-ilink-probe@codex-ilink
+codex plugin add codex-ilink-probe@codex-ilink
+ilink doctor
+ilink start
+```
+
+卸载程序和插件：
+
+```powershell
+ilink stop
+codex plugin remove codex-ilink-probe@codex-ilink
+codex plugin marketplace remove codex-ilink
+npm uninstall --global codex-ilink
+```
+
+卸载不会自动删除 `%LOCALAPPDATA%\Codex_iLink` 中的绑定、状态和日志。确认不再需要后再手动清理该目录。
+
+### 源码开发
+
+额外要求：pnpm 11.7。
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm test
+pnpm ilink doctor
 ```
 
 Bridge 在当前 Windows 用户会话中后台运行，日志位于 `%LOCALAPPDATA%\Codex_iLink\logs\bridge.log`。当前版本不会自动注册开机启动。
+
+### 常见排查
+
+```powershell
+node --version
+codex --version
+codex plugin list
+ilink doctor
+ilink status
+```
+
+优先查看 `ilink doctor` 的稳定错误码和 `%LOCALAPPDATA%\Codex_iLink\logs\bridge.log`。插件安装或升级后需要刷新 Codex Desktop，并重新审核 Hooks；不要把 npm 密码、OTP、恢复码或本机凭证发到聊天中。
 
 ## 微信控制
 
@@ -62,6 +155,22 @@ Bridge 在当前 Windows 用户会话中后台运行，日志位于 `%LOCALAPPDA
 4. 只有通过白名单校验的结构化 Intent 才执行；其余文本进入原业务任务。
 
 分类回合不读取或写入业务任务历史，控制 Prompt 也不会注入 Desktop 的共享任务。项目约定仍应放在官方支持的 `AGENTS.md`，模型、Sandbox、审批和 MCP 等持久设置仍由 `config.toml` 或 Codex 原生权限 Profile 管理。
+
+## 架构与流程
+
+### 系统架构
+
+![Codex iLink 系统架构](./docs/assets/codex-ilink-architecture.svg)
+
+Codex 持久化任务是唯一历史事实源。微信与 Desktop 使用同一个 `thread_id` 继续任务；Bridge 只承担传输、路由、并发仲裁和可靠送达。
+
+### 消息调度
+
+![Codex iLink 消息调度流程](./docs/assets/codex-ilink-message-flow.svg)
+
+同一 `thread_id` 一次只运行一个回合，后续消息进入持久 FIFO 队列；不同任务可以并行，Bridge 全局最多同时执行 3 个微信回合。切换会话只改变后续消息的目标，不影响已经运行或排队的任务。
+
+图表由 [Archify](https://github.com/tt-a1i/archify) 生成，支持深浅色主题；可交互版本和源文件位于 [`docs/diagrams`](./docs/diagrams)。
 
 ## 行为边界
 
@@ -97,3 +206,5 @@ pnpm test
 ```
 
 `pnpm probe:lease` 与 `pnpm probe:resume` 会创建真实 Codex 任务并产生模型用量，不属于普通安装流程。
+
+npm 维护者流程、首次发布的人工作业和 tarball 验收步骤见 [npm 发布流程](./docs/npm-publishing.md)。当前源码许可证标记为 `UNLICENSED`；在负责人明确选择许可证并补齐公开仓库信息前，不得发布到 npm。

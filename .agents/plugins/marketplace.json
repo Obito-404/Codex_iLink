@@ -1,7 +1,7 @@
 {
-  "name": "personal",
+  "name": "codex-ilink",
   "interface": {
-    "displayName": "Personal"
+    "displayName": "Codex iLink"
   },
   "plugins": [
     {

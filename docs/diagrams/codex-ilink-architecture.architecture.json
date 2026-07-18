@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Codex iLink 系统架构",
+    "subtitle": "微信与 Codex Desktop 共享持久化任务；Bridge 只负责传输、路由、仲裁与可靠送达",
+    "output": "codex-ilink-architecture.html",
+    "viewBox": [1340, 560]
+  },
+  "components": [
+    {
+      "id": "controller",
+      "type": "external",
+      "label": "微信控制者",
+      "sublabel": "唯一绑定用户",
+      "pos": [20, 130],
+      "size": [140, 74]
+    },
+    {
+      "id": "ilink",
+      "type": "cloud",
+      "label": "腾讯 iLink",
+      "sublabel": "长轮询 · 媒体协议",
+      "pos": [205, 130],
+      "size": [150, 74]
+    },
+    {
+      "id": "bridge",
+      "type": "backend",
+      "label": "Bridge Daemon",
+      "sublabel": "混合路由 · 调度器",
+      "pos": [420, 130],
+      "size": [160, 74],
+      "tag": "单实例 · 配额 3"
+    },
+    {
+      "id": "app_server",
+      "type": "backend",
+      "label": "Codex App Server",
+      "sublabel": "常驻子进程",
+      "pos": [650, 130],
+      "size": [170, 74]
+    },
+    {
+      "id": "threads",
+      "type": "database",
+      "label": "Codex 持久化任务",
+      "sublabel": "历史与任务配置事实源",
+      "pos": [890, 130],
+      "size": [170, 74]
+    },
+    {
+      "id": "desktop",
+      "type": "frontend",
+      "label": "Codex Desktop",
+      "sublabel": "继续同一 thread_id",
+      "pos": [1140, 130],
+      "size": [160, 74]
+    },
+    {
+      "id": "sqlite",
+      "type": "database",
+      "label": "SQLite 状态库",
+      "sublabel": "队列 · Dispatch · Outbox",
+      "pos": [420, 340],
+      "size": [160, 74],
+      "tag": "WAL + 崩溃恢复"
+    },
+    {
+      "id": "hook",
+      "type": "security",
+      "label": "Codex iLink Guard",
+      "sublabel": "Hooks · Named Pipe · Spool",
+      "pos": [890, 340],
+      "size": [170, 74],
+      "tag": "同 thread 原子租约"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Windows 当前用户会话 · DPAPI / 用户 ACL",
+      "wraps": [
+        "bridge",
+        "app_server",
+        "threads",
+        "desktop",
+        "sqlite",
+        "hook"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from": "controller",
+      "to": "ilink",
+      "label": "消息 / 附件",
+      "variant": "emphasis",
+      "labelAt": [183, 126]
+    },
+    {
+      "from": "ilink",
+      "to": "bridge",
+      "label": "长轮询 / 回包",
+      "variant": "emphasis",
+      "labelAt": [388, 126]
+    },
+    {
+      "from": "bridge",
+      "to": "app_server",
+      "label": "JSON-RPC",
+      "variant": "emphasis"
+    },
+    {
+      "from": "app_server",
+      "to": "threads",
+      "label": "恢复 / 写入",
+      "variant": "emphasis"
+    },
+    {
+      "from": "threads",
+      "to": "desktop",
+      "label": "同一历史",
+      "variant": "emphasis"
+    },
+    {
+      "from": "bridge",
+      "to": "sqlite",
+      "label": "路由 / 队列 / 送达",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "labelDx": 72
+    },
+    {
+      "from": "desktop",
+      "to": "hook",
+      "label": "Prompt / Stop",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "via": [[1220, 270], [975, 270]],
+      "labelAt": [1098, 255]
+    },
+    {
+      "from": "hook",
+      "to": "sqlite",
+      "label": "按 thread_id 竞争租约",
+      "variant": "security",
+      "fromSide": "left",
+      "toSide": "right",
+      "route": "straight",
+      "labelDy": -16
+    },
+    {
+      "from": "hook",
+      "to": "bridge",
+      "label": "生命周期元数据",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "right",
+      "via": [[850, 377], [850, 270], [600, 270], [600, 167]],
+      "labelAt": [725, 255]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "共享而非复制",
+      "items": [
+        "Codex 持久化任务是唯一历史事实源",
+        "Desktop 与微信通过同一个 thread_id 继续",
+        "Bridge 不创建第二套 Agent 或 Transcript"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "并发边界",
+      "items": [
+        "同一会话一次只允许一个回合写入",
+        "Desktop 与 Bridge 竞争 SQLite 原子租约",
+        "不同会话最多并行三个微信回合"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "可靠恢复",
+      "items": [
+        "入站去重、FIFO 队列与游标均持久化",
+        "Dispatch Intent 隔离提交结果未知窗口",
+        "最终回复通过持久化 Outbox 重试"
+      ]
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
@@ -97,12 +98,19 @@ test("CLI reports unknown commands and command failures without a stack trace", 
   assert.equal(errors.at(-1), "stable failure");
 });
 
-test("package exposes both pnpm ilink and an ilink executable", () => {
+test("published package exposes a runnable ilink executable", () => {
   const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
     bin?: Record<string, string>;
     scripts?: Record<string, string>;
   };
 
-  assert.equal(packageJson.bin?.ilink, "./src/cli/ilink.ts");
+  assert.equal(packageJson.bin?.ilink, "./dist/cli/ilink.js");
   assert.match(packageJson.scripts?.ilink ?? "", /src\/cli\/ilink\.ts/u);
+
+  const result = spawnSync(process.execPath, [packageJson.bin.ilink], {
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /用法: ilink <command>/u);
 });

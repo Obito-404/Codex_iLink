@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Codex iLink 消息调度流程",
+    "subtitle": "同一会话 FIFO 串行；不同会话异步并行；全局最多三个微信回合"
+  },
+  "lanes": [
+    { "id": "wechat", "label": "微信与 iLink" },
+    { "id": "bridge", "label": "Bridge 路由" },
+    { "id": "state", "label": "SQLite 提交边界" },
+    { "id": "queue", "label": "等待与恢复", "variant": "exception" },
+    { "id": "codex", "label": "Codex App Server" }
+  ],
+  "phases": [
+    { "id": "intake", "label": "接收", "fromCol": 0, "toCol": 1 },
+    { "id": "schedule", "label": "持久化 · 仲裁", "fromCol": 2, "toCol": 3, "variant": "security" },
+    { "id": "execute", "label": "执行 · 回包", "fromCol": 4, "toCol": 5, "variant": "emphasis" }
+  ],
+  "groups": [
+    { "id": "durability", "label": "可恢复提交边界", "lane": "state", "fromCol": 2, "toCol": 5, "variant": "security" },
+    { "id": "fifo", "label": "按会话 FIFO", "lane": "queue", "fromCol": 4, "toCol": 4, "variant": "dashed" }
+  ],
+  "mainPath": [
+    "inbound",
+    "validate",
+    "durable",
+    "lease",
+    "start",
+    "terminal",
+    "final_commit",
+    "reply"
+  ],
+  "nodes": [
+    { "id": "inbound", "lane": "wechat", "col": 0, "type": "external", "label": "控制者消息", "sublabel": "文本 · 媒体" },
+    { "id": "reply", "lane": "wechat", "col": 5, "type": "frontend", "label": "微信回复", "sublabel": "原消息 context", "tag": "完成顺序返回" },
+    { "id": "validate", "lane": "bridge", "col": 1, "type": "backend", "label": "校验与解析", "sublabel": "身份 · 命令 · 媒体" },
+    { "id": "control", "lane": "bridge", "col": 3, "type": "frontend", "label": "控制直返", "sublabel": "p / s / st / model" },
+    { "id": "durable", "lane": "state", "col": 2, "type": "database", "label": "原子接收入库", "sublabel": "去重 + cursor + payload" },
+    { "id": "lease", "lane": "state", "col": 3, "type": "security", "label": "路由与租约", "sublabel": "thread_id 互斥", "tag": "全局上限 3" },
+    { "id": "final_commit", "lane": "state", "col": 5, "type": "database", "label": "终态 + Outbox", "sublabel": "正文与附件原子提交" },
+    { "id": "queued", "lane": "queue", "col": 4, "type": "messagebus", "label": "持久 FIFO 队列", "sublabel": "等待目标会话空闲" },
+    { "id": "start", "lane": "codex", "col": 4, "type": "backend", "label": "恢复并执行", "sublabel": "thread/resume · turn/start" },
+    { "id": "terminal", "lane": "codex", "col": 5, "type": "backend", "label": "回合终态", "sublabel": "completed / failed" }
+  ],
+  "edges": [
+    { "from": "inbound", "to": "validate", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "validate", "to": "durable", "label": "原子接收", "variant": "security", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "durable", "to": "lease", "variant": "security" },
+    { "from": "lease", "to": "start", "variant": "emphasis", "fromSide": "right", "toSide": "top", "via": [[570, 367], [570, 570], [500, 570]] },
+    { "from": "start", "to": "terminal", "variant": "emphasis" },
+    { "from": "terminal", "to": "final_commit", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "route": "up-channel" },
+    { "from": "final_commit", "to": "reply", "label": "可靠回包", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "route": "up-channel" },
+    { "from": "lease", "to": "queued", "label": "忙 / ≥3", "variant": "security", "role": "branch", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelAt": [465, 415] },
+    { "from": "queued", "to": "start", "label": "释放后", "variant": "dashed", "role": "async", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "durable", "to": "control", "label": "控制 Intent", "variant": "default", "role": "branch", "fromSide": "top", "toSide": "bottom", "route": "up-channel" },
+    { "from": "control", "to": "reply", "variant": "default", "role": "return", "fromSide": "top", "toSide": "bottom", "route": "up-channel" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "路由规则",
+      "items": [
+        "当前绑定只决定后续普通消息的目标 thread_id",
+        "切换项目或会话不会移动已运行和已排队任务",
+        "控制命令不进入业务任务队列"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "并发与顺序",
+      "items": [
+        "同一 thread_id 严格 FIFO 串行",
+        "不同 thread_id 可异步并行",
+        "跨会话回复按实际完成顺序抵达微信"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "故障恢复",
+      "items": [
+        "Bridge 重启后恢复绑定、队列与 Outbox",
+        "结果未知的提交不会自动重试",
+        "消息去重键防止同一入站重复执行"
+      ]
+    }
+  ]
+}

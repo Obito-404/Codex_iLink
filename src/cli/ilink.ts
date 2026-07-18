@@ -5,6 +5,7 @@ import {
   closeSync,
   mkdirSync,
   openSync,
+  realpathSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -504,9 +505,17 @@ function errorMessage(error: unknown): string {
 }
 
 const invokedPath = process.argv[1];
-if (
-  invokedPath &&
-  fileURLToPath(import.meta.url).toLowerCase() === invokedPath.toLowerCase()
-) {
+if (invokedPath && sameExecutablePath(fileURLToPath(import.meta.url), invokedPath)) {
   process.exitCode = await runCli(process.argv.slice(2));
+}
+
+function sameExecutablePath(modulePath: string, invokedPath: string): boolean {
+  try {
+    return (
+      realpathSync.native(modulePath).toLowerCase() ===
+      realpathSync.native(invokedPath).toLowerCase()
+    );
+  } catch {
+    return modulePath.toLowerCase() === invokedPath.toLowerCase();
+  }
 }

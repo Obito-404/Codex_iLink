@@ -1,21 +1,53 @@
 {
   "name": "codex-ilink",
-  "version": "0.0.0",
+  "version": "0.1.0-beta.1",
   "private": true,
+  "description": "Use WeChat as a secure remote entry point to local Codex sessions on Windows.",
+  "license": "UNLICENSED",
   "type": "module",
   "bin": {
-    "ilink": "./src/cli/ilink.ts"
+    "ilink": "./dist/cli/ilink.js"
   },
+  "files": [
+    ".agents/plugins/marketplace.json",
+    "dist/",
+    "docs/adr/",
+    "docs/assets/*.svg",
+    "docs/diagrams/",
+    "docs/feasibility.md",
+    "docs/npm-publishing.md",
+    "plugins/",
+    "SPEC.md"
+  ],
+  "keywords": [
+    "codex",
+    "wechat",
+    "windows",
+    "bridge",
+    "cli"
+  ],
+  "os": [
+    "win32"
+  ],
   "engines": {
     "node": ">=24"
   },
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "ilink": "node --experimental-strip-types src/cli/ilink.ts",
-    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-build-assets.mjs",
+    "test": "pnpm build && node --experimental-strip-types --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
+    "release:metadata": "node scripts/check-release.mjs",
+    "release:check": "pnpm release:metadata && pnpm typecheck && pnpm test && npm pack --dry-run --ignore-scripts",
+    "prepublishOnly": "pnpm release:metadata && pnpm typecheck && pnpm test",
+    "prepack": "pnpm build",
     "probe:lease": "node --experimental-strip-types src/probes/lease-arbitration.ts",
     "probe:resume": "node --experimental-strip-types src/probes/resume-thread.ts"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

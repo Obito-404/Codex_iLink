@@ -56,6 +56,31 @@ test("an unlocked session remains present just before five minutes idle", async 
   assert.equal(presence, "present");
 });
 
+test("the presence threshold can be configured without delaying lock detection", async () => {
+  const tenMinutes = 10 * 60 * 1_000;
+  assert.equal(
+    await getPresence(
+      async () => ({ idleMilliseconds: 5 * 60 * 1_000, locked: false }),
+      tenMinutes,
+    ),
+    "present",
+  );
+  assert.equal(
+    await getPresence(
+      async () => ({ idleMilliseconds: tenMinutes, locked: false }),
+      tenMinutes,
+    ),
+    "away",
+  );
+  assert.equal(
+    await getPresence(
+      async () => ({ idleMilliseconds: 0, locked: true }),
+      tenMinutes,
+    ),
+    "away",
+  );
+});
+
 test("the production presence probe rejects non-Windows hosts explicitly", async () => {
   let commandCalled = false;
   const probe = createWindowsPresenceProbe({

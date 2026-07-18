@@ -4,6 +4,14 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { outboundMediaPathKey } from "../media/outbound-media.ts";
+import {
+  AWAY_TIMEOUT_MINUTES_RANGE,
+  DEFAULT_AWAY_TIMEOUT_MINUTES,
+  DEFAULT_SESSION_TIMEOUT_MINUTES,
+  isInMinuteRange,
+  SESSION_TIMEOUT_MINUTES_RANGE,
+  type UserTimingSettings,
+} from "../domain/user-settings.ts";
 
 export type Controller = {
   accountId: string;
@@ -30,6 +38,10 @@ export type Binding = {
   projectPath: string | null;
   threadId: string;
   updatedAtMs: number;
+};
+
+export type ExpiredBinding = Binding & {
+  expiryNotifiedAtMs: number | null;
 };
 
 export type NotificationRoute = {
@@ -120,7 +132,7 @@ export type BridgeRuntime = {
   instanceId: string;
 };
 
-export type BridgeSettings = {
+export type BridgeSettings = UserTimingSettings & {
   mainThreadId: string | null;
   selectedProjectPath: string | null;
 };
@@ -367,7 +379,8 @@ export class SqliteState {
            thread_id = excluded.thread_id,
            project_path = excluded.project_path,
            expires_at_ms = excluded.expires_at_ms,
-           updated_at_ms = excluded.updated_at_ms`,
+           updated_at_ms = excluded.updated_at_ms,
+           expiry_notified_at_ms = NULL`,
       )
       .run(
         binding.threadId,
@@ -389,7 +402,8 @@ export class SqliteState {
              thread_id = excluded.thread_id,
              project_path = excluded.project_path,
              expires_at_ms = excluded.expires_at_ms,
-             updated_at_ms = excluded.updated_at_ms`,
+             updated_at_ms = excluded.updated_at_ms,
+             expiry_notified_at_ms = NULL`,
         )
         .run(
           binding.threadId,
@@ -422,6 +436,50 @@ export class SqliteState {
           updatedAtMs: row.updated_at_ms,
         }
       : null;
+  }
+
+  getExpiredBindingForReminder(nowMs: number): ExpiredBinding | null {
+    const row = this.#database
+      .prepare(
+        `SELECT thread_id, project_path, expires_at_ms, updated_at_ms,
+                expiry_notified_at_ms
+         FROM bindings
+         WHERE singleton = 1 AND expires_at_ms <= ?
+           AND expiry_notified_at_ms IS NULL`,
+      )
+      .get(nowMs) as
+      | {
+          expires_at_ms: number;
+          expiry_notified_at_ms: number | null;
+          project_path: string | null;
+          thread_id: string;
+          updated_at_ms: number;
+        }
+      | undefined;
+    return row
+      ? {
+          expiresAtMs: row.expires_at_ms,
+          expiryNotifiedAtMs: row.expiry_notified_at_ms,
+          projectPath: row.project_path,
+          threadId: row.thread_id,
+          updatedAtMs: row.updated_at_ms,
+        }
+      : null;
+  }
+
+  markBindingExpiryNotified(
+    threadId: string,
+    updatedAtMs: number,
+    notifiedAtMs: number,
+  ): boolean {
+    const result = this.#database
+      .prepare(
+        `UPDATE bindings SET expiry_notified_at_ms = ?
+         WHERE singleton = 1 AND thread_id = ? AND updated_at_ms = ?
+           AND expiry_notified_at_ms IS NULL AND expires_at_ms <= ?`,
+      )
+      .run(notifiedAtMs, threadId, updatedAtMs, notifiedAtMs);
+    return Number(result.changes) === 1;
   }
 
   putNotificationRoute(route: NotificationRoute): void {
@@ -1287,8 +1345,9 @@ export class SqliteState {
         this.#database
           .prepare(
             `UPDATE bindings
-             SET expires_at_ms = ?, updated_at_ms = ?
+             SET expires_at_ms = ?, updated_at_ms = ?, expiry_notified_at_ms = NULL
              WHERE singleton = 1
+               AND bindings.expires_at_ms > ?
                AND EXISTS (
                  SELECT 1
                  FROM dispatch_intents
@@ -1299,7 +1358,9 @@ export class SqliteState {
                )`,
           )
           .run(
-            confirmedAtMs + 30 * 60 * 1_000,
+            confirmedAtMs +
+              this.getBridgeSettings().sessionTimeoutMinutes * 60 * 1_000,
+            confirmedAtMs,
             confirmedAtMs,
             bridgeTurnId,
           );
@@ -1364,17 +1425,77 @@ export class SqliteState {
   getBridgeSettings(): BridgeSettings {
     const row = this.#database
       .prepare(
-        `SELECT main_thread_id, selected_project_path
+        `SELECT main_thread_id, selected_project_path,
+                session_timeout_minutes, away_timeout_minutes
          FROM bridge_settings WHERE singleton = 1`,
       )
       .get() as
-      | { main_thread_id: string | null; selected_project_path: string | null }
+      | {
+          away_timeout_minutes: number;
+          main_thread_id: string | null;
+          selected_project_path: string | null;
+          session_timeout_minutes: number;
+        }
       | undefined;
     if (!row) throw new Error("bridge settings are missing");
     return {
+      awayTimeoutMinutes: row.away_timeout_minutes,
       mainThreadId: row.main_thread_id,
       selectedProjectPath: row.selected_project_path,
+      sessionTimeoutMinutes: row.session_timeout_minutes,
     };
+  }
+
+  setSessionTimeoutMinutes(minutes: number, nowMs = Date.now()): void {
+    if (!isInMinuteRange(minutes, SESSION_TIMEOUT_MINUTES_RANGE)) {
+      throw new Error("session timeout is outside the supported range");
+    }
+    this.#transaction(() => {
+      this.#database
+        .prepare(
+          `UPDATE bridge_settings SET session_timeout_minutes = ?
+           WHERE singleton = 1`,
+        )
+        .run(minutes);
+      this.#database
+        .prepare(
+          `UPDATE bindings
+           SET expires_at_ms = updated_at_ms + ?, expiry_notified_at_ms = NULL
+           WHERE singleton = 1 AND expires_at_ms > ?`,
+        )
+        .run(minutes * 60 * 1_000, nowMs);
+    });
+  }
+
+  setAwayTimeoutMinutes(minutes: number): void {
+    if (!isInMinuteRange(minutes, AWAY_TIMEOUT_MINUTES_RANGE)) {
+      throw new Error("away timeout is outside the supported range");
+    }
+    this.#database
+      .prepare(
+        `UPDATE bridge_settings SET away_timeout_minutes = ?
+         WHERE singleton = 1`,
+      )
+      .run(minutes);
+  }
+
+  resetUserTimingSettings(nowMs = Date.now()): void {
+    this.#transaction(() => {
+      this.#database
+        .prepare(
+          `UPDATE bridge_settings
+           SET session_timeout_minutes = ?, away_timeout_minutes = ?
+           WHERE singleton = 1`,
+        )
+        .run(DEFAULT_SESSION_TIMEOUT_MINUTES, DEFAULT_AWAY_TIMEOUT_MINUTES);
+      this.#database
+        .prepare(
+          `UPDATE bindings
+           SET expires_at_ms = updated_at_ms + ?, expiry_notified_at_ms = NULL
+           WHERE singleton = 1 AND expires_at_ms > ?`,
+        )
+        .run(DEFAULT_SESSION_TIMEOUT_MINUTES * 60 * 1_000, nowMs);
+    });
   }
 
   listGuardedThreadIds(nowMs: number): string[] {
@@ -1652,7 +1773,7 @@ export class SqliteState {
       | { user_version: number }
       | undefined;
     let version = current?.user_version ?? 0;
-    if (version < 0 || version > 9) {
+    if (version < 0 || version > 10) {
       throw new Error(`unsupported schema version ${String(version)}`);
     }
     const migrations = [
@@ -1665,6 +1786,7 @@ export class SqliteState {
       "./migrations/007-thread-permission-profiles.sql",
       "./migrations/008-pending-desktop-notifications.sql",
       "./migrations/009-outbound-attachment-intents.sql",
+      "./migrations/010-user-timing-settings.sql",
     ];
     while (version < migrations.length) {
       const nextVersion = version + 1;

@@ -31,6 +31,27 @@ test("normal text follows an active session binding and refreshes its expiry", (
   );
 });
 
+test("normal text refreshes a binding with the configured idle timeout", () => {
+  const nowMs = Date.UTC(2026, 6, 15, 15, 30, 0);
+
+  const decision = routeInboundText({
+    binding: {
+      expiresAtMs: nowMs + 1,
+      threadId: "thread-project",
+      updatedAtMs: nowMs - 1,
+    },
+    bindingIdleTimeoutMs: 60 * 60 * 1_000,
+    mainThreadId: "thread-main",
+    notificationWindows: [],
+    nowMs,
+    text: "继续处理这个需求",
+  });
+
+  assert.equal(decision.kind, "turn");
+  if (decision.kind !== "turn") return;
+  assert.equal(decision.binding?.expiresAtMs, nowMs + 60 * 60 * 1_000);
+});
+
 test("a newer session binding keeps priority over an older notification window", () => {
   const nowMs = Date.UTC(2026, 6, 15, 15, 30, 0);
 

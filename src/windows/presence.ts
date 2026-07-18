@@ -118,18 +118,23 @@ export const windowsPresenceProbe = createWindowsPresenceProbe();
 
 export async function getPresence(
   probe: PresenceProbe = windowsPresenceProbe,
+  awayIdleMilliseconds = AWAY_IDLE_MILLISECONDS,
 ): Promise<PresenceState> {
-  return (await getPresenceObservation(probe)).state;
+  return (await getPresenceObservation(probe, awayIdleMilliseconds)).state;
 }
 
 export async function getPresenceObservation(
   probe: PresenceProbe = windowsPresenceProbe,
+  awayIdleMilliseconds = AWAY_IDLE_MILLISECONDS,
 ): Promise<PresenceObservation> {
+  if (!Number.isSafeInteger(awayIdleMilliseconds) || awayIdleMilliseconds <= 0) {
+    throw new Error("E_PRESENCE_IDLE_TIMEOUT_INVALID");
+  }
   const sample = await probe();
   return {
     ...sample,
     state:
-      sample.locked || sample.idleMilliseconds >= AWAY_IDLE_MILLISECONDS
+      sample.locked || sample.idleMilliseconds >= awayIdleMilliseconds
         ? "away"
         : "present",
   };

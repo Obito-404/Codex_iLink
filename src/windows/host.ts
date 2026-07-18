@@ -425,6 +425,7 @@ export async function runWindowsHost(
   let primaryError: unknown;
   try {
     state = new SqliteState(paths.stateDatabasePath);
+    const activeState = state;
     const storedSession = state.getILinkSession();
     if (!storedSession) throw new Error("E_ILINK_LOGIN_REQUIRED");
     const session: ILinkSession = {
@@ -452,6 +453,8 @@ export async function runWindowsHost(
       pipePath: paths.pipePath,
       spoolDirectory: paths.spoolDirectory,
     });
+    const awayIdleMilliseconds = () =>
+      activeState.getBridgeSettings().awayTimeoutMinutes * 60 * 1_000;
     daemon = new BridgeDaemon({
       activeTaskCounter: power,
       bridgeInstanceId,
@@ -468,8 +471,10 @@ export async function runWindowsHost(
       onLifecycleWarning: (operation, error) => {
         console.error(`[ilink] ${operation} failed:`, safeErrorMessage(error));
       },
-      presence: getPresence,
-      presenceObservation: getPresenceObservation,
+      presence: () =>
+        getPresence(undefined, awayIdleMilliseconds()),
+      presenceObservation: () =>
+        getPresenceObservation(undefined, awayIdleMilliseconds()),
       session,
       state,
     });

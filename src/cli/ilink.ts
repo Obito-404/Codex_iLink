@@ -11,6 +11,12 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 import { SqliteState } from "../bridge/sqlite-state.ts";
+import {
+  AWAY_TIMEOUT_MINUTES_RANGE,
+  isInMinuteRange,
+  parseMinuteDuration,
+  SESSION_TIMEOUT_MINUTES_RANGE,
+} from "../domain/user-settings.ts";
 import { ILinkClient } from "../ilink/ilink-client.ts";
 import {
   protectForCurrentUser,
@@ -32,6 +38,7 @@ const STATUS_RETRY_MS = 100;
 
 export const CLI_HELP = `用法: ilink <command>
 
+  config  查看或修改超时配置
   login   扫码绑定唯一微信用户
   start   在后台启动微信 Bridge
   status  查看 Bridge 状态
@@ -44,6 +51,7 @@ export type CliIo = {
 };
 
 export type CliCommands = {
+  config(args: readonly string[]): Promise<number>;
   doctor(): Promise<number>;
   login(): Promise<number>;
   start(): Promise<number>;
@@ -65,11 +73,12 @@ export async function runCli(
     io.log(CLI_HELP);
     return 0;
   }
-  if (argv.length !== 1) {
+  if (command !== "config" && argv.length !== 1) {
     io.error(`参数过多。\n${CLI_HELP}`);
     return 2;
   }
   try {
+    if (command === "config") return await commands.config(argv.slice(1));
     if (command === "login") return await commands.login();
     if (command === "start") return await commands.start();
     if (command === "status") return await commands.status();
@@ -220,12 +229,63 @@ export async function currentHostStatus(
 
 function productionCommands(io: CliIo): CliCommands {
   return {
+    config: (args) => configCommand(io, args),
     doctor: () => doctorCommand(io),
     login: () => loginCommand(io),
     start: () => startCommand(io),
     status: () => statusCommand(io),
     stop: () => stopCommand(io),
   };
+}
+
+async function configCommand(
+  io: CliIo,
+  args: readonly string[],
+): Promise<number> {
+  assertWindows();
+  requireLocalAppData();
+  const state = new SqliteState(runtimePaths().stateDatabasePath);
+  try {
+    if (args.length === 1 && args[0] === "reset") {
+      state.resetUserTimingSettings();
+      io.log("超时配置已恢复默认值：会话 30 分钟，离开 5 分钟。");
+      return 0;
+    }
+    if (args.length === 3 && args[0] === "set") {
+      const [_, name, rawDuration] = args;
+      const minutes = rawDuration ? parseMinuteDuration(rawDuration) : null;
+      if (name === "session-timeout") {
+        if (minutes === null || !isInMinuteRange(minutes, SESSION_TIMEOUT_MINUTES_RANGE)) {
+          io.error("会话绑定超时必须是 5m 到 1440m。例：ilink config set session-timeout 60m");
+          return 2;
+        }
+        state.setSessionTimeoutMinutes(minutes);
+        io.log(`会话绑定超时已设置为 ${String(minutes)} 分钟，立即生效。`);
+        return 0;
+      }
+      if (name === "away-timeout") {
+        if (minutes === null || !isInMinuteRange(minutes, AWAY_TIMEOUT_MINUTES_RANGE)) {
+          io.error("离开判定时间必须是 1m 到 60m。例：ilink config set away-timeout 10m");
+          return 2;
+        }
+        state.setAwayTimeoutMinutes(minutes);
+        io.log(`离开判定时间已设置为 ${String(minutes)} 分钟，立即生效；锁屏仍立即离开。`);
+        return 0;
+      }
+    }
+    if (args.length !== 0) {
+      io.error("配置参数无效；使用 ilink config 查看当前配置。");
+      return 2;
+    }
+    const settings = state.getBridgeSettings();
+    io.log(`会话绑定超时：${String(settings.sessionTimeoutMinutes)} 分钟`);
+    io.log(
+      `离开判定时间：${String(settings.awayTimeoutMinutes)} 分钟（锁屏仍立即判定离开）`,
+    );
+    return 0;
+  } finally {
+    state.close();
+  }
 }
 
 async function loginCommand(io: CliIo): Promise<number> {

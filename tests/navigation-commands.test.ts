@@ -189,6 +189,7 @@ test("s<n> enters the current first-page session without a prior list", async ()
 test("s pages the selected project's sessions and s<n> binds the displayed session", async () => {
   await withNavigationBridge(async ({ bridge, clock, codex, sent, state }) => {
     state.setSelectedProjectPath("D:\\Selected");
+    state.setSessionTimeoutMinutes(60);
     codex.activeThreads = Array.from({ length: 12 }, (_, index) => ({
       cwd: "D:\\Selected",
       id: `thread-${String(index + 1).padStart(2, "0")}`,
@@ -249,7 +250,7 @@ test("s pages the selected project's sessions and s<n> binds the displayed sessi
       "read:thread-01",
     ]);
     assert.deepEqual(state.getBinding(50_001), {
-      expiresAtMs: 50_000 + 30 * 60 * 1_000,
+      expiresAtMs: 50_000 + 60 * 60 * 1_000,
       projectPath: "D:\\Selected",
       threadId: "thread-01",
       updatedAtMs: 50_000,
@@ -262,6 +263,7 @@ test("s pages the selected project's sessions and s<n> binds the displayed sessi
     assert.match(sent[2]?.text ?? "", /Sandbox：workspaceWrite/u);
     assert.match(sent[2]?.text ?? "", /最近提问：上次问题/u);
     assert.match(sent[2]?.text ?? "", /最近回复：上次答案/u);
+    assert.match(sent[2]?.text ?? "", /60 分钟无活动后自动退出/u);
   });
 });
 
@@ -345,6 +347,7 @@ test("new creates in the selected project, binds immediately, and exit returns t
     assert.match(sent[0]?.text ?? "", /权限：项目读写 \(:workspace\)/u);
     assert.match(sent[0]?.text ?? "", /审批：on-request/u);
     assert.match(sent[0]?.text ?? "", /Sandbox：workspaceWrite/u);
+    assert.match(sent[0]?.text ?? "", /30 分钟无活动后自动退出/u);
 
     await ingest(bridge, 32, "new task question");
     assert.deepEqual(codex.startedTurns, [
@@ -364,6 +367,7 @@ test("new creates in the selected project, binds immediately, and exit returns t
     assert.deepEqual(state.listLiveNotificationRoutes(10_001), []);
     assert.equal(state.getBridgeSettings().selectedProjectPath, "D:\\Selected");
     assert.match(sent[1]?.text ?? "", /已返回微信主会话/u);
+    assert.match(sent[1]?.text ?? "", /原会话和运行中的任务仍保留/u);
 
     await ingest(bridge, 33, "main task question");
     assert.deepEqual(codex.startedTurns, [
@@ -384,6 +388,42 @@ test("new without a project uses the reserved Inbox and stays product-level unpr
     assert.deepEqual(codex.startedCwds, ["D:\\Codex-iLink\\Inbox"]);
     assert.equal(state.getBinding(1_001)?.projectPath, null);
     assert.equal(state.getBinding(1_001)?.threadId, "thread-new-inbox");
+  });
+});
+
+test("an expired session binding sends one reminder and preserves the session", async () => {
+  await withNavigationBridge(async ({ bridge, clock, codex, sent, state }) => {
+    state.setSelectedProjectPath("D:\\Selected");
+    codex.activeThreads = [
+      {
+        cwd: "D:\\Selected",
+        id: "thread-reminder",
+        name: "发布准备",
+        status: { type: "idle" },
+        updatedAt: 1,
+      },
+    ];
+    codex.reads.set("thread-reminder", {
+      thread: { id: "thread-reminder", name: "发布准备" },
+    });
+
+    await ingest(bridge, 41, "s1");
+    const expiresAtMs = state.getBinding(clock.value)?.expiresAtMs;
+    assert.ok(expiresAtMs);
+    sent.length = 0;
+    clock.value = expiresAtMs;
+
+    await bridge.reconcilePendingWork();
+    assert.equal(sent.length, 1);
+    assert.match(
+      sent[0]?.text ?? "",
+      /会话“发布准备”的微信绑定已因 30 分钟无交互结束/u,
+    );
+    assert.match(sent[0]?.text ?? "", /原会话和运行中的任务仍保留/u);
+    assert.equal(state.getBinding(clock.value), null);
+
+    await bridge.reconcilePendingWork();
+    assert.equal(sent.length, 1);
   });
 });
 

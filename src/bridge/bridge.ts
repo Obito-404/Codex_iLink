@@ -798,13 +798,64 @@ export class BridgeEngine {
 
   async reconcilePendingWork(): Promise<void> {
     if (this.#reconcilePromise) return this.#reconcilePromise;
-    const pending = this.#reconcileDispatchLeases();
+    const pending = (async () => {
+      await this.#notifyExpiredBinding();
+      await this.#reconcileDispatchLeases();
+    })();
     this.#reconcilePromise = pending;
     try {
       await pending;
     } finally {
       if (this.#reconcilePromise === pending) this.#reconcilePromise = undefined;
     }
+  }
+
+  async #notifyExpiredBinding(): Promise<void> {
+    const nowMs = this.#now();
+    const binding = this.#state.getExpiredBindingForReminder(nowMs);
+    if (!binding) return;
+    const contextToken = this.#state.getILinkState(
+      this.#session.botId,
+    )?.contextToken;
+    if (!contextToken) return;
+
+    let title = binding.threadId;
+    if (this.#codex?.readThread) {
+      try {
+        const read = await this.#codex.readThread({
+          includeTurns: true,
+          threadId: binding.threadId,
+        });
+        title =
+          stringField(read.thread, "name") ??
+          stringField(read.thread, "title") ??
+          binding.threadId;
+      } catch {
+        // The routing reminder remains useful even if the preview is unavailable.
+      }
+    }
+    const timeoutMinutes = Math.max(
+      1,
+      Math.round((binding.expiresAtMs - binding.updatedAtMs) / 60_000),
+    );
+    try {
+      await this.#send(
+        contextToken,
+        [
+          `会话“${title}”的微信绑定已因 ${String(timeoutMinutes)} 分钟无交互结束。`,
+          "后续普通消息将进入微信主会话；原会话和运行中的任务仍保留，可用 s<n> 重新进入。",
+        ].join("\n"),
+        `codex-ilink:binding-expired:${binding.threadId}:${String(binding.updatedAtMs)}`,
+      );
+    } catch {
+      // The durable outbox retries without blocking the user's next message.
+      return;
+    }
+    this.#state.markBindingExpiryNotified(
+      binding.threadId,
+      binding.updatedAtMs,
+      this.#now(),
+    );
   }
 
   async #prepareInboundMessage(
@@ -904,6 +955,7 @@ export class BridgeEngine {
     messageId: string;
     turnInput: DurableTurnInput;
   }): Promise<number> {
+    await this.#notifyExpiredBinding();
     let intent = parseInboundText(input.turnInput.text);
     if (
       intent.kind === "message" &&
@@ -1450,7 +1502,7 @@ export class BridgeEngine {
     }
     const resumed = await this.#resumeThreadForControl(target.threadId);
     this.#state.setBindingForNavigation({
-      expiresAtMs: nowMs + 30 * 60 * 1_000,
+      expiresAtMs: nowMs + this.#bindingIdleTimeoutMs(),
       projectPath: target.projectPath,
       threadId: target.threadId,
       updatedAtMs: nowMs,
@@ -1469,7 +1521,7 @@ export class BridgeEngine {
     return [
       ...(target.archived ? ["Unarchived"] : []),
       this.#formatThreadPreview(preview, target.threadId),
-      "30 分钟无活动后自动退出。",
+      `${String(this.#bindingIdleTimeoutMinutes())} 分钟无活动后自动退出。`,
     ].join("\n");
   }
 
@@ -1506,7 +1558,7 @@ export class BridgeEngine {
     if (!threadId) throw new Error("Codex did not return a thread id");
     const nowMs = this.#now();
     this.#state.setBindingForNavigation({
-      expiresAtMs: nowMs + 30 * 60 * 1_000,
+      expiresAtMs: nowMs + this.#bindingIdleTimeoutMs(),
       projectPath,
       threadId,
       updatedAtMs: nowMs,
@@ -1522,7 +1574,7 @@ export class BridgeEngine {
       }`,
       `审批：${approvalPolicyText(started)}`,
       `Sandbox：${sandboxTypeText(started)}`,
-      "30 分钟无活动后自动退出。",
+      `${String(this.#bindingIdleTimeoutMinutes())} 分钟无活动后自动退出。`,
     ].join("\n");
   }
 
@@ -2022,8 +2074,14 @@ export class BridgeEngine {
   }
 
   #exitSessionReply(): string {
+    const binding = this.#state.getBinding(this.#now());
     this.#state.clearNavigationRoutes();
-    return "已返回微信主会话。当前项目选择保持不变。";
+    return binding
+      ? [
+          "已返回微信主会话。当前项目选择保持不变。",
+          `已退出微信会话绑定：${binding.threadId}；原会话和运行中的任务仍保留。`,
+        ].join("\n")
+      : "已返回微信主会话。当前项目选择保持不变。";
   }
 
   async #statusReply(): Promise<string> {
@@ -2116,9 +2174,17 @@ export class BridgeEngine {
     if (!binding) return;
     this.#state.setBinding({
       ...binding,
-      expiresAtMs: nowMs + 30 * 60 * 1_000,
+      expiresAtMs: nowMs + this.#bindingIdleTimeoutMs(),
       updatedAtMs: nowMs,
     });
+  }
+
+  #bindingIdleTimeoutMinutes(): number {
+    return this.#state.getBridgeSettings().sessionTimeoutMinutes;
+  }
+
+  #bindingIdleTimeoutMs(): number {
+    return this.#bindingIdleTimeoutMinutes() * 60 * 1_000;
   }
 
   async #listThreadPages(archived: boolean): Promise<unknown[]> {
@@ -2167,6 +2233,7 @@ export class BridgeEngine {
             updatedAtMs: currentBinding.updatedAtMs,
           }
         : null,
+      bindingIdleTimeoutMs: this.#bindingIdleTimeoutMs(),
       mainThreadId: this.#mainThreadId,
       notificationWindows: this.#state
         .listLiveNotificationRoutes(nowMs)

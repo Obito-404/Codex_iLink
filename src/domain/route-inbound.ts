@@ -12,6 +12,7 @@ export type NotificationWindow = {
 
 export type RouteInboundTextInput = {
   binding: SessionBinding | null;
+  bindingIdleTimeoutMs?: number;
   mainThreadId: string;
   notificationWindows: readonly NotificationWindow[];
   nowMs: number;
@@ -36,6 +37,8 @@ const BINDING_IDLE_TIMEOUT_MS = 30 * 60 * 1_000;
 export function routeInboundText(
   input: RouteInboundTextInput,
 ): AmbiguousNotificationRouteDecision | TurnRouteDecision {
+  const bindingIdleTimeoutMs =
+    input.bindingIdleTimeoutMs ?? BINDING_IDLE_TIMEOUT_MS;
   const activeBinding =
     input.binding && input.binding.expiresAtMs > input.nowMs
       ? input.binding
@@ -51,7 +54,7 @@ export function routeInboundText(
   if (bindingSupersedesNotifications) {
     return {
       binding: {
-        expiresAtMs: input.nowMs + BINDING_IDLE_TIMEOUT_MS,
+        expiresAtMs: input.nowMs + bindingIdleTimeoutMs,
         threadId: activeBinding.threadId,
       },
       kind: "turn",
@@ -70,7 +73,7 @@ export function routeInboundText(
   if (notificationWindow) {
     return {
       binding: {
-        expiresAtMs: input.nowMs + BINDING_IDLE_TIMEOUT_MS,
+        expiresAtMs: input.nowMs + bindingIdleTimeoutMs,
         threadId: notificationWindow.threadId,
       },
       kind: "turn",

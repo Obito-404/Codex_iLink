@@ -15,7 +15,7 @@ test("controller identity and database configuration survive reopening", () => {
     const first = new SqliteState(path);
     assert.deepEqual(first.storageDiagnostics(), {
       journalMode: "wal",
-      schemaVersion: 9,
+      schemaVersion: 10,
       synchronous: "full",
     });
     assert.deepEqual(
@@ -271,6 +271,29 @@ test("binding, notification routes, and queued turns preserve routing order", ()
         }),
       /queued turn already exists/u,
     );
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("changing the session timeout immediately recalculates an active binding", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-timeout-"));
+  const state = new SqliteState(join(directory, "state.db"));
+
+  try {
+    state.setBinding({
+      expiresAtMs: 1_800_100,
+      projectPath: "D:\\Project",
+      threadId: "thread-configured",
+      updatedAtMs: 100,
+    });
+
+    state.setSessionTimeoutMinutes(60, 1_000);
+    assert.equal(state.getBinding(3_600_099)?.expiresAtMs, 3_600_100);
+
+    state.resetUserTimingSettings(1_000);
+    assert.equal(state.getBinding(1_800_099)?.expiresAtMs, 1_800_100);
   } finally {
     state.close();
     rmSync(directory, { force: true, recursive: true });
@@ -840,8 +863,9 @@ test("confirming a Bridge final reply atomically refreshes only its current sess
   const state = new SqliteState(join(directory, "state.db"));
 
   try {
+    state.setSessionTimeoutMinutes(60);
     state.setBinding({
-      expiresAtMs: 500,
+      expiresAtMs: 1_500,
       projectPath: "D:\\Project",
       threadId: "thread-a",
       updatedAtMs: 100,
@@ -865,12 +889,38 @@ test("confirming a Bridge final reply atomically refreshes only its current sess
     });
 
     state.confirmOutbox("codex-ilink:turn-a:final", 1_000);
-    assert.deepEqual(state.getBinding(1_800_999), {
-      expiresAtMs: 1_801_000,
+    assert.deepEqual(state.getBinding(3_600_999), {
+      expiresAtMs: 3_601_000,
       projectPath: "D:\\Project",
       threadId: "thread-a",
       updatedAtMs: 1_000,
     });
+
+    state.setBinding({
+      expiresAtMs: 4_000,
+      projectPath: "D:\\Project",
+      threadId: "thread-expired",
+      updatedAtMs: 3_500,
+    });
+    state.createDispatchIntent({
+      body: "run expired",
+      contextToken: "ctx-expired",
+      createdAtMs: 3_500,
+      dedupeKey: "message-expired",
+      operationId: "operation-expired",
+      threadId: "thread-expired",
+    });
+    state.markDispatchAccepted("operation-expired", "turn-expired", 3_600);
+    state.markDispatchCompleted("operation-expired", "turn-expired", 3_700);
+    state.enqueueOutbox({
+      body: "late final",
+      clientId: "codex-ilink:turn-expired:final",
+      contextToken: "ctx-expired",
+      createdAtMs: 3_700,
+      targetUserId: "controller-a",
+    });
+    state.confirmOutbox("codex-ilink:turn-expired:final", 4_001);
+    assert.equal(state.getBinding(4_001), null);
 
     state.setBinding({
       expiresAtMs: 9_000,
@@ -991,7 +1041,7 @@ test("schema v6 deletes legacy plain-text scheduler payloads", () => {
     database.close();
 
     const state = new SqliteState(path);
-    assert.equal(state.storageDiagnostics().schemaVersion, 9);
+    assert.equal(state.storageDiagnostics().schemaVersion, 10);
     assert.deepEqual(state.listQueuedTurns(), []);
     assert.equal(state.getDispatchIntent("legacy-operation"), null);
     assert.equal(state.countActiveDispatches(), 0);
@@ -1136,8 +1186,10 @@ test("main thread, project selection, and explicit navigation state persist", ()
 
   try {
     assert.deepEqual(state.getBridgeSettings(), {
+      awayTimeoutMinutes: 5,
       mainThreadId: null,
       selectedProjectPath: null,
+      sessionTimeoutMinutes: 30,
     });
     state.setMainThreadId("thread-main");
     state.setSelectedProjectPath("D:\\Project");
@@ -1158,8 +1210,10 @@ test("main thread, project selection, and explicit navigation state persist", ()
 
     state = new SqliteState(path);
     assert.deepEqual(state.getBridgeSettings(), {
+      awayTimeoutMinutes: 5,
       mainThreadId: "thread-main",
       selectedProjectPath: "D:\\Project",
+      sessionTimeoutMinutes: 30,
     });
     assert.equal(state.getBinding(101), null);
     assert.deepEqual(state.listLiveNotificationRoutes(101), []);

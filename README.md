@@ -116,6 +116,19 @@ pnpm ilink doctor
 
 Bridge 在当前 Windows 用户会话中后台运行，日志位于 `%LOCALAPPDATA%\Codex_iLink\logs\bridge.log`。当前版本不会自动注册开机启动。
 
+### 超时配置
+
+默认会话绑定超时为 30 分钟，未锁屏时连续 5 分钟无键鼠输入会判定为离开。可在 Bridge 运行时修改，设置会立即生效：
+
+```powershell
+ilink config
+ilink config set session-timeout 60m
+ilink config set away-timeout 10m
+ilink config reset
+```
+
+会话绑定范围为 5～1440 分钟，离开判定范围为 1～60 分钟。锁屏一经检测会立即判定离开，不受 `away-timeout` 影响。会话绑定超时或主动 `exit` 只改变后续消息路由，原会话和运行中的任务仍会保留；Bridge 会向微信发送一次明确提醒。
+
 ### 常见排查
 
 ```powershell
@@ -143,7 +156,7 @@ ilink status
 | 审批 | `ok[code]`、`no[code]` | “批准当前审批”“拒绝审批 A7C9E2” |
 | 帮助 | `help` | “查看命令列表” |
 
-短命令不带 `/`，也不在命令和编号之间加空格。`p<n>`、`s<n>` 没有有效列表快照时，会按当前项目列表或当前项目第一页解释；显式列表产生的编号固定 10 分钟，进入任务后的绑定滑动保持 30 分钟。
+短命令不带 `/`，也不在命令和编号之间加空格。`p<n>`、`s<n>` 没有有效列表快照时，会按当前项目列表或当前项目第一页解释；显式列表产生的编号固定 10 分钟，进入任务后的绑定按 `session-timeout` 滑动保持，默认 30 分钟。
 
 一条消息可包含最多 4 个明确控制动作，例如“返回主会话，然后查看状态”。Bridge 按原顺序执行、遇到失败立即停止，并只发送一条汇总回复。
 

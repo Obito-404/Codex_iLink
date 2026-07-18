@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { CLI_HELP, runCli, type CliCommands } from "../src/cli/ilink.ts";
 
 function fixtureCommands(calls: string[]): CliCommands {
   return {
+    config: async (args) => {
+      calls.push(["config", ...args].join(" "));
+      return 9;
+    },
     doctor: async () => {
       calls.push("doctor");
       return 10;
@@ -30,8 +36,9 @@ function fixtureCommands(calls: string[]): CliCommands {
   };
 }
 
-test("CLI exposes only the five public lifecycle commands", async () => {
+test("CLI exposes its six public commands", async () => {
   for (const [command, expectedCode] of [
+    ["config", 9],
     ["doctor", 10],
     ["login", 11],
     ["start", 12],
@@ -67,7 +74,7 @@ test("CLI help is concise and does not invoke a command", async () => {
   assert.equal(code, 0);
   assert.deepEqual(calls, []);
   assert.deepEqual(output, [CLI_HELP]);
-  for (const command of ["login", "start", "status", "doctor", "stop"]) {
+  for (const command of ["config", "login", "start", "status", "doctor", "stop"]) {
     assert.match(CLI_HELP, new RegExp(`\\b${command}\\b`, "u"));
   }
 });
@@ -113,4 +120,80 @@ test("published package exposes a runnable ilink executable", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, "");
   assert.match(result.stdout, /用法: ilink <command>/u);
+});
+
+test("ilink config shows the default session and away timeouts", (t) => {
+  const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-"));
+  t.after(() => rmSync(localAppData, { force: true, recursive: true }));
+
+  const result = spawnSync(process.execPath, ["dist/cli/ilink.js", "config"], {
+    encoding: "utf8",
+    env: { ...process.env, LOCALAPPDATA: localAppData },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /会话绑定超时：30 分钟/u);
+  assert.match(result.stdout, /离开判定时间：5 分钟/u);
+  assert.match(result.stdout, /锁屏仍立即判定离开/u);
+});
+
+test("ilink config set persists timing settings across CLI processes", (t) => {
+  const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-set-"));
+  t.after(() => rmSync(localAppData, { force: true, recursive: true }));
+  const run = (...args: string[]) =>
+    spawnSync(process.execPath, ["dist/cli/ilink.js", "config", ...args], {
+      encoding: "utf8",
+      env: { ...process.env, LOCALAPPDATA: localAppData },
+    });
+
+  const session = run("set", "session-timeout", "60m");
+  assert.equal(session.status, 0, session.stderr);
+  assert.match(session.stdout, /会话绑定超时已设置为 60 分钟/u);
+
+  const away = run("set", "away-timeout", "10m");
+  assert.equal(away.status, 0, away.stderr);
+  assert.match(away.stdout, /离开判定时间已设置为 10 分钟/u);
+
+  const current = run();
+  assert.equal(current.status, 0, current.stderr);
+  assert.match(current.stdout, /会话绑定超时：60 分钟/u);
+  assert.match(current.stdout, /离开判定时间：10 分钟/u);
+});
+
+test("ilink config reset restores safe defaults", (t) => {
+  const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-reset-"));
+  t.after(() => rmSync(localAppData, { force: true, recursive: true }));
+  const run = (...args: string[]) =>
+    spawnSync(process.execPath, ["dist/cli/ilink.js", "config", ...args], {
+      encoding: "utf8",
+      env: { ...process.env, LOCALAPPDATA: localAppData },
+    });
+
+  assert.equal(run("set", "session-timeout", "60m").status, 0);
+  assert.equal(run("set", "away-timeout", "10m").status, 0);
+  const reset = run("reset");
+  assert.equal(reset.status, 0, reset.stderr);
+  assert.match(reset.stdout, /已恢复默认值/u);
+
+  const current = run();
+  assert.match(current.stdout, /会话绑定超时：30 分钟/u);
+  assert.match(current.stdout, /离开判定时间：5 分钟/u);
+});
+
+test("ilink config rejects unsafe timeout values without changing settings", (t) => {
+  const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-range-"));
+  t.after(() => rmSync(localAppData, { force: true, recursive: true }));
+  const run = (...args: string[]) =>
+    spawnSync(process.execPath, ["dist/cli/ilink.js", "config", ...args], {
+      encoding: "utf8",
+      env: { ...process.env, LOCALAPPDATA: localAppData },
+    });
+
+  assert.equal(run("set", "session-timeout", "4m").status, 2);
+  assert.equal(run("set", "session-timeout", "1441m").status, 2);
+  assert.equal(run("set", "away-timeout", "0m").status, 2);
+  assert.equal(run("set", "away-timeout", "61m").status, 2);
+  const current = run();
+  assert.match(current.stdout, /会话绑定超时：30 分钟/u);
+  assert.match(current.stdout, /离开判定时间：5 分钟/u);
 });

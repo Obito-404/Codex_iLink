@@ -1,5 +1,7 @@
 # 微信只选择 Codex 原生权限 Profile
 
+> 状态：已被 [ADR 0014](./0014-permission-modes-bind-profile-and-approval-policy.md) 部分取代。保留本文作为“只持久化 Profile ID”阶段的历史决策。
+
 唯一微信控制者可以使用 `perm` 查看当前项目由 Codex `permissionProfile/list` 返回且允许选择的原生权限 Profile，并使用 `perm<n>` 切换当前任务。已加载任务通过 `thread/settings/update.permissions` 更新后续回合，首次加载或 App Server 重连时通过 `thread/resume.permissions` 传递选择。Bridge 仅持久化 `thread_id → profile_id`；Sandbox、审批策略和最终权限判断全部由 Codex 执行。
 
 Bridge 为此在 `initialize` 声明 `experimentalApi` 客户端能力，但不打开 Codex 功能开关，不拼装自定义 Sandbox，不调用 Hook 自动允许，也不修改 Codex Desktop 全局设置、其他任务或已经开始的回合。Desktop 插件 Hook 的 `PermissionRequest` stdout 继续保持为空，Desktop 回合仍由 Desktop 审批。

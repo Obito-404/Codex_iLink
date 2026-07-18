@@ -53,6 +53,8 @@ if (recordStartIndex !== -1) {
 let initializeCount = 0;
 let experimentalApi = false;
 const activePermissionProfiles = new Map();
+const activeApprovalPolicies = new Map();
+const activeApprovalsReviewers = new Map();
 const activeModels = new Map();
 const activeReasoningEfforts = new Map();
 const lines = readline.createInterface({ input: process.stdin });
@@ -226,13 +228,18 @@ lines.on("line", (line) => {
       respondError(message.id, -32600, "experimentalApi capability required");
       return;
     }
+    const resumeKeys = Object.keys(message.params).sort();
+    const allowedResumeKeys = new Set([
+      "approvalPolicy",
+      "approvalsReviewer",
+      "developerInstructions",
+      "permissions",
+      "threadId",
+    ]);
     if (
-      !hasExactKeys(message.params, ["developerInstructions", "threadId"]) &&
-      !hasExactKeys(message.params, [
-        "developerInstructions",
-        "permissions",
-        "threadId",
-      ])
+      !resumeKeys.every((key) => allowedResumeKeys.has(key)) ||
+      !resumeKeys.includes("developerInstructions") ||
+      !resumeKeys.includes("threadId")
     ) {
       rejectUnexpectedParams(message);
       return;
@@ -246,14 +253,20 @@ lines.on("line", (line) => {
       message.params.threadId,
       activePermissionProfile,
     );
+    const approvalPolicy = activeApprovalPolicies.has(message.params.threadId)
+      ? activeApprovalPolicies.get(message.params.threadId)
+      : (message.params.approvalPolicy ?? "on-request");
+    const approvalsReviewer = activeApprovalsReviewers.has(message.params.threadId)
+      ? activeApprovalsReviewers.get(message.params.threadId)
+      : (message.params.approvalsReviewer ?? "user");
+    activeApprovalPolicies.set(message.params.threadId, approvalPolicy);
+    activeApprovalsReviewers.set(message.params.threadId, approvalsReviewer);
     respond(message.id, {
       activePermissionProfile: {
         id: activePermissionProfile,
       },
-      approvalPolicy:
-        activePermissionProfile === ":danger-full-access"
-          ? "never"
-          : "on-request",
+      approvalPolicy,
+      approvalsReviewer,
       cwd: "D:\\Fixture",
       model: activeModels.get(message.params.threadId) ?? "gpt-fixture",
       reasoningEffort:
@@ -275,10 +288,17 @@ lines.on("line", (line) => {
       respondError(message.id, -32600, "experimentalApi capability required");
       return;
     }
-    const isPermissionUpdate = hasExactKeys(message.params, [
+    const updateKeys = Object.keys(message.params).sort();
+    const permissionUpdateKeys = new Set([
+      "approvalPolicy",
+      "approvalsReviewer",
       "permissions",
       "threadId",
     ]);
+    const isPermissionUpdate =
+      updateKeys.includes("permissions") &&
+      updateKeys.includes("threadId") &&
+      updateKeys.every((key) => permissionUpdateKeys.has(key));
     const isModelUpdate =
       hasExactKeys(message.params, ["model", "threadId"]) ||
       hasExactKeys(message.params, ["effort", "threadId"]) ||
@@ -296,6 +316,18 @@ lines.on("line", (line) => {
         message.params.threadId,
         message.params.permissions,
       );
+      if (message.params.approvalPolicy) {
+        activeApprovalPolicies.set(
+          message.params.threadId,
+          message.params.approvalPolicy,
+        );
+      }
+      if (message.params.approvalsReviewer) {
+        activeApprovalsReviewers.set(
+          message.params.threadId,
+          message.params.approvalsReviewer,
+        );
+      }
     }
     if (message.params.model) {
       activeModels.set(message.params.threadId, message.params.model);

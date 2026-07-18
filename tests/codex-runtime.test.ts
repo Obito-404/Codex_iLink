@@ -665,7 +665,7 @@ test("native permission profiles are listed and selected through App Server", as
     assert.deepEqual(resumed.activePermissionProfile, {
       id: ":danger-full-access",
     });
-    assert.equal(resumed.approvalPolicy, "never");
+    assert.equal(resumed.approvalPolicy, "on-request");
     assert.deepEqual(resumed.sandbox, { type: "dangerFullAccess" });
   } finally {
     runtime.close();
@@ -689,13 +689,22 @@ test("a loaded thread changes permission through thread/settings/update", async 
 
   try {
     await runtime.resumeThread("thread-existing", { permissions: ":workspace" });
-    const changed = await runtime.updateThreadPermissions(
-      "thread-existing",
-      ":read-only",
-    );
-    await runtime.ensureThread("thread-existing", { permissions: ":read-only" });
+    const changed = await runtime.updateThreadPermissions("thread-existing", {
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      permissions: ":danger-full-access",
+    });
+    await runtime.ensureThread("thread-existing", {
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      permissions: ":danger-full-access",
+    });
 
-    assert.deepEqual(changed.activePermissionProfile, { id: ":read-only" });
+    assert.deepEqual(changed.activePermissionProfile, {
+      id: ":danger-full-access",
+    });
+    assert.equal(changed.approvalPolicy, "never");
+    assert.equal(changed.approvalsReviewer, "user");
     assert.equal(Number(readFileSync(updateCountPath, "utf8")), 1);
   } finally {
     runtime.close();

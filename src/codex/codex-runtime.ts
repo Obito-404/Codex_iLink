@@ -10,6 +10,7 @@ import type {
   JsonObject,
   ModelListResult,
   PermissionProfileListResult,
+  ThreadPermissionSettings,
   ThreadListResult,
   ThreadReadResult,
   ThreadResumeResult,
@@ -21,6 +22,7 @@ import type {
 export { CodexOutcomeUnknownError };
 
 export type CodexRuntimeOptions = AppServerConnectionOptions;
+export type { ThreadPermissionSettings } from "./protocol.ts";
 
 const ILINK_DEVELOPER_INSTRUCTIONS =
   "你正在通过 iLink 回复微信控制者。需要发送本机文件时：如果 send_file 工具可用，必须优先调用 send_file，path 使用 Windows 绝对文件路径；工具成功后不要在最终回复中再次输出本地路径。若 send_file 不可用，只能在最终回复中使用独占一行的标准 Windows Markdown 本地文件链接 `[名称](<C:\\绝对\\路径>)`。不得把普通自然语言路径或 URL 当作附件。";
@@ -128,7 +130,10 @@ export class CodexRuntime {
   #connection: AppServerConnection;
   #detachConnectionEvents: (() => void) | undefined;
   readonly #eventListeners = new Set<AppServerEventListener>();
-  readonly #loadedPermissionProfileIds = new Map<string, string>();
+  readonly #loadedPermissionSettings = new Map<
+    string,
+    ThreadPermissionSettings
+  >();
   readonly #loadedThreadIds = new Set<string>();
   readonly #controlRouters = new Map<string, ControlRouter>();
   readonly #options: CodexRuntimeOptions;
@@ -237,32 +242,27 @@ export class CodexRuntime {
 
   async resumeThread(
     threadId: string,
-    options: { permissions?: string } = {},
+    options: ThreadPermissionSettings = {},
   ): Promise<ThreadResumeResult> {
     const result = (await this.#requestSafely("thread/resume", {
       developerInstructions: ILINK_DEVELOPER_INSTRUCTIONS,
-      ...(options.permissions ? { permissions: options.permissions } : {}),
+      ...options,
       threadId,
     })) as ThreadResumeResult;
     this.#loadedThreadIds.add(threadId);
-    const activeProfileId = permissionProfileId(result.activePermissionProfile);
-    if (
-      options.permissions &&
-      activeProfileId !== options.permissions
-    ) {
+    const actual = permissionSettings(result);
+    if (!permissionSettingsMatch(actual, options)) {
       this.#loadedThreadIds.delete(threadId);
-      this.#loadedPermissionProfileIds.delete(threadId);
-      throw new Error("Codex did not activate the requested permission profile");
+      this.#loadedPermissionSettings.delete(threadId);
+      throw new Error("Codex did not activate the requested permission settings");
     }
-    if (activeProfileId) {
-      this.#loadedPermissionProfileIds.set(threadId, activeProfileId);
-    }
+    this.#loadedPermissionSettings.set(threadId, actual);
     return result;
   }
 
   async updateThreadPermissions(
     threadId: string,
-    permissions: string,
+    settings: ThreadPermissionSettings & { permissions: string },
   ): Promise<ThreadResumeResult> {
     if (
       this.#connection.isTerminated() ||
@@ -271,17 +271,22 @@ export class CodexRuntime {
       await this.#reconnect(this.#connection);
     }
     if (!this.#loadedThreadIds.has(threadId)) {
-      return this.resumeThread(threadId, { permissions });
+      return this.resumeThread(threadId, settings);
     }
-    if (this.#loadedPermissionProfileIds.get(threadId) !== permissions) {
+    if (
+      !permissionSettingsMatch(
+        this.#loadedPermissionSettings.get(threadId) ?? {},
+        settings,
+      )
+    ) {
       await this.#requestSafely("thread/settings/update", {
-        permissions,
+        ...settings,
         threadId,
       });
     }
     const result = await this.resumeThread(threadId);
-    if (permissionProfileId(result.activePermissionProfile) !== permissions) {
-      throw new Error("Codex did not activate the requested permission profile");
+    if (!permissionSettingsMatch(permissionSettings(result), settings)) {
+      throw new Error("Codex did not activate the requested permission settings");
     }
     return result;
   }
@@ -321,16 +326,16 @@ export class CodexRuntime {
       dynamicTools: ILINK_DYNAMIC_TOOLS,
     })) as ThreadStartResult;
     this.#loadedThreadIds.add(result.thread.id);
-    const activeProfileId = permissionProfileId(result.activePermissionProfile);
-    if (activeProfileId) {
-      this.#loadedPermissionProfileIds.set(result.thread.id, activeProfileId);
-    }
+    this.#loadedPermissionSettings.set(
+      result.thread.id,
+      permissionSettings(result),
+    );
     return result;
   }
 
   async ensureThread(
     threadId: string,
-    options: { permissions?: string } = {},
+    options: ThreadPermissionSettings = {},
   ): Promise<void> {
     if (
       this.#connection.isTerminated() ||
@@ -340,10 +345,19 @@ export class CodexRuntime {
     }
     if (
       this.#loadedThreadIds.has(threadId) &&
-      options.permissions &&
-      this.#loadedPermissionProfileIds.get(threadId) !== options.permissions
+      !permissionSettingsMatch(
+        this.#loadedPermissionSettings.get(threadId) ?? {},
+        options,
+      )
     ) {
-      await this.updateThreadPermissions(threadId, options.permissions);
+      if (!options.permissions) {
+        await this.resumeThread(threadId, options);
+        return;
+      }
+      await this.updateThreadPermissions(threadId, {
+        ...options,
+        permissions: options.permissions,
+      });
       return;
     }
     if (this.#loadedThreadIds.has(threadId)) {
@@ -533,7 +547,7 @@ export class CodexRuntime {
       this.#invalidateServerRequests(unavailable);
       unavailable.close();
       this.#connection = connection;
-      this.#loadedPermissionProfileIds.clear();
+      this.#loadedPermissionSettings.clear();
       this.#loadedThreadIds.clear();
       if (this.#reconnectRequired === unavailable) {
         this.#reconnectRequired = undefined;
@@ -664,6 +678,45 @@ function permissionProfileId(value: unknown): string | undefined {
   }
   const id = (value as Record<string, unknown>).id;
   return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function permissionSettings(
+  metadata: Record<string, unknown>,
+): ThreadPermissionSettings {
+  const permissions = permissionProfileId(metadata.activePermissionProfile);
+  const rawApprovalPolicy = metadata.approvalPolicy;
+  const approvalPolicy =
+    rawApprovalPolicy === "never" ||
+    rawApprovalPolicy === "on-request" ||
+    rawApprovalPolicy === "untrusted"
+      ? rawApprovalPolicy
+      : undefined;
+  const rawReviewer = metadata.approvalsReviewer;
+  const approvalsReviewer =
+    rawReviewer === "auto_review" ||
+    rawReviewer === "guardian_subagent" ||
+    rawReviewer === "user"
+      ? rawReviewer
+      : undefined;
+  return {
+    ...(approvalPolicy ? { approvalPolicy } : {}),
+    ...(approvalsReviewer ? { approvalsReviewer } : {}),
+    ...(permissions ? { permissions } : {}),
+  };
+}
+
+function permissionSettingsMatch(
+  actual: ThreadPermissionSettings,
+  expected: ThreadPermissionSettings,
+): boolean {
+  return (
+    (expected.permissions === undefined ||
+      actual.permissions === expected.permissions) &&
+    (expected.approvalPolicy === undefined ||
+      actual.approvalPolicy === expected.approvalPolicy) &&
+    (expected.approvalsReviewer === undefined ||
+      actual.approvalsReviewer === expected.approvalsReviewer)
+  );
 }
 
 function stringValue(value: unknown): string | undefined {

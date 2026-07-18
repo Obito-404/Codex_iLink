@@ -219,6 +219,49 @@ test("notification failure keeps the live approval and retries with one client i
   assert.deepEqual(responses, []);
 });
 
+test("an unanswered approval sends bounded reminders with distinct stable ids", async () => {
+  const sent: Array<{ clientId: string; text: string }> = [];
+  const reminderDelays: number[] = [];
+  const reminderResolvers: Array<() => void> = [];
+  const approvals = new ApprovalCoordinator({
+    async notify(text, clientId) {
+      sent.push({ clientId, text });
+    },
+    now: () => 3_250,
+    reminderSleep(milliseconds) {
+      reminderDelays.push(milliseconds);
+      return new Promise((resolve) => reminderResolvers.push(resolve));
+    },
+    respond() {},
+  });
+
+  await approvals.ingest({
+    id: 44,
+    method: "item/commandExecution/requestApproval",
+    params: {
+      command: "npm publish",
+      itemId: "item-reminder",
+      threadId: "thread-reminder",
+      turnId: "turn-reminder",
+    },
+  });
+
+  assert.deepEqual(reminderDelays, [60_000, 5 * 60_000]);
+  reminderResolvers[0]?.();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(sent.length, 2);
+  assert.match(sent[1]?.text ?? "", /仍在等待审批[\s\S]*npm publish/u);
+  assert.notEqual(sent[0]?.clientId, sent[1]?.clientId);
+  assert.match(sent[1]?.clientId ?? "", /:reminder:1$/u);
+  assert.equal(approvals.list()[0]?.reminderCount, 1);
+
+  approvals.decide(null, false);
+  reminderResolvers[1]?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 2);
+});
+
 test("a lost Codex callback cancels notification retries with an explicit reason", async () => {
   let live = true;
   const expired: string[] = [];
@@ -259,9 +302,13 @@ test("a lost Codex callback cancels notification retries with an explicit reason
 
 test("closing the bridge declines every still-live request", async () => {
   const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
+  const expired: string[] = [];
   const approvals = new ApprovalCoordinator({
     async notify() {},
     now: () => 4_000,
+    onExpired(_approval, reason) {
+      expired.push(reason);
+    },
     respond(id, result) {
       responses.push({ id, result });
     },
@@ -278,5 +325,6 @@ test("closing the bridge declines every still-live request", async () => {
 
   approvals.close();
   assert.deepEqual(responses, [{ id: 44, result: { decision: "decline" } }]);
+  assert.deepEqual(expired, ["request-lost"]);
   assert.deepEqual(approvals.list(), []);
 });

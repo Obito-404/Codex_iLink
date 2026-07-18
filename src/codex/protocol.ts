@@ -41,6 +41,18 @@ export type PermissionProfileListResult = JsonObject & {
   nextCursor: string | null;
 };
 
+export type ThreadApprovalPolicy = "never" | "on-request" | "untrusted";
+export type ThreadApprovalsReviewer =
+  | "auto_review"
+  | "guardian_subagent"
+  | "user";
+
+export type ThreadPermissionSettings = {
+  approvalPolicy?: ThreadApprovalPolicy;
+  approvalsReviewer?: ThreadApprovalsReviewer;
+  permissions?: string;
+};
+
 export type ModelSummary = JsonObject & {
   defaultReasoningEffort: string;
   displayName: string;
@@ -61,8 +73,13 @@ export type CodexThread = JsonObject & { id: string };
 export type CodexTurn = JsonObject & { id: string };
 
 export type ThreadReadResult = JsonObject & { thread: CodexThread };
-export type ThreadResumeResult = JsonObject & { thread: CodexThread };
-export type ThreadStartResult = JsonObject & { thread: CodexThread };
+export type ThreadResumeResult = JsonObject & {
+  activePermissionProfile?: JsonObject & { id: string };
+  approvalPolicy?: unknown;
+  approvalsReviewer?: unknown;
+  thread: CodexThread;
+};
+export type ThreadStartResult = ThreadResumeResult;
 export type ThreadUnarchiveResult = JsonObject & { thread: CodexThread };
 
 export type TurnStartResult = JsonObject & { turn: CodexTurn };

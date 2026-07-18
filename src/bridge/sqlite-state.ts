@@ -138,6 +138,12 @@ export type BridgeSettings = UserTimingSettings & {
 };
 
 export type ThreadPermissionProfile = {
+  approvalPolicy: "never" | "on-request" | "untrusted" | null;
+  approvalsReviewer:
+    | "auto_review"
+    | "guardian_subagent"
+    | "user"
+    | null;
   profileId: string;
   threadId: string;
   updatedAtMs: number;
@@ -1545,26 +1551,43 @@ export class SqliteState {
     this.#database
       .prepare(
         `INSERT INTO thread_permission_profiles
-          (thread_id, profile_id, updated_at_ms)
-         VALUES (?, ?, ?)
+          (thread_id, profile_id, approval_policy, approvals_reviewer, updated_at_ms)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (thread_id) DO UPDATE SET
            profile_id = excluded.profile_id,
+           approval_policy = excluded.approval_policy,
+           approvals_reviewer = excluded.approvals_reviewer,
            updated_at_ms = excluded.updated_at_ms`,
       )
-      .run(profile.threadId, profile.profileId, profile.updatedAtMs);
+      .run(
+        profile.threadId,
+        profile.profileId,
+        profile.approvalPolicy,
+        profile.approvalsReviewer,
+        profile.updatedAtMs,
+      );
   }
 
   getThreadPermissionProfile(threadId: string): ThreadPermissionProfile | null {
     const row = this.#database
       .prepare(
-        `SELECT thread_id, profile_id, updated_at_ms
+        `SELECT thread_id, profile_id, approval_policy, approvals_reviewer,
+                updated_at_ms
          FROM thread_permission_profiles WHERE thread_id = ?`,
       )
       .get(threadId) as
-      | { profile_id: string; thread_id: string; updated_at_ms: number }
+      | {
+          approval_policy: ThreadPermissionProfile["approvalPolicy"];
+          approvals_reviewer: ThreadPermissionProfile["approvalsReviewer"];
+          profile_id: string;
+          thread_id: string;
+          updated_at_ms: number;
+        }
       | undefined;
     return row
       ? {
+          approvalPolicy: row.approval_policy,
+          approvalsReviewer: row.approvals_reviewer,
           profileId: row.profile_id,
           threadId: row.thread_id,
           updatedAtMs: row.updated_at_ms,
@@ -1773,7 +1796,7 @@ export class SqliteState {
       | { user_version: number }
       | undefined;
     let version = current?.user_version ?? 0;
-    if (version < 0 || version > 10) {
+    if (version < 0 || version > 11) {
       throw new Error(`unsupported schema version ${String(version)}`);
     }
     const migrations = [
@@ -1787,6 +1810,7 @@ export class SqliteState {
       "./migrations/008-pending-desktop-notifications.sql",
       "./migrations/009-outbound-attachment-intents.sql",
       "./migrations/010-user-timing-settings.sql",
+      "./migrations/011-thread-permission-settings.sql",
     ];
     while (version < migrations.length) {
       const nextVersion = version + 1;

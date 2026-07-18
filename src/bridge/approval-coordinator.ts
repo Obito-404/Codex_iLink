@@ -13,6 +13,7 @@ export type PendingApproval = {
   deliveryStatus: "delivered" | "pending" | "retrying";
   expiresAtMs: number;
   method: ApprovalMethod;
+  reminderCount: number;
   summary: string;
   threadId: string;
   turnId: string;
@@ -31,6 +32,8 @@ export type ApprovalCoordinatorOptions = {
     result: Record<string, unknown>,
   ) => boolean | void;
   sleep?: (milliseconds: number) => Promise<void>;
+  reminderDelaysMs?: readonly number[];
+  reminderSleep?: (milliseconds: number) => Promise<void>;
   timeoutMs?: number;
 };
 
@@ -47,6 +50,7 @@ type LiveApproval = PendingApproval & {
 };
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000;
+const DEFAULT_REMINDER_DELAYS_MS = [60_000, 5 * 60_000] as const;
 const APPROVAL_METHODS = new Set<ApprovalMethod>([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
@@ -65,6 +69,10 @@ export class ApprovalCoordinator {
   readonly #now: ApprovalCoordinatorOptions["now"];
   readonly #onExpired: ApprovalCoordinatorOptions["onExpired"];
   readonly #respond: ApprovalCoordinatorOptions["respond"];
+  readonly #reminderDelaysMs: readonly number[];
+  readonly #reminderSleep: NonNullable<
+    ApprovalCoordinatorOptions["reminderSleep"]
+  >;
   readonly #sleep: NonNullable<ApprovalCoordinatorOptions["sleep"]>;
   readonly #timeoutMs: number;
   readonly #usedCodes = new Set<string>();
@@ -75,6 +83,9 @@ export class ApprovalCoordinator {
     this.#now = options.now;
     this.#onExpired = options.onExpired;
     this.#respond = options.respond;
+    this.#reminderDelaysMs =
+      options.reminderDelaysMs ?? DEFAULT_REMINDER_DELAYS_MS;
+    this.#reminderSleep = options.reminderSleep ?? retrySleep;
     this.#sleep = options.sleep ?? retrySleep;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
@@ -100,6 +111,7 @@ export class ApprovalCoordinator {
       method: event.method,
       notificationText: "",
       params: event.params,
+      reminderCount: 0,
       summary: approvalSummary(event.method, event.params),
       timer,
       threadId,
@@ -111,6 +123,7 @@ export class ApprovalCoordinator {
     );
     this.#live.set(code, approval);
     await this.#deliver(code);
+    this.#scheduleReminders(code);
     if (!this.#isLive(event.id) && this.#live.get(code) === approval) {
       this.#live.delete(code);
       clearTimeout(timer);
@@ -183,6 +196,7 @@ export class ApprovalCoordinator {
       if (this.#isLive(approval.id)) {
         this.#respond(approval.id, denialResult(approval.method));
       }
+      this.#emitExpired(approval, "request-lost");
     }
     this.#live.clear();
   }
@@ -243,6 +257,49 @@ export class ApprovalCoordinator {
     }
   }
 
+  #scheduleReminders(code: string): void {
+    for (const [index, delayMs] of this.#reminderDelaysMs.entries()) {
+      if (delayMs <= 0 || delayMs >= this.#timeoutMs) continue;
+      void this.#reminderSleep(delayMs)
+        .then(() => this.#deliverReminder(code, index + 1))
+        .catch(() => undefined);
+    }
+  }
+
+  async #deliverReminder(
+    code: string,
+    reminderNumber: number,
+    attempt = 1,
+  ): Promise<void> {
+    const approval = this.#live.get(code);
+    if (!approval || !this.#isLive(approval.id)) return;
+    if (approval.expiresAtMs <= this.#now()) {
+      this.#expireCode(code);
+      return;
+    }
+    const itemId = stringField(approval.params, "itemId") ?? "unknown";
+    try {
+      await this.#notify(
+        approvalReminder(approval, this.#live.size > 1),
+        `codex-ilink:approval:${approval.turnId}:${itemId}:reminder:${String(reminderNumber)}`,
+      );
+      if (this.#live.get(code) === approval) {
+        approval.reminderCount = Math.max(
+          approval.reminderCount,
+          reminderNumber,
+        );
+      }
+    } catch {
+      if (this.#live.get(code) !== approval || !this.#isLive(approval.id)) {
+        return;
+      }
+      const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(attempt - 1, 5));
+      void this.#sleep(delayMs)
+        .then(() => this.#deliverReminder(code, reminderNumber, attempt + 1))
+        .catch(() => undefined);
+    }
+  }
+
   #newCode(): string {
     for (;;) {
       const code = `${"ABCDEF"[randomInt(6)]}${randomBytes(3)
@@ -266,6 +323,7 @@ export class ApprovalCoordinator {
           expiresAtMs: approval.expiresAtMs,
           code: approval.code,
           method: approval.method,
+          reminderCount: approval.reminderCount,
           summary: approval.summary,
           threadId: approval.threadId,
           turnId: approval.turnId,
@@ -345,6 +403,19 @@ function approvalNotification(
     `${approval.code}：${approval.summary}`,
     "回复：ok<code> 或 no<code>",
   ].join("\n");
+}
+
+function approvalReminder(
+  approval: PendingApproval,
+  multiple: boolean,
+): string {
+  return multiple
+    ? [
+        "⏳ 仍在等待审批",
+        `${approval.code}：${approval.summary}`,
+        `回复：ok${approval.code} 或 no${approval.code}`,
+      ].join("\n")
+    : ["⏳ 仍在等待审批", approval.summary, "回复：ok 或 no"].join("\n");
 }
 
 function retrySleep(milliseconds: number): Promise<void> {

@@ -4115,8 +4115,62 @@ test("a transient approval notification failure stays pending instead of declini
       cursor: "cursor-approval-retry-status",
       messages: [textMessage(35, "st")],
     });
-    assert.match(sent.at(-1)?.text ?? "", /待审批：1（通知重试中：1）/u);
+    assert.match(
+      sent.at(-1)?.text ?? "",
+      /待审批：1（通知重试中：1；发送尝试：1；提醒：0；最短剩余：30 分钟）/u,
+    );
     assert.match(sent.at(-1)?.text ?? "", /微信异常/u);
+  } finally {
+    bridge.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("closing the bridge durably reports that a live approval became invalid", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-approval-close-"));
+  const state = new SqliteState(join(directory, "state.sqlite"));
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  const bridge = new BridgeEngine({
+    codex: {
+      respondToServerRequest() {},
+      async startTurn() {
+        assert.fail("approval setup must not start a turn");
+      },
+    },
+    ilink: {
+      async sendText(input) {
+        if (input.signal?.aborted) throw new Error("bridge closing");
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    newId: () => "approval-close-client",
+    now: () => 7_000,
+    session,
+    state,
+  });
+
+  try {
+    await bridge.ingestBatch({
+      cursor: "cursor-approval-close-context",
+      messages: [textMessage(36, "help")],
+    });
+    await bridge.ingestCodexEvent({
+      id: 80,
+      method: "item/fileChange/requestApproval",
+      params: {
+        itemId: "item-approval-close",
+        threadId: "thread-approval-close",
+        turnId: "turn-approval-close",
+      },
+    });
+
+    bridge.close();
+
+    const invalidation = state
+      .listPendingOutbox()
+      .find((item) => item.clientId.endsWith(":expired"));
+    assert.match(invalidation?.body ?? "", /审批已失效[\s\S]*重新发送/u);
   } finally {
     bridge.close();
     state.close();

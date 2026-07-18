@@ -62,11 +62,15 @@ test("selected Codex permission profile survives Bridge reopening per thread", (
   try {
     const first = new SqliteState(path);
     first.setThreadPermissionProfile({
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
       profileId: ":danger-full-access",
       threadId: "thread-permission-a",
       updatedAtMs: 100,
     });
     first.setThreadPermissionProfile({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
       profileId: ":read-only",
       threadId: "thread-permission-b",
       updatedAtMs: 200,
@@ -75,17 +79,69 @@ test("selected Codex permission profile survives Bridge reopening per thread", (
 
     const reopened = new SqliteState(path);
     assert.deepEqual(reopened.getThreadPermissionProfile("thread-permission-a"), {
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
       profileId: ":danger-full-access",
       threadId: "thread-permission-a",
       updatedAtMs: 100,
     });
     assert.deepEqual(reopened.getThreadPermissionProfile("thread-permission-b"), {
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
       profileId: ":read-only",
       threadId: "thread-permission-b",
       updatedAtMs: 200,
     });
     reopened.close();
   } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("legacy permission profiles keep their existing approval behavior after migration", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-permissions-v7-"));
+  const path = join(directory, "state.db");
+  const database = new DatabaseSync(path);
+
+  try {
+    const migrations = join(process.cwd(), "src", "bridge", "migrations");
+    for (let version = 1; version <= 7; version += 1) {
+      const filename = `${String(version).padStart(3, "0")}-${[
+        "initial",
+        "list-snapshots",
+        "turn-scheduler",
+        "desktop-observations",
+        "desktop-observation-tombstones",
+        "durable-turn-input",
+        "thread-permission-profiles",
+      ][version - 1]}.sql`;
+      database.exec(readFileSync(join(migrations, filename), "utf8"));
+    }
+    database.exec("PRAGMA user_version = 7");
+    database
+      .prepare(
+        `INSERT INTO thread_permission_profiles
+          (thread_id, profile_id, updated_at_ms) VALUES (?, ?, ?)`,
+      )
+      .run("thread-legacy-permission", ":danger-full-access", 300);
+    database.close();
+
+    const migrated = new SqliteState(path);
+    assert.deepEqual(
+      migrated.getThreadPermissionProfile("thread-legacy-permission"),
+      {
+        approvalPolicy: null,
+        approvalsReviewer: null,
+        profileId: ":danger-full-access",
+        threadId: "thread-legacy-permission",
+        updatedAtMs: 300,
+      },
+    );
+    migrated.close();
+  } finally {
+    try {
+      database.close();
+    } catch {}
     rmSync(directory, { force: true, recursive: true });
   }
 });

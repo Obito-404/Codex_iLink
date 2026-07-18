@@ -453,7 +453,7 @@ test("rejects invalid AES block or PKCS7 data and removes the partial file", asy
 });
 
 test("keeps a progressing download alive beyond one timeout window", async (t) => {
-  const chunkCount = 2_000;
+  const chunkCount = 20;
   let index = 0;
   const { store } = fixture(
     t,
@@ -472,13 +472,13 @@ test("keeps a progressing download alive beyond one timeout window", async (t) =
               controller.close();
               return;
             }
-            await new Promise<void>((resolve) => setImmediate(resolve));
+            await new Promise<void>((resolve) => setTimeout(resolve, 10));
             index += 1;
             controller.enqueue(Uint8Array.of(0x61));
           },
         }),
       ),
-    { maxBytes: 4_096, timeoutMs: 15 },
+    { maxBytes: 4_096, timeoutMs: 100 },
   );
   const candidate = inboundMediaCandidateFromItem({
     image_item: {
@@ -491,7 +491,7 @@ test("keeps a progressing download alive beyond one timeout window", async (t) =
   const startedAt = Date.now();
   const result = await store.resolve({ candidate, dedupeKey: "progress" });
   assertStored(result);
-  assert.ok(Date.now() - startedAt > 15);
+  assert.ok(Date.now() - startedAt > 100);
   assert.equal(readFileSync(result.path).length, chunkCount);
 });
 

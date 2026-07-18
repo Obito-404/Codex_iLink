@@ -1,0 +1,244 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "需求立项与交付流程",
+    "subtitle": "先确认业务价值与技术可行性，再正式投入资源",
+    "output": "project-initiation-workflow.html"
+  },
+  "lanes": [
+    { "id": "intake", "label": "需求与资料" },
+    { "id": "clarify", "label": "资料不清处理", "variant": "exception" },
+    { "id": "assessment", "label": "立项前评估" },
+    { "id": "planning", "label": "正式立项" },
+    { "id": "delivery", "label": "开发交付" },
+    { "id": "acceptance", "label": "验收与奖励" }
+  ],
+  "nodes": [
+    {
+      "id": "request",
+      "lane": "intake",
+      "col": 0,
+      "type": "external",
+      "label": "提出需求",
+      "sublabel": "说明问题与目标",
+      "width": 92
+    },
+    {
+      "id": "data",
+      "lane": "intake",
+      "col": 2,
+      "type": "frontend",
+      "label": "提交基础数据",
+      "sublabel": "姓名岗位·耗时·人数",
+      "width": 112
+    },
+    {
+      "id": "complete",
+      "lane": "intake",
+      "col": 5,
+      "type": "security",
+      "label": "信息完整？",
+      "sublabel": "清晰且可核验",
+      "tag": "检查点",
+      "width": 92
+    },
+    {
+      "id": "supplement",
+      "lane": "clarify",
+      "col": 4,
+      "type": "messagebus",
+      "label": "补充资料",
+      "sublabel": "1 周内补齐并重审",
+      "tag": "逾期进入需求池",
+      "width": 118
+    },
+    {
+      "id": "business_confirm",
+      "lane": "assessment",
+      "col": 5,
+      "type": "external",
+      "label": "业务主管确认",
+      "sublabel": "需求·收益·资源",
+      "width": 92
+    },
+    {
+      "id": "tech_precheck",
+      "lane": "assessment",
+      "col": 3,
+      "type": "backend",
+      "label": "技术初评",
+      "sublabel": "可行性·难度·成本·风险",
+      "width": 100
+    },
+    {
+      "id": "priority",
+      "lane": "assessment",
+      "col": 2,
+      "type": "database",
+      "label": "综合优先级",
+      "sublabel": "价值 × 成本 × 风险",
+      "width": 96
+    },
+    {
+      "id": "approve",
+      "lane": "assessment",
+      "col": 0,
+      "type": "security",
+      "label": "正式立项？",
+      "sublabel": "通过 / 进入需求池",
+      "tag": "决策门",
+      "width": 92
+    },
+    {
+      "id": "owner",
+      "lane": "planning",
+      "col": 0,
+      "type": "external",
+      "label": "指定项目负责人",
+      "sublabel": "明确单一责任人",
+      "width": 92
+    },
+    {
+      "id": "plan",
+      "lane": "planning",
+      "col": 2,
+      "type": "backend",
+      "label": "制定交付计划",
+      "sublabel": "范围·排期·验收标准",
+      "width": 118
+    },
+    {
+      "id": "develop",
+      "lane": "delivery",
+      "col": 2,
+      "type": "backend",
+      "label": "开发实施",
+      "sublabel": "按阶段交付",
+      "width": 104
+    },
+    {
+      "id": "stage_accept",
+      "lane": "delivery",
+      "col": 0,
+      "type": "security",
+      "label": "阶段验收",
+      "sublabel": "未通过则返回开发",
+      "width": 92
+    },
+    {
+      "id": "final_accept",
+      "lane": "acceptance",
+      "col": 0,
+      "type": "security",
+      "label": "最终验收",
+      "sublabel": "按既定标准确认",
+      "width": 92
+    },
+    {
+      "id": "bonus",
+      "lane": "acceptance",
+      "col": 2,
+      "type": "cloud",
+      "label": "Danny 评审奖金",
+      "sublabel": "依据交付与实际收益",
+      "width": 122
+    },
+    {
+      "id": "done",
+      "lane": "acceptance",
+      "col": 4,
+      "type": "database",
+      "label": "流程完成",
+      "sublabel": "归档结果",
+      "width": 104
+    }
+  ],
+  "edges": [
+    { "from": "request", "to": "data", "variant": "default" },
+    { "from": "data", "to": "complete", "variant": "default" },
+    {
+      "from": "complete",
+      "to": "supplement",
+      "label": "不清晰",
+      "variant": "security",
+      "role": "branch",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop",
+      "labelSegment": 1,
+      "labelDy": 10
+    },
+    {
+      "from": "complete",
+      "to": "business_confirm",
+      "label": "信息清晰",
+      "variant": "emphasis",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelAt": [640, 220]
+    },
+    { "from": "business_confirm", "to": "tech_precheck", "variant": "default" },
+    { "from": "tech_precheck", "to": "priority", "variant": "default" },
+    { "from": "priority", "to": "approve", "variant": "emphasis" },
+    {
+      "from": "approve",
+      "to": "owner",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight"
+    },
+    { "from": "owner", "to": "plan", "variant": "default" },
+    {
+      "from": "plan",
+      "to": "develop",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight"
+    },
+    { "from": "develop", "to": "stage_accept", "variant": "default" },
+    {
+      "from": "stage_accept",
+      "to": "final_accept",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight"
+    },
+    { "from": "final_accept", "to": "bonus", "variant": "emphasis" },
+    { "from": "bonus", "to": "done", "variant": "default" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "立项原则",
+      "items": [
+        "先确认业务价值，再评估技术可行性",
+        "正式立项后才锁定负责人和交付资源",
+        "未通过立项的需求进入需求池"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "异常处理",
+      "items": [
+        "资料不清时退回补充，期限为 1 周",
+        "阶段验收不通过时返回开发返工",
+        "最终验收严格依据立项时确定的标准"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "奖金评审",
+      "items": [
+        "交付质量可在最终验收后评审",
+        "实际节省时间应以可核验结果为依据",
+        "必要时设置上线后的收益观察期"
+      ]
+    }
+  ]
+}

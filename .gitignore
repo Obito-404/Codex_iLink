@@ -3,3 +3,4 @@ dist/
 .probe-output/
 .probe-output-desktop-runtime/
 *.log
+tmp/

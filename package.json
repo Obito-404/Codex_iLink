@@ -1,9 +1,17 @@
 {
   "name": "codex-ilink",
   "version": "0.1.0-beta.1",
-  "private": true,
   "description": "Use WeChat as a secure remote entry point to local Codex sessions on Windows.",
-  "license": "UNLICENSED",
+  "author": "Obito <tipturengufersan@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Obito-404/Codex_iLink.git"
+  },
+  "homepage": "https://github.com/Obito-404/Codex_iLink#readme",
+  "bugs": {
+    "url": "https://github.com/Obito-404/Codex_iLink/issues"
+  },
   "type": "module",
   "bin": {
     "ilink": "./dist/cli/ilink.js"

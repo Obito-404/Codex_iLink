@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Codex iLink 项目工作流",
+    "subtitle": "微信输入 → 持久化路由与租约仲裁 → Codex 执行 → 可靠送达",
+    "output": "codex-ilink-workflow.html"
+  },
+  "lanes": [
+    { "id": "wechat", "label": "微信控制者" },
+    { "id": "ilink", "label": "iLink 通道" },
+    { "id": "bridge", "label": "Bridge Engine" },
+    { "id": "state", "label": "SQLite · 调度与仲裁" },
+    { "id": "codex", "label": "Codex App Server" },
+    { "id": "desktop", "label": "Desktop 协同", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "intake", "label": "接收", "fromCol": 0, "toCol": 1 },
+    { "id": "route", "label": "解析 · 路由", "fromCol": 2, "toCol": 3, "variant": "security" },
+    { "id": "execute", "label": "执行 · 送达", "fromCol": 4, "toCol": 5, "variant": "emphasis" }
+  ],
+  "groups": [
+    { "id": "coordination", "label": "持久化提交边界", "lane": "state", "fromCol": 2, "toCol": 3, "variant": "security" },
+    { "id": "desktop_guard", "label": "旁路观察与主动通知", "lane": "desktop", "fromCol": 0, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": [
+    "controller",
+    "longpoll",
+    "normalize",
+    "durable",
+    "route_lease",
+    "run_turn",
+    "terminal",
+    "final_commit",
+    "outbox",
+    "reply"
+  ],
+  "nodes": [
+    { "id": "controller", "lane": "wechat", "col": 0, "type": "external", "label": "微信控制者", "sublabel": "文本 · 图片 · 文件" },
+    { "id": "reply", "lane": "wechat", "col": 5, "type": "frontend", "label": "最终回复", "sublabel": "正文 + 最多 2 个附件", "tag": "可靠送达" },
+
+    { "id": "longpoll", "lane": "ilink", "col": 1, "type": "cloud", "label": "长轮询", "sublabel": "cursor + message_id" },
+    { "id": "outbox", "lane": "ilink", "col": 5, "type": "messagebus", "label": "Outbox 发送", "sublabel": "固定 client_id 重试" },
+
+    { "id": "normalize", "lane": "bridge", "col": 2, "type": "backend", "label": "校验与标准化", "sublabel": "身份 · 命令 · 媒体" },
+    { "id": "command", "lane": "bridge", "col": 3, "type": "frontend", "label": "命令直返", "sublabel": "p / s / st / perm" },
+    { "id": "attachment", "lane": "bridge", "col": 5, "type": "cloud", "label": "附件登记", "sublabel": "send_file(path)" },
+
+    { "id": "durable", "lane": "state", "col": 2, "type": "database", "label": "原子接收入库", "sublabel": "去重 + cursor + payload" },
+    { "id": "route_lease", "lane": "state", "col": 3, "type": "security", "label": "路由与租约", "sublabel": "FIFO · 同线程串行", "tag": "全局最多 3 回合" },
+    { "id": "final_commit", "lane": "state", "col": 5, "type": "database", "label": "终态原子提交", "sublabel": "回复 + 附件意图" },
+
+    { "id": "run_turn", "lane": "codex", "col": 4, "type": "backend", "label": "恢复并执行", "sublabel": "thread/resume · turn/start", "tag": "原生权限 Profile" },
+    { "id": "terminal", "lane": "codex", "col": 5, "type": "backend", "label": "回合终态", "sublabel": "completed / failed" },
+
+    { "id": "desktop", "lane": "desktop", "col": 0, "type": "frontend", "label": "Codex Desktop", "sublabel": "共享同一 thread" },
+    { "id": "hook", "lane": "desktop", "col": 1, "type": "messagebus", "label": "Guard Hook", "sublabel": "Named Pipe + Spool" },
+    { "id": "observe", "lane": "desktop", "col": 3, "type": "security", "label": "租约观察", "sublabel": "阻止同线程双写" },
+    { "id": "away", "lane": "desktop", "col": 5, "type": "external", "label": "离开通知", "sublabel": "锁屏 / 空闲后推送" }
+  ],
+  "edges": [
+    { "from": "controller", "to": "longpoll", "label": "消息 / 附件", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1 },
+    { "from": "longpoll", "to": "normalize", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "normalize", "to": "durable", "label": "原子接收", "variant": "security", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelDx": -34 },
+    { "from": "durable", "to": "route_lease", "variant": "security" },
+    { "from": "route_lease", "to": "run_turn", "label": "取得租约", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelAt": [465, 539] },
+    { "from": "run_turn", "to": "terminal", "variant": "emphasis" },
+    { "from": "terminal", "to": "final_commit", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "route": "drop" },
+    { "from": "final_commit", "to": "outbox", "label": "持久化待发送", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "route": "return-left", "labelAt": [551, 407] },
+    { "from": "outbox", "to": "reply", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "route": "drop" },
+
+    { "from": "normalize", "to": "command", "variant": "default", "role": "branch" },
+    { "from": "attachment", "to": "final_commit", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+
+    { "from": "desktop", "to": "hook", "variant": "dashed" },
+    { "from": "hook", "to": "observe", "label": "Prompt / Stop", "variant": "security", "role": "async" },
+    { "from": "observe", "to": "away", "label": "完成且用户离开", "variant": "dashed", "role": "async" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "主链路",
+      "items": [
+        "只接受绑定控制者的单聊；群聊和其他用户静默忽略",
+        "入站正文、媒体引用和游标先原子持久化，再进入路由",
+        "同线程严格串行；不同线程最多并行 3 个微信回合",
+        "终态正文与附件意图原子进入 Outbox，确认后清除正文"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "安全与恢复",
+      "items": [
+        "SQLite 原子租约仲裁 Desktop 与 Bridge，避免同一任务双写",
+        "turn/start 前写 Dispatch Intent；接受结果未知时不自动重试",
+        "Hook 通过 Named Pipe 上报，失败时由 7 天有界 Spool 恢复",
+        "图片解密落盘；文件与视频按本地 mention 提交，不提升权限"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "输出与通知",
+      "items": [
+        "Bridge 回合无论是否在场，最终结果都返回微信",
+        "Desktop 回合仅在锁屏或空闲后发送完成 / 失败通知",
+        "send_file 显式登记本机附件，成功终态后加密上传微信 CDN",
+        "文本按 2000 UTF-8 字节切分，最多 3 条，超长提示到 Desktop 查看"
+      ]
+    }
+  ]
+}

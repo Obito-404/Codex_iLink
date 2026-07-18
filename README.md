@@ -57,9 +57,9 @@ ilink stop     # 停止后台 Bridge
 ilink start    # 再次启动
 ```
 
-当前版本尚未发布到 npm Registry。上面的本地全局安装会让 `ilink` 和插件引用解压目录，请勿移动或删除它。
+上面的本地全局安装会让 `ilink` 和插件引用解压目录，请勿移动或删除它。
 
-### npm 安装（发布后）
+### npm 安装
 
 首个公开版本将先使用 `next` 标签发布。npm 页面确认已经存在该版本后，再执行：
 
@@ -73,7 +73,7 @@ ilink login
 ilink start
 ```
 
-不要在 npm 尚未发布时执行上述安装命令，也不要从非官方 Registry 安装同名包。
+请先在 npm 官方页面确认版本存在，并只从 npm 官方 Registry 安装。
 
 早期本地预览版曾使用 marketplace 名称 `personal`。升级前先执行
 `codex plugin remove codex-ilink-probe@personal`；再用
@@ -234,4 +234,4 @@ pnpm test
 
 `pnpm probe:lease` 与 `pnpm probe:resume` 会创建真实 Codex 任务并产生模型用量，不属于普通安装流程。
 
-npm 维护者流程、首次发布的人工作业和 tarball 验收步骤见 [npm 发布流程](./docs/npm-publishing.md)。当前源码许可证标记为 `UNLICENSED`；在负责人明确选择许可证并补齐公开仓库信息前，不得发布到 npm。
+npm 维护者流程、首次发布的人工作业和 tarball 验收步骤见 [npm 发布流程](./docs/npm-publishing.md)。本项目采用 [MIT License](./LICENSE)。

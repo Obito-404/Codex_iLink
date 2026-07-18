@@ -964,6 +964,86 @@ test("ambiguous control-like text uses the isolated classifier fallback", async 
   });
 });
 
+test("compound controls execute in order and produce one consolidated reply", async () => {
+  await withNavigationBridge(async ({ bridge, clock, sent, state }) => {
+    state.setSelectedProjectPath("D:\\Selected");
+    state.setBinding({
+      expiresAtMs: clock.value + 15 * 60 * 1_000,
+      projectPath: "D:\\Selected",
+      threadId: "thread-current",
+      updatedAtMs: clock.value,
+    });
+
+    await ingest(bridge, 57, "返回主会话主任务，然后把状态显示一下");
+
+    assert.equal(state.getBinding(clock.value), null);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]?.text ?? "", /^已返回微信主会话。/u);
+    assert.match(sent[0]?.text ?? "", /会话：微信主会话/u);
+    assert.match(sent[0]?.text ?? "", /项目：Selected/u);
+  });
+});
+
+test("AI fallback can return a validated compound control", async () => {
+  await withNavigationBridge(async ({ bridge, clock, codex, sent, state }) => {
+    state.setBinding({
+      expiresAtMs: clock.value + 15 * 60 * 1_000,
+      projectPath: "D:\\Selected",
+      threadId: "thread-current",
+      updatedAtMs: clock.value,
+    });
+    codex.controlClassification = {
+      intents: [{ kind: "exitSession" }, { kind: "status" }],
+      kind: "controlSequence",
+    };
+
+    await ingest(bridge, 58, "回到先前的会话，再查看当前状态");
+
+    assert.deepEqual(codex.classifiedTexts, ["回到先前的会话，再查看当前状态"]);
+    assert.equal(state.getBinding(clock.value), null);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]?.text ?? "", /^已返回微信主会话。/u);
+    assert.match(sent[0]?.text ?? "", /会话：微信主会话/u);
+  });
+});
+
+test("compound controls stop before dependent actions when an earlier command fails", async () => {
+  await withNavigationBridge(
+    async ({ bridge, codex, sent, state }) => {
+      state.setSelectedProjectPath("D:\\Original");
+
+      await ingest(bridge, 59, "切换到第99个项目，然后新建任务");
+
+      assert.deepEqual(codex.startedCwds, []);
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0]?.text, "项目编号无效，请按 p 当前列表选择。");
+    },
+    {
+      projects: [{ cwd: "D:\\Only", name: "Only" }],
+    },
+  );
+});
+
+test("a failed session page command cannot enter from a different snapshot", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent }) => {
+    codex.activeThreads = [
+      {
+        cwd: "D:\\Selected",
+        id: "thread-first-page",
+        name: "First page",
+        status: { type: "idle" },
+        updatedAt: 1,
+      },
+    ];
+
+    await ingest(bridge, 60, "下一页任务，然后打开第一个会话");
+
+    assert.equal(codex.calls.includes("resume:thread-first-page"), false);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.text, "会话列表已过期，请先用 s 或 sarc 刷新。");
+  });
+});
+
 test("st reports current routing, every known active task, queues, and health", async () => {
   await withNavigationBridge(async ({ bridge, clock, codex, leases, sent, state }) => {
     clock.value = 100_000;

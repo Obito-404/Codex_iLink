@@ -1,4 +1,4 @@
-export type InboundIntent =
+export type AtomicControlIntent =
   | { code: string | null; kind: "approve" }
   | { code: string | null; kind: "deny" }
   | { kind: "clearSession" }
@@ -7,7 +7,6 @@ export type InboundIntent =
   | { kind: "exitSession" }
   | { kind: "efforts" }
   | { kind: "help" }
-  | { kind: "message"; text: string }
   | { kind: "models" }
   | { kind: "newSession" }
   | { kind: "permissions" }
@@ -20,13 +19,20 @@ export type InboundIntent =
   | { kind: "selectProject"; index: number }
   | { kind: "sessions"; page: "archived" | "first" | "next" }
   | { kind: "status" }
-  | { kind: "stopTurn" }
+  | { kind: "stopTurn" };
+
+export type ControlSequenceIntent = {
+  intents: readonly AtomicControlIntent[];
+  kind: "controlSequence";
+};
+
+export type InboundIntent =
+  | AtomicControlIntent
+  | ControlSequenceIntent
+  | { kind: "message"; text: string }
   | { kind: "unknownCommand"; text: string };
 
-export type RoutedControlIntent = Exclude<
-  InboundIntent,
-  { kind: "message" } | { kind: "unknownCommand" }
->;
+export type RoutedControlIntent = AtomicControlIntent | ControlSequenceIntent;
 
 export const COMMAND_HELP = [
   "p — projects",
@@ -117,6 +123,8 @@ export function parseInboundText(text: string): InboundIntent {
     }
   }
 
+  const sequence = parseNaturalControlSequence(command);
+  if (sequence) return sequence;
   const natural = parseNaturalControl(command);
   if (natural) return natural;
   return isReservedCommandShape(command)
@@ -150,6 +158,26 @@ export function routedControlIntent(value: unknown): RoutedControlIntent | null 
     typeof input.code === "string" && /^[a-f][a-f\d]{5}$/iu.test(input.code)
       ? input.code.toUpperCase()
       : null;
+
+  if (kind === "controlSequence") {
+    if (
+      !Array.isArray(input.intents) ||
+      input.intents.length < 2 ||
+      input.intents.length > 4
+    ) {
+      return null;
+    }
+    const intents: AtomicControlIntent[] = [];
+    for (const value of input.intents) {
+      const intent = routedControlIntent(value);
+      if (!intent || intent.kind === "controlSequence") return null;
+      intents.push(intent);
+    }
+    return {
+      intents,
+      kind: "controlSequence",
+    };
+  }
 
   switch (kind) {
     case "approve":
@@ -196,7 +224,24 @@ export function routedControlIntent(value: unknown): RoutedControlIntent | null 
 
 const NATURAL_INDEX = "([1-9]\\d*|[零一二两三四五六七八九十百千]+)";
 
-function parseNaturalControl(command: string): InboundIntent | null {
+function parseNaturalControlSequence(
+  command: string,
+): ControlSequenceIntent | null {
+  const parts = command.split(/\s*(?:，|,)?\s*(?:然后|接着|随后|再)\s*/u);
+  if (parts.length < 2 || parts.length > 4) return null;
+  const intents: AtomicControlIntent[] = [];
+  for (const part of parts) {
+    const intent = parseNaturalControl(part);
+    if (!intent) return null;
+    intents.push(intent);
+  }
+  return {
+    intents,
+    kind: "controlSequence",
+  };
+}
+
+function parseNaturalControl(command: string): AtomicControlIntent | null {
   const normalized = normalizeNaturalControl(command);
   if (!normalized) return null;
 
@@ -246,10 +291,18 @@ function parseNaturalControl(command: string): InboundIntent | null {
   if (/^(?:停止|中止|终止)(?:当前)?(?:微信|codex)(?:任务|回合)$/iu.test(normalized)) {
     return { kind: "stopTurn" };
   }
-  if (/^(?:返回|回到|退出到)(?:微信)?主(?:任务|会话)$|^退出当前(?:任务|会话)$/u.test(normalized)) {
+  if (
+    /^(?:返回|回到|退出到)(?:微信)?主(?:任务|会话)(?:主(?:任务|会话))?$|^退出当前(?:任务|会话)$/u.test(
+      normalized,
+    )
+  ) {
     return { kind: "exitSession" };
   }
-  if (/^(?:查看|显示|看(?:一下)?)(?:当前)?(?:任务|会话|连接)?状态$|^当前状态$/u.test(normalized)) {
+  if (
+    /^(?:查看|显示|看(?:一下)?)(?:当前)?(?:任务|会话|连接)?状态$|^(?:把|将)?(?:当前)?状态(?:查看|显示|看)$|^当前状态$/u.test(
+      normalized,
+    )
+  ) {
     return { kind: "status" };
   }
 
@@ -315,7 +368,7 @@ function indexedNaturalIntent(
     | "selectModel"
     | "selectPermission"
     | "selectProject",
-): InboundIntent | null {
+): AtomicControlIntent | null {
   const index = naturalNumber(value);
   if (index === null) return null;
   switch (kind) {

@@ -23,10 +23,13 @@ test("control intent classification uses an isolated ephemeral tool turn", async
   try {
     const classified = await runtime.classifyControlIntent({
       cwd: "D:\\Codex-iLink\\Inbox",
-      text: "帮我查看一下控制命令怎么用",
+      text: "返回主会话，然后显示状态",
     });
 
-    assert.deepEqual(classified, { kind: "help" });
+    assert.deepEqual(classified, {
+      intents: [{ kind: "exitSession" }, { kind: "status" }],
+      kind: "controlSequence",
+    });
     assert.deepEqual(events, []);
   } finally {
     runtime.close();

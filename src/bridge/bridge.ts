@@ -1,6 +1,7 @@
 import { win32 } from "node:path";
 
 import {
+  type AtomicControlIntent,
   COMMAND_HELP,
   looksLikeControlRequest,
   parseInboundText,
@@ -103,6 +104,21 @@ export type ProjectNavigationEntry = {
   cwd: string;
   name: string;
 };
+
+type ControlReplyResult = {
+  ok: boolean;
+  reply: string | null;
+};
+
+class ControlCommandRejected extends Error {
+  readonly reply: string;
+
+  constructor(reply: string) {
+    super(reply);
+    this.name = "ControlCommandRejected";
+    this.reply = reply;
+  }
+}
 
 export type CodexTurnStarter = {
   classifyControlIntent?(input: {
@@ -916,10 +932,6 @@ export class BridgeEngine {
     ) {
       intent = { kind: "message", text: input.turnInput.text };
     }
-    if (intent.kind !== "message") this.#touchBinding();
-    if (intent.kind === "help") {
-      return this.#replyToCommand(input.contextToken, input.messageId, COMMAND_HELP);
-    }
     if (intent.kind === "unknownCommand") {
       return this.#replyToCommand(
         input.contextToken,
@@ -937,6 +949,33 @@ export class BridgeEngine {
         },
       });
     }
+    this.#touchBinding();
+    const controls: readonly AtomicControlIntent[] =
+      intent.kind === "controlSequence"
+        ? intent.intents
+        : [intent];
+    const replies: string[] = [];
+    for (const control of controls) {
+      const result = await this.#controlReply(control, input.contextToken);
+      if (result.reply) replies.push(result.reply);
+      if (!result.ok) break;
+    }
+    if (replies.length === 0) {
+      this.#clearInbound(input.messageId);
+      return 0;
+    }
+    return this.#replyToCommand(
+      input.contextToken,
+      input.messageId,
+      replies.join("\n\n"),
+    );
+  }
+
+  async #controlReply(
+    intent: AtomicControlIntent,
+    contextToken: string,
+  ): Promise<ControlReplyResult> {
+    if (intent.kind === "help") return { ok: true, reply: COMMAND_HELP };
     if (
       intent.kind === "clearSession" ||
       intent.kind === "compactSession" ||
@@ -947,10 +986,10 @@ export class BridgeEngine {
           intent.kind === "clearSession"
             ? await this.#clearSessionReply()
             : intent.kind === "compactSession"
-              ? await this.#compactSessionReply(input.contextToken)
+              ? await this.#compactSessionReply(contextToken)
               : await this.#stopTurnReply();
-        return this.#replyToCommand(input.contextToken, input.messageId, reply);
-      } catch {
+        return { ok: true, reply };
+      } catch (error) {
         const action =
           intent.kind === "clearSession"
             ? "清除上下文"
@@ -963,9 +1002,8 @@ export class BridgeEngine {
             : intent.kind === "compactSession"
               ? "E_CONTEXT_COMPACT"
               : "E_TURN_STOP";
-        return this.#replyToCommand(
-          input.contextToken,
-          input.messageId,
+        return controlFailureReply(
+          error,
           `${code}：${action}失败，请稍后重试。`,
         );
       }
@@ -976,13 +1014,9 @@ export class BridgeEngine {
           intent.kind === "projects"
             ? await this.#projectListReply()
             : await this.#selectProjectReply(intent.index);
-        return this.#replyToCommand(input.contextToken, input.messageId, reply);
-      } catch {
-        return this.#replyToCommand(
-          input.contextToken,
-          input.messageId,
-          "项目命令执行失败，请稍后重试。",
-        );
+        return { ok: true, reply };
+      } catch (error) {
+        return controlFailureReply(error, "项目命令执行失败，请稍后重试。");
       }
     }
     if (intent.kind === "sessions" || intent.kind === "enterSession") {
@@ -991,13 +1025,9 @@ export class BridgeEngine {
           intent.kind === "sessions"
             ? await this.#sessionListReply(intent.page)
             : await this.#enterSessionReply(intent.index);
-        return this.#replyToCommand(input.contextToken, input.messageId, reply);
-      } catch {
-        return this.#replyToCommand(
-          input.contextToken,
-          input.messageId,
-          "会话命令执行失败，请稍后重试。",
-        );
+        return { ok: true, reply };
+      } catch (error) {
+        return controlFailureReply(error, "会话命令执行失败，请稍后重试。");
       }
     }
     if (intent.kind === "permissions" || intent.kind === "selectPermission") {
@@ -1005,13 +1035,9 @@ export class BridgeEngine {
         const reply = await this.#permissionReply(
           intent.kind === "selectPermission" ? intent.index : undefined,
         );
-        return this.#replyToCommand(input.contextToken, input.messageId, reply);
-      } catch {
-        return this.#replyToCommand(
-          input.contextToken,
-          input.messageId,
-          "权限命令执行失败，请稍后重试。",
-        );
+        return { ok: true, reply };
+      } catch (error) {
+        return controlFailureReply(error, "权限命令执行失败，请稍后重试。");
       }
     }
     if (intent.kind === "models" || intent.kind === "selectModel") {
@@ -1023,13 +1049,9 @@ export class BridgeEngine {
               : { index: intent.index }
             : {},
         );
-        return this.#replyToCommand(input.contextToken, input.messageId, reply);
-      } catch {
-        return this.#replyToCommand(
-          input.contextToken,
-          input.messageId,
-          "模型命令执行失败，请稍后重试。",
-        );
+        return { ok: true, reply };
+      } catch (error) {
+        return controlFailureReply(error, "模型命令执行失败，请稍后重试。");
       }
     }
     if (intent.kind === "efforts" || intent.kind === "selectEffort") {
@@ -1041,11 +1063,10 @@ export class BridgeEngine {
               : { index: intent.index }
             : {},
         );
-        return this.#replyToCommand(input.contextToken, input.messageId, reply);
-      } catch {
-        return this.#replyToCommand(
-          input.contextToken,
-          input.messageId,
+        return { ok: true, reply };
+      } catch (error) {
+        return controlFailureReply(
+          error,
           "推理强度命令执行失败，请稍后重试。",
         );
       }
@@ -1062,13 +1083,9 @@ export class BridgeEngine {
             : intent.kind === "exitSession"
               ? this.#exitSessionReply()
               : await this.#statusReply();
-        return this.#replyToCommand(input.contextToken, input.messageId, reply);
-      } catch {
-        return this.#replyToCommand(
-          input.contextToken,
-          input.messageId,
-          "命令执行失败，请稍后重试。",
-        );
+        return { ok: true, reply };
+      } catch (error) {
+        return controlFailureReply(error, "命令执行失败，请稍后重试。");
       }
     }
 
@@ -1077,8 +1094,7 @@ export class BridgeEngine {
       intent.kind === "approve",
     );
     if (decision?.kind === "decided") {
-      this.#clearInbound(input.messageId);
-      return 0;
+      return { ok: true, reply: null };
     }
     const reply =
       decision?.kind === "ambiguous"
@@ -1086,7 +1102,7 @@ export class BridgeEngine {
         : intent.code
           ? `审批 ${intent.code} 已失效或不存在。`
           : "当前没有待审批。";
-    return this.#replyToCommand(input.contextToken, input.messageId, reply);
+    return { ok: false, reply };
   }
 
   async #send(
@@ -1332,7 +1348,9 @@ export class BridgeEngine {
     }
     if (!snapshot) throw new Error("project snapshot was not created");
     const projectPath = snapshot.projects[index - 1];
-    if (!projectPath) return "项目编号无效，请按 p 当前列表选择。";
+    if (!projectPath) {
+      throw new ControlCommandRejected("项目编号无效，请按 p 当前列表选择。");
+    }
     this.#state.selectProjectForNavigation(projectPath);
     return `已选择项目：${projectDisplayName(projectPath)}\n已退出原会话；使用 s 查看或 new 新建。`;
   }
@@ -1347,8 +1365,14 @@ export class BridgeEngine {
     let pageNumber = 1;
     if (mode === "next") {
       const previous = this.#state.getSessionSnapshot(this.#now());
-      if (!previous) return "会话列表已过期，请先用 s 或 sarc 刷新。";
-      if (!previous.hasNext) return "当前会话列表没有下一页。";
+      if (!previous) {
+        throw new ControlCommandRejected(
+          "会话列表已过期，请先用 s 或 sarc 刷新。",
+        );
+      }
+      if (!previous.hasNext) {
+        throw new ControlCommandRejected("当前会话列表没有下一页。");
+      }
       archived = previous.archived;
       pageNumber = previous.page + 1;
     }
@@ -1411,7 +1435,9 @@ export class BridgeEngine {
     }
     if (!snapshot) throw new Error("session snapshot was not created");
     const target = snapshot.threads[index - 1];
-    if (!target) return "会话编号无效，请按当前 s 列表选择。";
+    if (!target) {
+      throw new ControlCommandRejected("会话编号无效，请按当前 s 列表选择。");
+    }
     if (
       !this.#codex?.resumeThread ||
       !this.#codex.readThread ||
@@ -1508,7 +1534,9 @@ export class BridgeEngine {
     const threadId = binding?.threadId ?? this.#currentThreadId();
     const projectPath = await this.#clearProjectPath(binding, threadId);
     if (this.#threadHasScheduledWork(threadId)) {
-      return "当前会话仍有任务正在执行或排队，请先用 stop 停止或等待任务结束。";
+      throw new ControlCommandRejected(
+        "当前会话仍有任务正在执行或排队，请先用 stop 停止或等待任务结束。",
+      );
     }
     const operationId = this.#newId();
     const acquired = this.#leases.tryAcquire({
@@ -1520,12 +1548,16 @@ export class BridgeEngine {
       turnId: null,
     });
     if (!acquired.acquired) {
-      return "当前会话正在被其他任务使用，请先用 stop 停止或等待任务结束。";
+      throw new ControlCommandRejected(
+        "当前会话正在被其他任务使用，请先用 stop 停止或等待任务结束。",
+      );
     }
     this.#clearOperations.set(threadId, operationId);
     try {
       if (this.#threadHasScheduledWork(threadId)) {
-        return "当前会话仍有任务正在执行或排队，请先用 stop 停止或等待任务结束。";
+        throw new ControlCommandRejected(
+          "当前会话仍有任务正在执行或排队，请先用 stop 停止或等待任务结束。",
+        );
       }
       return [
         "已清除当前上下文。",
@@ -1547,7 +1579,9 @@ export class BridgeEngine {
     }
     const threadId = this.#currentThreadId();
     if (this.#threadHasPendingWork(threadId)) {
-      return "当前会话仍有任务正在执行或排队，请先用 stop 停止或等待任务结束。";
+      throw new ControlCommandRejected(
+        "当前会话仍有任务正在执行或排队，请先用 stop 停止或等待任务结束。",
+      );
     }
 
     const operationId = this.#newId();
@@ -1560,7 +1594,9 @@ export class BridgeEngine {
       turnId: null,
     });
     if (!acquired.acquired) {
-      return "当前会话正在被其他任务使用，请稍后再 compact。";
+      throw new ControlCommandRejected(
+        "当前会话正在被其他任务使用，请稍后再 compact。",
+      );
     }
     this.#compactOperations.set(threadId, {
       contextToken,
@@ -1577,7 +1613,9 @@ export class BridgeEngine {
           operationId,
           unknownReason: error.reason,
         });
-        return "压缩请求结果未知，请在 Desktop 查看；确认结束前的新消息会自动排队。";
+        throw new ControlCommandRejected(
+          "压缩请求结果未知，请在 Desktop 查看；确认结束前的新消息会自动排队。",
+        );
       }
       this.#compactOperations.delete(threadId);
       this.#leases.release(acquired.lease);
@@ -1635,10 +1673,14 @@ export class BridgeEngine {
         .listUnresolvedDispatchIntents()
         .some((candidate) => candidate.threadId === threadId);
       if (unresolved || compactOperation) {
-        return "当前任务尚未取得可中断的 Turn ID，请稍后再试。";
+        throw new ControlCommandRejected(
+          "当前任务尚未取得可中断的 Turn ID，请稍后再试。",
+        );
       }
       if (lease?.owner === "desktop") {
-        return "当前任务由 Desktop 发起，请在电脑端停止。";
+        throw new ControlCommandRejected(
+          "当前任务由 Desktop 发起，请在电脑端停止。",
+        );
       }
       return "当前会话没有正在执行的微信任务。";
     }
@@ -1652,7 +1694,9 @@ export class BridgeEngine {
       await this.#codex.interruptTurn({ threadId, turnId });
     } catch (error) {
       if (error instanceof CodexOutcomeUnknownError) {
-        return "停止请求结果未知，请在 Desktop 查看当前任务状态。";
+        throw new ControlCommandRejected(
+          "停止请求结果未知，请在 Desktop 查看当前任务状态。",
+        );
       }
       this.#userStoppedTurns.delete(stoppedTurnKey);
       throw error;
@@ -1758,9 +1802,15 @@ export class BridgeEngine {
 
     if (selectedIndex !== undefined) {
       const selected = profiles[selectedIndex - 1];
-      if (!selected) return "权限编号无效，请按 perm 当前列表选择。";
+      if (!selected) {
+        throw new ControlCommandRejected(
+          "权限编号无效，请按 perm 当前列表选择。",
+        );
+      }
       if (!selected.allowed) {
-        return `权限 ${selected.id} 受 Codex 配置限制，当前不可切换。`;
+        throw new ControlCommandRejected(
+          `权限 ${selected.id} 受 Codex 配置限制，当前不可切换。`,
+        );
       }
       const changed = await this.#codex.updateThreadPermissions(
         threadId,
@@ -1839,7 +1889,11 @@ export class BridgeEngine {
         selection.id !== undefined
           ? findModelByReference(models, selection.id)
           : models[(selection.index as number) - 1];
-      if (!selected) return "模型不可用，请发送 model 查看当前可选模型。";
+      if (!selected) {
+        throw new ControlCommandRejected(
+          "模型不可用，请发送 model 查看当前可选模型。",
+        );
+      }
       const supportedEfforts = selected.supportedReasoningEfforts.map(
         (option) => option.reasoningEffort,
       );
@@ -1903,7 +1957,11 @@ export class BridgeEngine {
       (candidate) =>
         candidate.model === currentModel || candidate.id === currentModel,
     );
-    if (!model) return "当前模型不在可选目录中，无法切换推理强度。";
+    if (!model) {
+      throw new ControlCommandRejected(
+        "当前模型不在可选目录中，无法切换推理强度。",
+      );
+    }
     const options = model.supportedReasoningEfforts;
 
     if (selection.effort !== undefined || selection.index !== undefined) {
@@ -1914,7 +1972,9 @@ export class BridgeEngine {
             )
           : options[(selection.index as number) - 1];
       if (!selected) {
-        return `推理强度不可用，请发送 effort 查看 ${formatModel(model)} 支持的选项。`;
+        throw new ControlCommandRejected(
+          `推理强度不可用，请发送 effort 查看 ${formatModel(model)} 支持的选项。`,
+        );
       }
       await this.#codex.updateThreadModelSettings(threadId, {
         effort: selected.reasoningEffort,
@@ -3121,6 +3181,16 @@ function findModelByReference(
     return values.includes(normalized);
   });
   return aliases.length === 1 ? aliases[0] : undefined;
+}
+
+function controlFailureReply(
+  error: unknown,
+  fallback: string,
+): ControlReplyResult {
+  return {
+    ok: false,
+    reply: error instanceof ControlCommandRejected ? error.reply : fallback,
+  };
 }
 
 function formatAmbiguousApprovals(

@@ -44,7 +44,47 @@ const ILINK_DYNAMIC_TOOLS = [
 ] as const;
 
 const CONTROL_ROUTER_INSTRUCTIONS =
-  "仅识别明确的 iLink 控制请求并调用 route_ilink_control；否则调用 kind=message。不得回答用户。";
+  "仅将明确的 iLink 控制请求调用 route_ilink_control；连续操作用 controlSequence。否则 kind=message。不得回答。";
+
+const CONTROL_ATOMIC_KINDS = [
+  "approve",
+  "clearSession",
+  "compactSession",
+  "deny",
+  "efforts",
+  "enterSession",
+  "exitSession",
+  "help",
+  "models",
+  "newSession",
+  "permissions",
+  "projects",
+  "selectEffort",
+  "selectModel",
+  "selectPermission",
+  "selectProject",
+  "sessions",
+  "status",
+  "stopTurn",
+] as const;
+
+const CONTROL_INTENT_FIELDS = {
+  code: { type: "string" },
+  effort: { type: "string" },
+  id: { type: "string" },
+  index: { minimum: 1, type: "integer" },
+  page: { enum: ["archived", "first", "next"], type: "string" },
+} as const;
+
+const CONTROL_ATOMIC_INTENT_SCHEMA = {
+  additionalProperties: false,
+  properties: {
+    ...CONTROL_INTENT_FIELDS,
+    kind: { enum: CONTROL_ATOMIC_KINDS, type: "string" },
+  },
+  required: ["kind"],
+  type: "object",
+} as const;
 
 const CONTROL_ROUTER_TOOLS = [
   {
@@ -53,36 +93,17 @@ const CONTROL_ROUTER_TOOLS = [
     inputSchema: {
       additionalProperties: false,
       properties: {
-        code: { type: "string" },
-        effort: { type: "string" },
-        id: { type: "string" },
-        index: { minimum: 1, type: "integer" },
+        ...CONTROL_INTENT_FIELDS,
+        intents: {
+          items: CONTROL_ATOMIC_INTENT_SCHEMA,
+          maxItems: 4,
+          minItems: 2,
+          type: "array",
+        },
         kind: {
-          enum: [
-            "approve",
-            "clearSession",
-            "compactSession",
-            "deny",
-            "efforts",
-            "enterSession",
-            "exitSession",
-            "help",
-            "message",
-            "models",
-            "newSession",
-            "permissions",
-            "projects",
-            "selectEffort",
-            "selectModel",
-            "selectPermission",
-            "selectProject",
-            "sessions",
-            "status",
-            "stopTurn",
-          ],
+          enum: [...CONTROL_ATOMIC_KINDS, "controlSequence", "message"],
           type: "string",
         },
-        page: { enum: ["archived", "first", "next"], type: "string" },
       },
       required: ["kind"],
       type: "object",

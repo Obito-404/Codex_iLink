@@ -320,6 +320,18 @@ lines.on("line", (line) => {
       rejectUnexpectedParams(message);
       return;
     }
+    if (isControlRouter) {
+      const tool = message.params.dynamicTools[0];
+      const properties = tool?.inputSchema?.properties;
+      if (
+        tool?.name !== "route_ilink_control" ||
+        !properties?.kind?.enum?.includes("controlSequence") ||
+        properties?.intents?.maxItems !== 4
+      ) {
+        rejectUnexpectedParams(message);
+        return;
+      }
+    }
     respond(message.id, {
       fixtureParams: message.params,
       thread: {
@@ -342,12 +354,19 @@ lines.on("line", (line) => {
       return;
     }
     if (message.params.threadId === "thread-control-router") {
+      const text = message.params.input[0]?.text;
+      const control = text?.includes("返回")
+        ? {
+            intents: [{ kind: "exitSession" }, { kind: "status" }],
+            kind: "controlSequence",
+          }
+        : { kind: "help" };
       process.stdout.write(
         `${JSON.stringify({
           id: "control-router-tool-request",
           method: "item/tool/call",
           params: {
-            arguments: { kind: "help" },
+            arguments: control,
             callId: "control-router-call",
             namespace: null,
             threadId: message.params.threadId,

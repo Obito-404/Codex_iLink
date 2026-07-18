@@ -109,6 +109,13 @@ test("explicit Chinese control requests map to the same command intents", () => 
   }
 });
 
+test("explicit compound controls preserve their execution order", () => {
+  assert.deepEqual(parseInboundText("返回主会话主任务，然后把状态显示一下"), {
+    intents: [{ kind: "exitSession" }, { kind: "status" }],
+    kind: "controlSequence",
+  });
+});
+
 test("legacy slash commands, spaced forms, aliases and malformed indices are rejected", () => {
   for (const text of [
     "/p",
@@ -212,7 +219,24 @@ test("ambiguous control-like text is isolated for AI fallback", () => {
     routedControlIntent({ id: "GPT-5.6-SOL", kind: "selectModel" }),
     { id: "gpt-5.6-sol", kind: "selectModel" },
   );
+  assert.deepEqual(
+    routedControlIntent({
+      intents: [{ kind: "exitSession" }, { kind: "status" }],
+      kind: "controlSequence",
+    }),
+    {
+      intents: [{ kind: "exitSession" }, { kind: "status" }],
+      kind: "controlSequence",
+    },
+  );
   assert.equal(routedControlIntent({ index: 0, kind: "selectProject" }), null);
   assert.equal(routedControlIntent({ code: "wrong", kind: "approve" }), null);
+  assert.equal(
+    routedControlIntent({
+      intents: [{ kind: "message" }],
+      kind: "controlSequence",
+    }),
+    null,
+  );
   assert.equal(routedControlIntent({ kind: "message" }), null);
 });

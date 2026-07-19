@@ -365,8 +365,9 @@ test("new creates in the selected project, binds immediately, and exit returns t
     await ingest(bridge, 31, "exit");
     assert.equal(state.getBinding(10_001), null);
     assert.deepEqual(state.listLiveNotificationRoutes(10_001), []);
-    assert.equal(state.getBridgeSettings().selectedProjectPath, "D:\\Selected");
+    assert.equal(state.getBridgeSettings().selectedProjectPath, null);
     assert.match(sent[1]?.text ?? "", /已返回微信主会话/u);
+    assert.match(sent[1]?.text ?? "", /已退出当前项目/u);
     assert.match(sent[1]?.text ?? "", /原会话和运行中的任务仍保留/u);
 
     await ingest(bridge, 33, "main task question");
@@ -536,7 +537,7 @@ test("stop returns a stable short code when interruption deterministically fails
   });
 });
 
-test("clear starts and binds a fresh session while preserving the old history", async () => {
+test("clear replaces a project session and archives the old history", async () => {
   await withNavigationBridge(async ({ bridge, codex, leases, sent, state }) => {
     state.setSelectedProjectPath("D:\\Selected");
     state.setBinding({
@@ -572,24 +573,34 @@ test("clear starts and binds a fresh session while preserving the old history", 
     assert.equal(state.getBinding(1_001)?.threadId, "thread-cleared-context");
     assert.equal(leases.getLease("thread-old-context"), null);
     assert.match(sent[0]?.text ?? "", /已清除当前上下文/u);
-    assert.doesNotMatch(codex.calls.join("\n"), /delete|archive/u);
+    assert.deepEqual(codex.archivedThreadIds, ["thread-old-context"]);
+    assert.match(sent[0]?.text ?? "", /原会话已归档，可用 sarc 查看/u);
   });
 });
 
-test("clear from the WeChat main session stays in Inbox even when a project remains selected", async () => {
-  await withNavigationBridge(async ({ bridge, codex, state }) => {
+test("clear replaces the WeChat main session without entering a normal session", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
     state.setSelectedProjectPath("D:\\Selected");
     codex.nextStartedThreadId = "thread-cleared-main";
 
     await ingest(bridge, 49, "clear");
 
     assert.deepEqual(codex.startedCwds, ["D:\\Codex-iLink\\Inbox"]);
-    assert.deepEqual(state.getBinding(1_001), {
-      expiresAtMs: 1_000 + 30 * 60 * 1_000,
-      projectPath: null,
-      threadId: "thread-cleared-main",
-      updatedAtMs: 1_000,
+    assert.equal(state.getBinding(1_001), null);
+    assert.deepEqual(state.getBridgeSettings(), {
+      awayTimeoutMinutes: 5,
+      mainThreadId: "thread-cleared-main",
+      selectedProjectPath: null,
+      sessionTimeoutMinutes: 30,
     });
+    assert.deepEqual(codex.threadNames, [
+      { name: "微信主会话", threadId: "thread-cleared-main" },
+    ]);
+    assert.deepEqual(codex.archivedThreadIds, ["wechat-main"]);
+    assert.equal(
+      sent[0]?.text,
+      "已清除微信主会话上下文，当前仍在微信主会话。\n当前未选择项目。",
+    );
   });
 });
 
@@ -619,6 +630,13 @@ test("clear preserves the project environment of a notification-bound session", 
       threadId: "thread-cleared-notification-project",
       updatedAtMs: 1_000,
     });
+    assert.equal(
+      state.getBridgeSettings().selectedProjectPath,
+      "D:\\NotificationProject",
+    );
+    assert.deepEqual(codex.archivedThreadIds, [
+      "thread-from-desktop-notification",
+    ]);
   });
 });
 
@@ -1033,7 +1051,7 @@ test("compound controls execute in order and produce one consolidated reply", as
     assert.equal(sent.length, 1);
     assert.match(sent[0]?.text ?? "", /^已返回微信主会话。/u);
     assert.match(sent[0]?.text ?? "", /会话：微信主会话/u);
-    assert.match(sent[0]?.text ?? "", /项目：Selected/u);
+    assert.match(sent[0]?.text ?? "", /项目：无项目/u);
   });
 });
 
@@ -1134,6 +1152,13 @@ test("st reports current routing, every known active task, queues, and health", 
     codex.activeThreads = [
       {
         cwd: "D:\\Selected",
+        id: "thread-current",
+        name: "排查审批卡住问题",
+        status: { type: "idle" },
+        updatedAt: 40,
+      },
+      {
+        cwd: "D:\\Selected",
         id: "thread-active-a",
         name: "Active A",
         status: { type: "active" },
@@ -1175,7 +1200,7 @@ test("st reports current routing, every known active task, queues, and health", 
 
     const reply = sent[0]?.text ?? "";
     assert.match(reply, /项目：Selected/u);
-    assert.match(reply, /会话：thread-current（剩余 30 分钟）/u);
+    assert.match(reply, /会话：排查审批卡住问题（剩余 30 分钟）/u);
     assert.match(reply, /权限：工作区（推荐） \(:workspace\)/u);
     assert.match(
       reply,
@@ -1196,9 +1221,46 @@ test("st reports current routing, every known active task, queues, and health", 
     assert.doesNotMatch(reply, /thread-observed-unrelated/u);
     assert.match(reply, /队列：2/u);
     assert.match(reply, /通知回复窗口：1/u);
-    assert.match(reply, /连接：Codex 正常；仲裁正常/u);
+    assert.match(reply, /连接：正常/u);
     assert.doesNotMatch(reply, /secret queued body/u);
     assert.equal(state.listInboundMessages().at(-1)?.body, null);
+  });
+});
+
+test("st hides zero-value diagnostics while keeping permission details", async () => {
+  await withNavigationBridge(async ({ bridge, clock, codex, sent, state }) => {
+    clock.value = 100_000;
+    state.setSelectedProjectPath("D:\\Selected");
+    state.setBinding({
+      expiresAtMs: 100_000 + 30 * 60 * 1_000,
+      projectPath: "D:\\Selected",
+      threadId: "thread-current",
+      updatedAtMs: 99_000,
+    });
+    state.enableArbitration("bridge-navigation");
+    codex.activeThreads = [
+      {
+        cwd: "D:\\Selected",
+        id: "thread-current",
+        name: "简洁状态",
+        status: { type: "idle" },
+        updatedAt: 1,
+      },
+    ];
+
+    await ingest(bridge, 61, "st");
+
+    assert.equal(
+      sent[0]?.text,
+      [
+        "项目：Selected",
+        "会话：简洁状态（剩余 30 分钟）",
+        "权限：工作区（推荐） (:workspace)",
+        "审批：on-request；审批人：user；Sandbox：workspaceWrite",
+        "状态：空闲",
+        "连接：正常",
+      ].join("\n"),
+    );
   });
 });
 
@@ -1211,6 +1273,7 @@ type SendInput = {
 
 class FakeNavigationCodex implements CodexTurnStarter {
   activeThreads: unknown[] = [];
+  archivedThreadIds: string[] = [];
   archivedThreads: unknown[] = [];
   beforeStartThread: (() => Promise<void> | void) | undefined;
   calls: string[] = [];
@@ -1262,6 +1325,7 @@ class FakeNavigationCodex implements CodexTurnStarter {
     | undefined;
   startedCwds: string[] = [];
   startedTurns: Array<{ text: string; threadId: string }> = [];
+  threadNames: Array<{ name: string; threadId: string }> = [];
   readonly loadedThreadIds = new Set<string>();
 
   async listThreads(input: { archived: boolean; cursor?: string }) {
@@ -1347,9 +1411,21 @@ class FakeNavigationCodex implements CodexTurnStarter {
     return selected;
   }
 
+  async archiveThread(threadId: string) {
+    this.calls.push(`archive:${threadId}`);
+    this.archivedThreadIds.push(threadId);
+    return { thread: { id: threadId } };
+  }
+
   async unarchiveThread(threadId: string) {
     this.calls.push(`unarchive:${threadId}`);
     return { thread: { id: threadId } };
+  }
+
+  async setThreadName(input: { name: string; threadId: string }) {
+    this.calls.push(`name:${input.threadId}:${input.name}`);
+    this.threadNames.push(input);
+    return { name: input.name };
   }
 
   async startThread(cwd: string) {

@@ -2564,6 +2564,56 @@ test("main thread, project selection, and explicit navigation state persist", ()
   }
 });
 
+test("returning to main and replacing the main thread reset project navigation atomically", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-"));
+  const path = join(directory, "state.db");
+  const state = new SqliteState(path);
+
+  try {
+    state.setMainThreadId("thread-main-old");
+    state.setBindingForNavigation({
+      expiresAtMs: 10_000,
+      projectPath: "D:\\Project",
+      threadId: "thread-project",
+      updatedAtMs: 1_000,
+    });
+    state.replaceSessionSnapshot({
+      archived: false,
+      createdAtMs: 1_000,
+      expiresAtMs: 10_000,
+      hasNext: false,
+      page: 1,
+      projectPath: "D:\\Project",
+      threads: [],
+    });
+    assert.equal(
+      state.getBridgeSettings().selectedProjectPath,
+      "D:\\Project",
+    );
+
+    state.returnToMainForNavigation();
+    assert.equal(state.getBridgeSettings().mainThreadId, "thread-main-old");
+    assert.equal(state.getBridgeSettings().selectedProjectPath, null);
+    assert.equal(state.getBinding(1_001), null);
+    assert.equal(state.getSessionSnapshot(1_001), null);
+
+    state.setSelectedProjectPath("D:\\Another");
+    state.setBinding({
+      expiresAtMs: 10_000,
+      projectPath: "D:\\Another",
+      threadId: "thread-another",
+      updatedAtMs: 1_000,
+    });
+    state.replaceMainThreadForNavigation("thread-main-new");
+    assert.equal(state.getBridgeSettings().mainThreadId, "thread-main-new");
+    assert.equal(state.getBridgeSettings().selectedProjectPath, null);
+    assert.equal(state.getBinding(1_001), null);
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("project and session list snapshots keep their displayed numbering for ten minutes", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-"));
   const path = join(directory, "state.db");

@@ -9,6 +9,7 @@ import type {
   AppServerEventListener,
   JsonObject,
   ModelListResult,
+  ThreadArchiveResult,
   ThreadListResult,
   ThreadReadResult,
   ThreadResumeResult,
@@ -269,6 +270,12 @@ export class CodexRuntime {
     })) as ThreadResumeResult;
     this.#loadedThreadIds.add(threadId);
     return result;
+  }
+
+  async archiveThread(threadId: string): Promise<ThreadArchiveResult> {
+    return (await this.#requestSafely("thread/archive", {
+      threadId,
+    })) as ThreadArchiveResult;
   }
 
   async updateThreadModelSettings(

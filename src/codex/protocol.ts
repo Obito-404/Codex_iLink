@@ -50,6 +50,7 @@ export type CodexThread = JsonObject & { id: string };
 export type CodexTurn = JsonObject & { id: string };
 
 export type ThreadReadResult = JsonObject & { thread: CodexThread };
+export type ThreadArchiveResult = JsonObject & { thread: CodexThread };
 export type ThreadResumeResult = JsonObject & {
   activePermissionProfile?: JsonObject & { id: string };
   approvalPolicy?: unknown;

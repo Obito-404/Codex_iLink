@@ -200,6 +200,15 @@ lines.on("line", (line) => {
     return;
   }
 
+  if (message.method === "thread/archive") {
+    if (!hasExactKeys(message.params, ["threadId"])) {
+      rejectUnexpectedParams(message);
+      return;
+    }
+    respond(message.id, { thread: { id: message.params.threadId } });
+    return;
+  }
+
   if (message.method === "thread/unarchive") {
     if (!hasExactKeys(message.params, ["threadId"])) {
       rejectUnexpectedParams(message);

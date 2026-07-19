@@ -183,6 +183,19 @@ export function listActiveThreads(
   );
 }
 
+export function findThreadTitle(
+  rawThreadLists: readonly unknown[],
+  threadId: string,
+): string | null {
+  for (const rawList of rawThreadLists) {
+    for (const thread of threadData(rawList)) {
+      if (stringField(thread, "id") !== threadId) continue;
+      return stringField(thread, "name") ?? stringField(thread, "preview");
+    }
+  }
+  return null;
+}
+
 export function buildThreadPreview(
   rawThreadRead: unknown,
   rawThreadMetadata?: unknown,

@@ -6,45 +6,27 @@
 
 ## 安装并启动
 
-只需满足以下公共要求：
+安装前请确认：
 
 | 项目 | 要求 |
 | --- | --- |
 | 系统 | Windows 10/11 x64；暂不支持 Windows on Arm |
 | Codex | 已安装并登录 Codex Desktop，最低 `0.144.2` |
+| Node.js | `>=22.13.0`，支持 Node.js 22 LTS 系列 |
 | 终端 | PowerShell |
 
 Codex `0.144.x` 已通过兼容性验证。更高版本可继续尝试，`ilink doctor` 会提示“尚未验证”但不会阻止 `setup` 或 `start`；低于 `0.144.2` 不受支持。
 
 安装前先选择发布通道：
 
-| 通道 | npm 标签 | GitHub Release | 用途 |
-| --- | --- | --- | --- |
-| 稳定版 | `latest` | 非预发布版本 | 已完成正式发布验收，推荐日常使用 |
-| 预览版 | `next` | 标记为 Pre-release | 提前验收新功能，可能仍有已列明的实机门禁 |
+| 通道 | npm 标签 | 用途 |
+| --- | --- | --- |
+| 稳定版 | `latest` | 已完成正式发布验收，推荐日常使用 |
+| 预览版 | `next` | 提前验收新功能，可能仍有已列明的实机门禁 |
 
-预发布版本只进入 `next`，不会移动 `latest`；稳定版本才进入 `latest`。安装方式任选一种即可。
+预发布版本只进入 `next`，不会移动 `latest`；稳定版本才进入 `latest`。
 
-### 方式一：PowerShell 安装（推荐，无需 Node.js）
-
-与 Codex CLI 的安装方式相同，一条命令下载最新稳定 GitHub Release、校验 SHA-256 和 Authenticode 签名，并安装为当前用户命令：
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Obito-404/Codex_iLink/main/scripts/install.ps1 | iex"
-```
-
-安装脚本会把独立的 `ilink.exe` 放入 `%LOCALAPPDATA%\Programs\Codex-iLink` 并加入用户 `PATH`。该版本自带 Node.js 运行时，用户电脑不需要安装 Node.js 或 pnpm。稳定版签名无效时安装会直接失败。
-
-安装预览版必须显式指定通道和完整版本号：
-
-```powershell
-$installer = irm https://raw.githubusercontent.com/Obito-404/Codex_iLink/main/scripts/install.ps1
-& ([scriptblock]::Create($installer)) -Channel preview -Version 0.1.0-rc.2
-```
-
-预览版仍会校验 SHA-256；若未签名会明确警告。版本号必须是 GitHub 上实际存在的 SemVer 预发布版本，且不带 `v` 前缀。
-
-### 方式二：npm 安装
+### npm 安装
 
 已经安装 Node.js 22 的用户可以使用标准 npm 全局安装：
 
@@ -54,26 +36,10 @@ npm install --global codex-ilink
 ilink setup
 ```
 
-npm 版本要求 Node.js `>=22.13.0`，支持 Node.js 22 LTS 系列，不要求 Node.js 24。默认安装 `latest`；安装预览版时显式使用：
+npm 默认安装稳定版 `latest`。安装预览版时显式使用：
 
 ```powershell
 npm install --global codex-ilink@next
-ilink setup
-```
-
-### 方式三：GitHub Release
-
-也可以从项目的 [GitHub Releases](https://github.com/Obito-404/Codex_iLink/releases) 手动下载。稳定版选择普通 Release；预览版选择明确标记为 Pre-release 的版本：
-
-1. 下载 `codex-ilink-x86_64-pc-windows-msvc.exe` 和对应的 `.sha256` 文件。
-2. 校验 SHA-256；稳定版再确认 `Get-AuthenticodeSignature` 的 `Status` 为 `Valid`。
-3. 把程序重命名为 `ilink.exe`，并放入一个已加入 `PATH` 的目录。
-
-预览版可能未签名，此时只在明确接受“未知发布者”风险后继续。
-
-然后运行：
-
-```powershell
 ilink setup
 ```
 
@@ -134,22 +100,7 @@ Bridge 在当前 Windows 用户会话中后台运行，日志位于：
 
 ## 升级
 
-PowerShell / 独立稳定版直接重新运行默认安装命令：
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Obito-404/Codex_iLink/main/scripts/install.ps1 | iex"
-ilink setup
-```
-
-预览独立版升级时继续显式指定新的预发布版本；不传参数会切换到稳定通道：
-
-```powershell
-$installer = irm https://raw.githubusercontent.com/Obito-404/Codex_iLink/main/scripts/install.ps1
-& ([scriptblock]::Create($installer)) -Channel preview -Version 0.1.0-beta.2
-ilink setup
-```
-
-npm 稳定版使用：
+稳定版使用：
 
 ```powershell
 ilink stop
@@ -180,6 +131,8 @@ npm 预览版把 `@latest` 替换为 `@next`。
 
 短命令不带 `/`，命令和编号之间不加空格。
 
+`clear` 会用空白 Codex 会话替换当前上下文，并把原会话归档；在微信主会话执行时会替换内部主会话，但仍停留在微信主会话。`exit` 会返回微信主会话并取消当前项目选择。`new` 只使用此时明确选择的项目；没有选择项目时创建无项目会话。
+
 `perm` 每次都从 Codex 读取当前任务的实际 Profile、审批策略、审批人和 Sandbox。权限只能在 Codex Desktop 中修改；同一任务在 Desktop 修改后，下一次 `perm` 会显示新值。旧版 `perm<n>` 输入也只会返回当前权限，不再切换或提升权限。`ok/no` 只回应仍在线的单次 Codex 审批请求，不代表 iLink 自己维护审批策略。
 
 ## 超时配置
@@ -205,7 +158,7 @@ Get-Command ilink
 ilink --help
 ```
 
-如果刚运行过 PowerShell 安装脚本，请重新打开终端，让新的用户 `PATH` 生效。
+如果刚完成 npm 全局安装，请重新打开终端，让 npm 全局命令目录的 `PATH` 生效。
 
 ### Bridge 无法启动
 
@@ -228,7 +181,7 @@ ilink setup
 
 ### Node.js 版本不兼容
 
-npm 安装要求 Node.js `>=22.13.0`，并已在 Node.js 22 上通过完整测试。PowerShell 安装和 GitHub Release 独立版自带运行时，不受用户电脑 Node.js 版本影响。
+npm 安装要求 Node.js `>=22.13.0`，并已在 Node.js 22 上通过完整测试。
 
 ### Codex 版本提示“尚未验证”
 
@@ -238,23 +191,13 @@ Codex iLink 最低支持 `0.144.2`，已验证 `0.144.x`。更高版本出现该
 
 先在 Codex Desktop 的插件管理中移除 `Codex iLink Guard` 和 `codex-ilink` Marketplace。
 
-npm 安装的版本执行：
+执行：
 
 ```powershell
 ilink startup disable
 ilink stop
 npm uninstall --global codex-ilink
 ```
-
-独立版执行：
-
-```powershell
-ilink startup disable
-ilink stop
-Remove-Item -LiteralPath "$env:LOCALAPPDATA\Programs\Codex-iLink" -Recurse -Force
-```
-
-然后从当前用户的 `PATH` 中移除 `%LOCALAPPDATA%\Programs\Codex-iLink`。
 
 先禁用启动任务，避免卸载后留下失效的登录启动入口。卸载不会自动删除 `%LOCALAPPDATA%\Codex_iLink` 中的绑定、状态和日志。
 

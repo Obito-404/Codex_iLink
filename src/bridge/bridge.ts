@@ -58,6 +58,7 @@ import {
 } from "../coordination/turn-lease.ts";
 import {
   buildThreadPreview,
+  findThreadTitle,
   listActiveThreads,
   paginateThreads,
   type ThreadPreview,
@@ -126,6 +127,7 @@ class ControlCommandRejected extends Error {
 }
 
 export type CodexTurnStarter = {
+  archiveThread?(threadId: string): Promise<Record<string, unknown>>;
   classifyControlIntent?(input: {
     cwd: string;
     text: string;
@@ -164,6 +166,10 @@ export type CodexTurnStarter = {
     result: Record<string, unknown>,
   ): boolean | void;
   resumeThread?(threadId: string): Promise<Record<string, unknown>>;
+  setThreadName?(input: {
+    name: string;
+    threadId: string;
+  }): Promise<Record<string, unknown>>;
   startThread?(cwd: string): Promise<Record<string, unknown> & {
     thread: { id: string } & Record<string, unknown>;
   }>;
@@ -231,7 +237,7 @@ export class BridgeEngine {
   readonly #bridgeInstanceId: string | undefined;
   readonly #codex: CodexTurnStarter | undefined;
   readonly #leases: SqliteTurnLeaseStore | undefined;
-  readonly #mainThreadId: string | undefined;
+  #mainThreadId: string | undefined;
   readonly #outboundDirectory: string | undefined;
   readonly #media: InboundMediaPort | undefined;
   readonly #listProjects: BridgeEngineOptions["listProjects"];
@@ -1647,7 +1653,10 @@ export class BridgeEngine {
     );
   }
 
-  async #startSessionReply(projectPath: string | null): Promise<string> {
+  async #startSessionReply(
+    projectPath: string | null,
+    mode: "clear" | "new" = "new",
+  ): Promise<string> {
     if (!this.#codex?.startThread || !this.#inboxDirectory) {
       throw new Error("new session is not configured");
     }
@@ -1664,7 +1673,9 @@ export class BridgeEngine {
     });
     const activePermission = activePermissionProfileId(started);
     return [
-      `已新建并进入会话：${threadId}`,
+      mode === "clear"
+        ? "已清除当前上下文并进入空白会话。"
+        : `已新建并进入会话：${threadId}`,
       `项目：${projectDisplayName(projectPath)}`,
       `权限：${
         activePermission
@@ -1710,9 +1721,16 @@ export class BridgeEngine {
           "当前会话仍有任务正在执行或排队，请先用 stop 停止或等待任务结束。",
         );
       }
+      if (!binding && threadId === this.#mainThreadId) {
+        return await this.#replaceMainSessionReply(threadId);
+      }
+      const replacement = await this.#startSessionReply(projectPath, "clear");
+      const archived = await this.#archiveClearedThread(threadId);
       return [
-        "已清除当前上下文。",
-        await this.#startSessionReply(projectPath),
+        replacement,
+        archived
+          ? "原会话已归档，可用 sarc 查看。"
+          : "原会话仍保留在任务列表中。",
       ].join("\n");
     } finally {
       this.#clearOperations.delete(threadId);
@@ -1952,6 +1970,38 @@ export class BridgeEngine {
     ].join("\n");
   }
 
+  async #replaceMainSessionReply(previousThreadId: string): Promise<string> {
+    if (!this.#codex?.startThread || !this.#inboxDirectory) {
+      throw new Error("main session replacement is not configured");
+    }
+    const started = await this.#codex.startThread(this.#inboxDirectory);
+    const threadId = stringField(started.thread, "id");
+    if (!threadId) throw new Error("Codex did not return a thread id");
+    try {
+      await this.#codex.setThreadName?.({ name: "微信主会话", threadId });
+    } catch {
+      // The main identity is the durable thread id; naming is best-effort UI.
+    }
+    this.#state.replaceMainThreadForNavigation(threadId);
+    this.#mainThreadId = threadId;
+    const archived = await this.#archiveClearedThread(previousThreadId);
+    return [
+      "已清除微信主会话上下文，当前仍在微信主会话。",
+      "当前未选择项目。",
+      ...(archived ? [] : ["原主会话仍保留在任务列表中。"]),
+    ].join("\n");
+  }
+
+  async #archiveClearedThread(threadId: string): Promise<boolean> {
+    if (!this.#codex?.archiveThread) return false;
+    try {
+      await this.#codex.archiveThread(threadId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async #modelReply(selection: {
     id?: string;
     index?: number;
@@ -2110,13 +2160,18 @@ export class BridgeEngine {
 
   #exitSessionReply(): string {
     const binding = this.#state.getBinding(this.#now());
-    this.#state.clearNavigationRoutes();
+    const hadProject =
+      this.#state.getBridgeSettings().selectedProjectPath !== null;
+    this.#state.returnToMainForNavigation();
+    const returned = hadProject
+      ? "已返回微信主会话。已退出当前项目。"
+      : "已返回微信主会话。";
     return binding
       ? [
-          "已返回微信主会话。当前项目选择保持不变。",
-          `已退出微信会话绑定：${binding.threadId}；原会话和运行中的任务仍保留。`,
+          returned,
+          "原会话和运行中的任务仍保留。",
         ].join("\n")
-      : "已返回微信主会话。当前项目选择保持不变。";
+      : returned;
   }
 
   async #statusReply(): Promise<string> {
@@ -2128,9 +2183,11 @@ export class BridgeEngine {
     const arbitrationHealthy =
       this.#state.getBridgeRuntime()?.arbitrationEnabled === true;
     let codexHealthy = true;
+    let threadPages: unknown[] = [];
     let active: ReturnType<typeof listActiveThreads> = [];
     try {
-      active = listActiveThreads(await this.#listThreadPages(false));
+      threadPages = await this.#listThreadPages(false);
+      active = listActiveThreads(threadPages);
     } catch {
       codexHealthy = false;
     }
@@ -2191,9 +2248,18 @@ export class BridgeEngine {
                 60_000,
             ),
           );
+    const sessionTitle = binding
+      ? (findThreadTitle(threadPages, binding.threadId) ?? "当前会话")
+      : null;
     const session = binding
-      ? `${binding.threadId}（剩余 ${String(Math.max(1, Math.ceil((binding.expiresAtMs - nowMs) / 60_000)))} 分钟）`
+      ? `${sessionTitle}（剩余 ${String(Math.max(1, Math.ceil((binding.expiresAtMs - nowMs) / 60_000)))} 分钟）`
       : "微信主会话";
+    const hasPendingWork =
+      knownActiveTasks.length > 0 ||
+      queueCount > 0 ||
+      pendingApprovals.length > 0;
+    const connectionsHealthy =
+      codexHealthy && arbitrationHealthy && this.#ilinkHealthy;
     return [
       `项目：${projectDisplayName(projectPath)}`,
       `会话：${session}`,
@@ -2211,22 +2277,31 @@ export class BridgeEngine {
       }；Sandbox：${
         permissionMetadata ? sandboxTypeText(permissionMetadata) : "未知"
       }`,
-      `活动任务：${String(knownActiveTasks.length)}`,
-      ...knownActiveTasks.map(
-        (thread) => `- ${thread.title ?? thread.id} (${thread.id})`,
-      ),
-      `队列：${String(queueCount)}`,
-      `通知回复窗口：${String(notificationCount)}`,
-      `待审批：${String(pendingApprovals.length)}${
-        pendingApprovals.length > 0
-          ? `（${
+      ...(!hasPendingWork ? ["状态：空闲"] : []),
+      ...(knownActiveTasks.length > 0
+        ? [
+            `活动任务：${String(knownActiveTasks.length)}`,
+            ...knownActiveTasks.map(
+              (thread) => `- ${thread.title ?? thread.id} (${thread.id})`,
+            ),
+          ]
+        : []),
+      ...(queueCount > 0 ? [`队列：${String(queueCount)}`] : []),
+      ...(notificationCount > 0
+        ? [`通知回复窗口：${String(notificationCount)}`]
+        : []),
+      ...(pendingApprovals.length > 0
+        ? [
+            `待审批：${String(pendingApprovals.length)}（${
               retryingApprovalCount > 0
                 ? `通知重试中：${String(retryingApprovalCount)}`
                 : "微信接口已接收"
-            }；发送尝试：${String(approvalDeliveryAttempts)}；提醒：${String(approvalReminderCount)}；最短剩余：${String(approvalRemainingMinutes)} 分钟）`
-          : ""
-      }`,
-      `连接：Codex ${codexHealthy ? "正常" : "异常"}；仲裁${arbitrationHealthy ? "正常" : "关闭"}；微信${this.#ilinkHealthy ? "正常" : "异常"}`,
+            }；发送尝试：${String(approvalDeliveryAttempts)}；提醒：${String(approvalReminderCount)}；最短剩余：${String(approvalRemainingMinutes)} 分钟）`,
+          ]
+        : []),
+      connectionsHealthy
+        ? "连接：正常"
+        : `连接：Codex ${codexHealthy ? "正常" : "异常"}；仲裁${arbitrationHealthy ? "正常" : "关闭"}；微信${this.#ilinkHealthy ? "正常" : "异常"}`,
     ].join("\n");
   }
 

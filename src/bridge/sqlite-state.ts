@@ -542,6 +542,11 @@ export class SqliteState {
       this.#database.exec("DELETE FROM notification_routes");
       this.#database
         .prepare(
+          "UPDATE bridge_settings SET selected_project_path = ? WHERE singleton = 1",
+        )
+        .run(binding.projectPath);
+      this.#database
+        .prepare(
           `INSERT INTO bindings
             (singleton, thread_id, project_path, expires_at_ms, updated_at_ms)
            VALUES (1, ?, ?, ?, ?)
@@ -2100,6 +2105,28 @@ export class SqliteState {
           protectedToken: row.protected_token,
         }
       : null;
+  }
+
+  returnToMainForNavigation(): void {
+    this.#transaction(() => {
+      this.#database.exec(
+        "UPDATE bridge_settings SET selected_project_path = NULL WHERE singleton = 1; DELETE FROM bindings; DELETE FROM notification_routes; DELETE FROM list_snapshots WHERE kind = 'sessions';",
+      );
+    });
+  }
+
+  replaceMainThreadForNavigation(threadId: string): void {
+    if (!threadId) throw new Error("main thread id is required");
+    this.#transaction(() => {
+      this.#database
+        .prepare(
+          "UPDATE bridge_settings SET main_thread_id = ?, selected_project_path = NULL WHERE singleton = 1",
+        )
+        .run(threadId);
+      this.#database.exec(
+        "DELETE FROM bindings; DELETE FROM notification_routes; DELETE FROM list_snapshots WHERE kind = 'sessions';",
+      );
+    });
   }
 
   #isInboundMessagePending(

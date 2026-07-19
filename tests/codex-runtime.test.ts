@@ -482,6 +482,11 @@ const reconnectableOperations: ReadonlyArray<{
   name: string;
 }> = [
   {
+    appServerMethod: "thread/archive",
+    invoke: (runtime) => runtime.archiveThread("thread-archive"),
+    name: "archiveThread",
+  },
+  {
     appServerMethod: "thread/read",
     invoke: (runtime) =>
       runtime.readThread({ includeTurns: false, threadId: "thread-read" }),

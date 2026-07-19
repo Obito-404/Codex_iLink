@@ -815,71 +815,6 @@ test("thread metadata operations use the stable public methods", async () => {
   }
 });
 
-test("native permission profiles are listed and selected through App Server", async () => {
-  const runtime = await CodexRuntime.create({
-    bridgeInstanceId: "bridge-instance-permissions",
-    command: [process.execPath, fakeRuntime],
-  });
-
-  try {
-    const profiles = await runtime.listPermissionProfiles({ cwd: "D:\\Fixture" });
-    const resumed = await runtime.resumeThread("thread-existing", {
-      permissions: ":danger-full-access",
-    });
-
-    assert.deepEqual(profiles.data, [
-      { allowed: true, description: null, id: ":read-only" },
-      { allowed: true, description: null, id: ":workspace" },
-      { allowed: true, description: null, id: ":danger-full-access" },
-    ]);
-    assert.deepEqual(resumed.activePermissionProfile, {
-      id: ":danger-full-access",
-    });
-    assert.equal(resumed.approvalPolicy, "on-request");
-    assert.deepEqual(resumed.sandbox, { type: "dangerFullAccess" });
-  } finally {
-    runtime.close();
-  }
-});
-
-test("a loaded thread changes permission through thread/settings/update", async (t) => {
-  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-runtime-permissions-"));
-  t.after(() => rmSync(directory, { force: true, recursive: true }));
-  const updateCountPath = join(directory, "thread-settings-update.count");
-  const runtime = await CodexRuntime.create({
-    bridgeInstanceId: "bridge-instance-permission-reapply",
-    command: [
-      process.execPath,
-      fakeRuntime,
-      "--count-method",
-      "thread/settings/update",
-      updateCountPath,
-    ],
-  });
-
-  try {
-    await runtime.resumeThread("thread-existing", { permissions: ":workspace" });
-    const changed = await runtime.updateThreadPermissions("thread-existing", {
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      permissions: ":danger-full-access",
-    });
-    await runtime.ensureThread("thread-existing", {
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      permissions: ":danger-full-access",
-    });
-
-    assert.deepEqual(changed.activePermissionProfile, {
-      id: ":danger-full-access",
-    });
-    assert.equal(changed.approvalPolicy, "never");
-    assert.equal(changed.approvalsReviewer, "user");
-    assert.equal(Number(readFileSync(updateCountPath, "utf8")), 1);
-  } finally {
-    runtime.close();
-  }
-});
 
 test("existing threads inherit settings and new threads override only cwd", async () => {
   const runtime = await CodexRuntime.create({
@@ -892,6 +827,14 @@ test("existing threads inherit settings and new threads override only cwd", asyn
     const started = await runtime.startThread("D:\\Allowed Project");
 
     assert.deepEqual(resumed.thread, { id: "thread-existing" });
+    assert.deepEqual(resumed.activePermissionProfile, { id: ":workspace" });
+    assert.equal(resumed.approvalPolicy, "on-request");
+    assert.equal(resumed.approvalsReviewer, "user");
+    assert.deepEqual(resumed.sandbox, { type: "workspaceWrite" });
+    assert.deepEqual(
+      Object.keys(resumed.fixtureParams as Record<string, unknown>).sort(),
+      ["developerInstructions", "threadId"],
+    );
     assert.deepEqual(started.thread, {
       cwd: "D:\\Allowed Project",
       id: "thread-new",

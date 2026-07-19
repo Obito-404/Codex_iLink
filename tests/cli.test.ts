@@ -173,7 +173,11 @@ test("setup installs the Guard, binds WeChat, and starts the Bridge", async () =
   assert.deepEqual(calls, ["plugin", "login", "startup", "start"]);
   assert.match(output.join("\n"), /安装 Codex iLink Guard/u);
   assert.match(output.join("\n"), /绑定微信/u);
-  assert.match(output.at(-1) ?? "", /安装完成/u);
+  assert.match(output.join("\n"), /安装完成/u);
+  assert.match(output.join("\n"), /不会自动信任或绕过审核/u);
+  assert.match(output.join("\n"), /打开 Hooks/u);
+  assert.match(output.join("\n"), /codex-ilink-probe（Codex iLink Guard）/u);
+  assert.match(output.join("\n"), /Hook 定义变化后需要重新审核/u);
 });
 
 test("setup installs a missing Codex marketplace and Guard plugin", async () => {

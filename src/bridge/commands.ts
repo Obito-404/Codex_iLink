@@ -11,7 +11,6 @@ export type AtomicControlIntent =
   | { kind: "newSession" }
   | { kind: "permissions" }
   | { kind: "projects" }
-  | { kind: "selectPermission"; index: number }
   | { effort: string; kind: "selectEffort" }
   | { index: number; kind: "selectEffort" }
   | { id: string; kind: "selectModel" }
@@ -45,7 +44,7 @@ export const COMMAND_HELP = [
   "stop — stop current turn",
   "exit — return to main",
   "st — status",
-  "perm | perm<n> — permissions",
+  "perm — current Codex permissions (read-only)",
   "model | model<n> | model:<id> — model",
   "effort | effort<n> | effort:<level> — reasoning effort",
   "ok[code] | no[code] — approval",
@@ -113,7 +112,7 @@ export function parseInboundText(text: string): InboundIntent {
       case "s":
         return { index, kind: "enterSession" };
       case "perm":
-        return { index, kind: "selectPermission" };
+        return { kind: "permissions" };
       case "model":
         return { index, kind: "selectModel" };
       case "effort":
@@ -197,7 +196,6 @@ export function routedControlIntent(value: unknown): RoutedControlIntent | null 
     case "stopTurn":
       return { kind };
     case "enterSession":
-    case "selectPermission":
     case "selectProject":
       return index === null ? null : { index, kind };
     case "selectModel":
@@ -313,7 +311,7 @@ function parseNaturalControl(command: string): AtomicControlIntent | null {
     `^(?:切换|选择|使用)(?:到|为)?第?${NATURAL_INDEX}个?权限(?:配置)?$`,
     "u",
   ).exec(normalized);
-  if (permission) return indexedNaturalIntent(permission[1], "selectPermission");
+  if (permission) return { kind: "permissions" };
 
   if (/^(?:查看|显示|列出)?(?:可用)?模型(?:列表|清单)?$|^有哪些模型$/u.test(normalized)) {
     return { kind: "models" };
@@ -366,7 +364,6 @@ function indexedNaturalIntent(
     | "enterSession"
     | "selectEffort"
     | "selectModel"
-    | "selectPermission"
     | "selectProject",
 ): AtomicControlIntent | null {
   const index = naturalNumber(value);
@@ -378,8 +375,6 @@ function indexedNaturalIntent(
       return { index, kind: "selectEffort" };
     case "selectModel":
       return { index, kind: "selectModel" };
-    case "selectPermission":
-      return { index, kind: "selectPermission" };
     case "selectProject":
       return { index, kind: "selectProject" };
   }

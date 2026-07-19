@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受，部分取代 [ADR 0013](./0013-wechat-selects-native-permission-profiles.md)。
+已被 [ADR 0015](./0015-codex-is-the-only-permission-source.md) 完全取代。保留本文作为“Bridge 维护固定权限组合”阶段的历史决策。
 
 ## 背景
 

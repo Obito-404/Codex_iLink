@@ -606,10 +606,13 @@ function runHook(
   input: Record<string, unknown>,
   environment: NodeJS.ProcessEnv = {},
 ) {
+  const inheritedEnvironment: NodeJS.ProcessEnv = { ...process.env };
+  delete inheritedEnvironment.CODEX_ILINK_BRIDGE;
+  delete inheritedEnvironment.CODEX_ILINK_BRIDGE_INSTANCE;
   return spawnSync(process.execPath, [hookScript, expectedEvent], {
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...inheritedEnvironment,
       ...environment,
       CODEX_ILINK_LEASE_DB: databasePath,
     },

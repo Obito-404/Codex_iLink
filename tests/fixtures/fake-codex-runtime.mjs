@@ -218,26 +218,6 @@ lines.on("line", (line) => {
     return;
   }
 
-  if (message.method === "permissionProfile/list") {
-    if (!experimentalApi) {
-      respondError(message.id, -32600, "experimentalApi capability required");
-      return;
-    }
-    if (!hasExactKeys(message.params, ["cwd"])) {
-      rejectUnexpectedParams(message);
-      return;
-    }
-    respond(message.id, {
-      data: [
-        { allowed: true, description: null, id: ":read-only" },
-        { allowed: true, description: null, id: ":workspace" },
-        { allowed: true, description: null, id: ":danger-full-access" },
-      ],
-      nextCursor: null,
-    });
-    return;
-  }
-
   if (message.method === "model/list") {
     if (!hasExactKeys(message.params, [])) {
       rejectUnexpectedParams(message);
@@ -263,22 +243,8 @@ lines.on("line", (line) => {
   }
 
   if (message.method === "thread/resume") {
-    if (message.params.permissions && !experimentalApi) {
-      respondError(message.id, -32600, "experimentalApi capability required");
-      return;
-    }
-    const resumeKeys = Object.keys(message.params).sort();
-    const allowedResumeKeys = new Set([
-      "approvalPolicy",
-      "approvalsReviewer",
-      "developerInstructions",
-      "permissions",
-      "threadId",
-    ]);
     if (
-      !resumeKeys.every((key) => allowedResumeKeys.has(key)) ||
-      !resumeKeys.includes("developerInstructions") ||
-      !resumeKeys.includes("threadId")
+      !hasExactKeys(message.params, ["developerInstructions", "threadId"])
     ) {
       rejectUnexpectedParams(message);
       return;
@@ -287,17 +253,17 @@ lines.on("line", (line) => {
       message.params.threadId,
     )
       ? activePermissionProfiles.get(message.params.threadId)
-      : (message.params.permissions ?? ":workspace");
+      : ":workspace";
     activePermissionProfiles.set(
       message.params.threadId,
       activePermissionProfile,
     );
     const approvalPolicy = activeApprovalPolicies.has(message.params.threadId)
       ? activeApprovalPolicies.get(message.params.threadId)
-      : (message.params.approvalPolicy ?? "on-request");
+      : "on-request";
     const approvalsReviewer = activeApprovalsReviewers.has(message.params.threadId)
       ? activeApprovalsReviewers.get(message.params.threadId)
-      : (message.params.approvalsReviewer ?? "user");
+      : "user";
     activeApprovalPolicies.set(message.params.threadId, approvalPolicy);
     activeApprovalsReviewers.set(message.params.threadId, approvalsReviewer);
     respond(message.id, {
@@ -327,46 +293,17 @@ lines.on("line", (line) => {
       respondError(message.id, -32600, "experimentalApi capability required");
       return;
     }
-    const updateKeys = Object.keys(message.params).sort();
-    const permissionUpdateKeys = new Set([
-      "approvalPolicy",
-      "approvalsReviewer",
-      "permissions",
-      "threadId",
-    ]);
-    const isPermissionUpdate =
-      updateKeys.includes("permissions") &&
-      updateKeys.includes("threadId") &&
-      updateKeys.every((key) => permissionUpdateKeys.has(key));
     const isModelUpdate =
       hasExactKeys(message.params, ["model", "threadId"]) ||
       hasExactKeys(message.params, ["effort", "threadId"]) ||
       hasExactKeys(message.params, ["effort", "model", "threadId"]);
-    if (!isPermissionUpdate && !isModelUpdate) {
+    if (!isModelUpdate) {
       rejectUnexpectedParams(message);
       return;
     }
     if (!activePermissionProfiles.has(message.params.threadId)) {
       respondError(message.id, -32602, "thread is not loaded");
       return;
-    }
-    if (isPermissionUpdate) {
-      activePermissionProfiles.set(
-        message.params.threadId,
-        message.params.permissions,
-      );
-      if (message.params.approvalPolicy) {
-        activeApprovalPolicies.set(
-          message.params.threadId,
-          message.params.approvalPolicy,
-        );
-      }
-      if (message.params.approvalsReviewer) {
-        activeApprovalsReviewers.set(
-          message.params.threadId,
-          message.params.approvalsReviewer,
-        );
-      }
     }
     if (message.params.model) {
       activeModels.set(message.params.threadId, message.params.model);

@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import type { ReleaseTurnLeaseInput } from "../coordination/turn-lease.ts";
 import { outboundMediaPathKey } from "../media/outbound-media.ts";
 import {
   AWAY_TIMEOUT_MINUTES_RANGE,
@@ -92,6 +93,16 @@ export type DispatchIntent = {
   updatedAtMs: number;
 };
 
+export type InboundDispatchAdmission =
+  | { dispatch: DispatchIntent; kind: "created" }
+  | { kind: "queued"; queued: QueuedTurn }
+  | { kind: "terminal" };
+
+export type QueuedTurnPromotion =
+  | { dispatch: DispatchIntent; kind: "promoted" }
+  | { kind: "blocked" }
+  | { kind: "stale" };
+
 export type OutboundAttachmentIntent = {
   callId: string;
   createdAtMs: number;
@@ -138,18 +149,6 @@ export type BridgeRuntime = {
 export type BridgeSettings = UserTimingSettings & {
   mainThreadId: string | null;
   selectedProjectPath: string | null;
-};
-
-export type ThreadPermissionProfile = {
-  approvalPolicy: "never" | "on-request" | "untrusted" | null;
-  approvalsReviewer:
-    | "auto_review"
-    | "guardian_subagent"
-    | "user"
-    | null;
-  profileId: string;
-  threadId: string;
-  updatedAtMs: number;
 };
 
 export type ProjectListSnapshot = {
@@ -475,6 +474,46 @@ export class SqliteState {
       )
       .run(accountId, controllerUserId, messageId);
     return Number(result.changes) === 1;
+  }
+
+  rejectInboundMessageAndReleaseLeaseWithOutbox(input: {
+    accountId: string;
+    controllerUserId: string;
+    lease: ReleaseTurnLeaseInput;
+    messageId: string;
+    outbox: PendingOutboxInput;
+  }): OutboxItem | null {
+    return this.#transaction(() => {
+      if (input.lease.owner !== "bridge" || input.lease.turnId !== null) {
+        throw new Error("invalid inbound rejection lease identity");
+      }
+      if (
+        !this.#isInboundMessagePending(
+          input.accountId,
+          input.controllerUserId,
+          input.messageId,
+        )
+      ) {
+        // Another process already consumed this inbound. The caller may still
+        // hold an obsolete pre-dispatch token, so release only that exact token
+        // on a best-effort basis and never disturb its replacement.
+        this.#releaseExactTurnLease(input.lease);
+        return null;
+      }
+      if (!this.#releaseExactTurnLease(input.lease)) {
+        throw new Error("inbound rejection lost lease ownership");
+      }
+      if (
+        !this.clearInboundBody(
+          input.accountId,
+          input.controllerUserId,
+          input.messageId,
+        )
+      ) {
+        throw new Error("inbound rejection lost ownership");
+      }
+      return this.enqueueOutbox(input.outbox);
+    });
   }
 
   setBinding(binding: Binding): void {
@@ -826,6 +865,48 @@ export class SqliteState {
     return Number(result.changes);
   }
 
+  enqueueInboundTurn(input: {
+    accountId: string;
+    body: string;
+    contextToken?: string;
+    controllerUserId: string;
+    createdAtMs: number;
+    dedupeKey: string;
+    messageId: string;
+    threadId: string;
+  }): QueuedTurn | null {
+    return this.#transaction(() => {
+      if (
+        !this.#isInboundMessagePending(
+          input.accountId,
+          input.controllerUserId,
+          input.messageId,
+        )
+      ) {
+        return null;
+      }
+      const queued = this.enqueueQueuedTurn({
+        body: input.body,
+        ...(input.contextToken === undefined
+          ? {}
+          : { contextToken: input.contextToken }),
+        createdAtMs: input.createdAtMs,
+        dedupeKey: input.dedupeKey,
+        threadId: input.threadId,
+      });
+      if (
+        !this.clearInboundBody(
+          input.accountId,
+          input.controllerUserId,
+          input.messageId,
+        )
+      ) {
+        throw new Error("inbound queue admission lost ownership");
+      }
+      return queued;
+    });
+  }
+
   enqueueQueuedTurn(
     input: Omit<QueuedTurn, "contextToken" | "id"> & {
       contextToken?: string;
@@ -897,6 +978,71 @@ export class SqliteState {
     return Number(result.changes) === 1;
   }
 
+  rejectQueuedTurnWithOutbox(input: {
+    dedupeKey: string;
+    queuedTurnId: number;
+    threadId: string;
+    outbox: PendingOutboxInput;
+  }): OutboxItem | null {
+    return this.#transaction(() => {
+      const deleted = this.#database
+        .prepare(
+          `DELETE FROM queued_turns
+           WHERE id = ? AND dedupe_key = ? AND thread_id = ?`,
+        )
+        .run(input.queuedTurnId, input.dedupeKey, input.threadId);
+      if (Number(deleted.changes) !== 1) {
+        return null;
+      }
+      return this.enqueueOutbox(input.outbox);
+    });
+  }
+
+  rejectQueuedTurnAndReleaseLeaseWithOutbox(input: {
+    dedupeKey: string;
+    lease: ReleaseTurnLeaseInput;
+    outbox: PendingOutboxInput;
+    queuedTurnId: number;
+    threadId: string;
+  }): OutboxItem | null {
+    return this.#transaction(() => {
+      if (
+        input.lease.owner !== "bridge" ||
+        input.lease.turnId !== null ||
+        input.lease.threadId !== input.threadId
+      ) {
+        throw new Error("queued rejection has an invalid lease identity");
+      }
+      const row = this.#database
+        .prepare(
+          `SELECT 1 AS queued FROM queued_turns
+           WHERE id = ? AND dedupe_key = ? AND thread_id = ?`,
+        )
+        .get(input.queuedTurnId, input.dedupeKey, input.threadId) as
+        | { queued: number }
+        | undefined;
+      const leaseHeld = this.#isExactTurnLeaseHeld(input.lease);
+      if (row?.queued !== 1 || !leaseHeld) {
+        if (leaseHeld) this.#releaseExactTurnLease(input.lease);
+        return null;
+      }
+      const outbox = this.enqueueOutbox(input.outbox);
+      const deleted = this.#database
+        .prepare(
+          `DELETE FROM queued_turns
+           WHERE id = ? AND dedupe_key = ? AND thread_id = ?`,
+        )
+        .run(input.queuedTurnId, input.dedupeKey, input.threadId);
+      if (Number(deleted.changes) !== 1) {
+        throw new Error("queued turn rejection lost ownership");
+      }
+      if (!this.#releaseExactTurnLease(input.lease)) {
+        throw new Error("queued turn rejection lost lease ownership");
+      }
+      return outbox;
+    });
+  }
+
   countQueuedTurns(): number {
     const row = this.#database
       .prepare("SELECT COUNT(*) AS count FROM queued_turns")
@@ -957,29 +1103,55 @@ export class SqliteState {
     return row?.active === 1;
   }
 
-  promoteQueuedTurn(input: {
+  promoteQueuedTurnWithLease(input: {
     contextToken?: string;
     createdAtMs: number;
+    dedupeKey: string;
+    lease: ReleaseTurnLeaseInput;
     maxActiveDispatches?: number;
     operationId: string;
     queuedTurnId: number;
-  }): DispatchIntent | null {
+    threadId: string;
+  }): QueuedTurnPromotion {
     return this.#transaction(() => {
+      if (
+        input.lease.owner !== "bridge" ||
+        input.lease.turnId !== null ||
+        input.lease.threadId !== input.threadId ||
+        input.lease.operationId !== input.operationId
+      ) {
+        throw new Error("queued promotion has an invalid lease identity");
+      }
       const row = this.#database
         .prepare(
           `SELECT id, dedupe_key, thread_id, body, created_at_ms, context_token
-           FROM queued_turns WHERE id = ?`,
+           FROM queued_turns
+           WHERE id = ? AND dedupe_key = ? AND thread_id = ?`,
         )
-        .get(input.queuedTurnId) as QueuedTurnRow | undefined;
-      if (!row) return null;
+        .get(input.queuedTurnId, input.dedupeKey, input.threadId) as
+        | QueuedTurnRow
+        | undefined;
+      if (!row) {
+        this.#releaseExactTurnLease(input.lease);
+        return { kind: "stale" };
+      }
+      if (!this.#isExactTurnLeaseHeld(input.lease)) {
+        return { kind: "stale" };
+      }
       const queued = queuedTurnFromRow(row);
+      const head = this.peekQueuedTurn(queued.threadId);
       if (
         this.countActiveDispatches() >=
           (input.maxActiveDispatches ?? Number.MAX_SAFE_INTEGER) ||
         this.hasActiveDispatchForThread(queued.threadId) ||
-        this.peekQueuedTurn(queued.threadId)?.id !== queued.id
+        this.getDesktopTurnObservation(queued.threadId) !== null ||
+        head?.id !== queued.id ||
+        head.dedupeKey !== queued.dedupeKey
       ) {
-        return null;
+        if (!this.#releaseExactTurnLease(input.lease)) {
+          throw new Error("blocked queued promotion lost lease ownership");
+        }
+        return { kind: "blocked" };
       }
       const dispatch = this.createDispatchIntent({
         body: queued.body,
@@ -989,9 +1161,16 @@ export class SqliteState {
         operationId: input.operationId,
         threadId: queued.threadId,
       });
-      const deleted = this.deleteQueuedTurn(queued.id);
-      if (!deleted) throw new Error("queued turn promotion lost ownership");
-      return dispatch;
+      const deleted = this.#database
+        .prepare(
+          `DELETE FROM queued_turns
+           WHERE id = ? AND dedupe_key = ? AND thread_id = ?`,
+        )
+        .run(queued.id, queued.dedupeKey, queued.threadId);
+      if (Number(deleted.changes) !== 1) {
+        throw new Error("queued turn promotion lost ownership");
+      }
+      return { dispatch, kind: "promoted" };
     });
   }
 
@@ -1025,7 +1204,7 @@ export class SqliteState {
     return this.#requireDispatchIntent(input.operationId);
   }
 
-  tryCreateDispatchIntent(
+  admitInboundDispatchWithLease(
     input: Pick<
       DispatchIntent,
       | "body"
@@ -1033,17 +1212,81 @@ export class SqliteState {
       | "dedupeKey"
       | "operationId"
       | "threadId"
-    > & { contextToken?: string; maxActiveDispatches: number },
-  ): DispatchIntent | null {
+    > & {
+      accountId: string;
+      body: string;
+      contextToken?: string;
+      controllerUserId: string;
+      lease: ReleaseTurnLeaseInput;
+      maxActiveDispatches: number;
+      messageId: string;
+    },
+  ): InboundDispatchAdmission {
     return this.#transaction(() => {
+      if (
+        input.lease.owner !== "bridge" ||
+        input.lease.turnId !== null ||
+        input.lease.threadId !== input.threadId ||
+        input.lease.operationId !== input.operationId
+      ) {
+        throw new Error("invalid inbound dispatch lease identity");
+      }
+      if (
+        !this.#isInboundMessagePending(
+          input.accountId,
+          input.controllerUserId,
+          input.messageId,
+        )
+      ) {
+        // A stale in-memory worker can arrive after a same-thread replacement
+        // has taken over. Exact best-effort release keeps terminal admission a
+        // harmless no-op without deleting the replacement lease.
+        this.#releaseExactTurnLease(input.lease);
+        return { kind: "terminal" };
+      }
+      if (!this.#isExactTurnLeaseHeld(input.lease)) {
+        throw new Error("inbound dispatch admission lost lease ownership");
+      }
       if (
         this.countActiveDispatches() >= input.maxActiveDispatches ||
         this.hasActiveDispatchForThread(input.threadId) ||
+        this.getDesktopTurnObservation(input.threadId) !== null ||
         this.peekQueuedTurn(input.threadId) !== null
       ) {
-        return null;
+        const queued = this.enqueueQueuedTurn({
+          body: input.body,
+          ...(input.contextToken === undefined
+            ? {}
+            : { contextToken: input.contextToken }),
+          createdAtMs: input.createdAtMs,
+          dedupeKey: input.dedupeKey,
+          threadId: input.threadId,
+        });
+        if (
+          !this.clearInboundBody(
+            input.accountId,
+            input.controllerUserId,
+            input.messageId,
+          )
+        ) {
+          throw new Error("queued inbound admission lost ownership");
+        }
+        if (!this.#releaseExactTurnLease(input.lease)) {
+          throw new Error("queued inbound admission lost lease ownership");
+        }
+        return { kind: "queued", queued };
       }
-      return this.createDispatchIntent(input);
+      const dispatch = this.createDispatchIntent(input);
+      if (
+        !this.clearInboundBody(
+          input.accountId,
+          input.controllerUserId,
+          input.messageId,
+        )
+      ) {
+        throw new Error("inbound dispatch admission lost ownership");
+      }
+      return { dispatch, kind: "created" };
     });
   }
 
@@ -1659,56 +1902,6 @@ export class SqliteState {
       .run(projectPath);
   }
 
-  setThreadPermissionProfile(profile: ThreadPermissionProfile): void {
-    if (!profile.threadId) throw new Error("thread id is required");
-    if (!profile.profileId) throw new Error("permission profile id is required");
-    this.#database
-      .prepare(
-        `INSERT INTO thread_permission_profiles
-          (thread_id, profile_id, approval_policy, approvals_reviewer, updated_at_ms)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (thread_id) DO UPDATE SET
-           profile_id = excluded.profile_id,
-           approval_policy = excluded.approval_policy,
-           approvals_reviewer = excluded.approvals_reviewer,
-           updated_at_ms = excluded.updated_at_ms`,
-      )
-      .run(
-        profile.threadId,
-        profile.profileId,
-        profile.approvalPolicy,
-        profile.approvalsReviewer,
-        profile.updatedAtMs,
-      );
-  }
-
-  getThreadPermissionProfile(threadId: string): ThreadPermissionProfile | null {
-    const row = this.#database
-      .prepare(
-        `SELECT thread_id, profile_id, approval_policy, approvals_reviewer,
-                updated_at_ms
-         FROM thread_permission_profiles WHERE thread_id = ?`,
-      )
-      .get(threadId) as
-      | {
-          approval_policy: ThreadPermissionProfile["approvalPolicy"];
-          approvals_reviewer: ThreadPermissionProfile["approvalsReviewer"];
-          profile_id: string;
-          thread_id: string;
-          updated_at_ms: number;
-        }
-      | undefined;
-    return row
-      ? {
-          approvalPolicy: row.approval_policy,
-          approvalsReviewer: row.approvals_reviewer,
-          profileId: row.profile_id,
-          threadId: row.thread_id,
-          updatedAtMs: row.updated_at_ms,
-        }
-      : null;
-  }
-
   selectProjectForNavigation(projectPath: string): void {
     if (!projectPath) throw new Error("project path is required");
     this.#transaction(() => {
@@ -1909,6 +2102,63 @@ export class SqliteState {
       : null;
   }
 
+  #isInboundMessagePending(
+    accountId: string,
+    controllerUserId: string,
+    messageId: string,
+  ): boolean {
+    const row = this.#database
+      .prepare(
+        `SELECT 1 AS pending FROM inbound_messages
+         WHERE account_id = ? AND controller_user_id = ? AND message_id = ?
+           AND body IS NOT NULL`,
+      )
+      .get(accountId, controllerUserId, messageId) as
+      | { pending: number }
+      | undefined;
+    return row?.pending === 1;
+  }
+
+  #isExactTurnLeaseHeld(expected: ReleaseTurnLeaseInput): boolean {
+    const row = this.#database
+      .prepare(
+        `SELECT 1 AS held FROM turn_leases
+         WHERE thread_id = ?
+           AND owner = ?
+           AND instance_id = ?
+           AND operation_id = ?
+           AND turn_id IS ?`,
+      )
+      .get(
+        expected.threadId,
+        expected.owner,
+        expected.instanceId,
+        expected.operationId,
+        expected.turnId,
+      ) as { held: number } | undefined;
+    return row?.held === 1;
+  }
+
+  #releaseExactTurnLease(expected: ReleaseTurnLeaseInput): boolean {
+    const released = this.#database
+      .prepare(
+        `DELETE FROM turn_leases
+         WHERE thread_id = ?
+           AND owner = ?
+           AND instance_id = ?
+           AND operation_id = ?
+           AND turn_id IS ?`,
+      )
+      .run(
+        expected.threadId,
+        expected.owner,
+        expected.instanceId,
+        expected.operationId,
+        expected.turnId,
+      );
+    return Number(released.changes) === 1;
+  }
+
   #migrate(): void {
     const migrations = [
       "./migrations/001-initial.sql",
@@ -1924,6 +2174,7 @@ export class SqliteState {
       "./migrations/011-thread-permission-settings.sql",
       "./migrations/012-outbound-attachment-provenance.sql",
       "./migrations/013-transport-retention-indexes.sql",
+      "./migrations/014-drop-thread-permission-profiles.sql",
     ];
     const observed = this.#database.prepare("PRAGMA user_version").get() as
       | { user_version: number }

@@ -397,15 +397,18 @@ test("a spooled Desktop prompt is observed before the same iLink batch enters it
         const blocker = new DatabaseSync(databasePath);
         try {
           blocker.exec("BEGIN IMMEDIATE");
+          const hookEnvironment: NodeJS.ProcessEnv = {
+            ...process.env,
+            LOCALAPPDATA: directory,
+          };
+          delete hookEnvironment.CODEX_ILINK_BRIDGE;
+          delete hookEnvironment.CODEX_ILINK_BRIDGE_INSTANCE;
           const result = spawnSync(
             process.execPath,
             [turnLifecycleHook, "UserPromptSubmit"],
             {
               encoding: "utf8",
-              env: {
-                ...process.env,
-                LOCALAPPDATA: directory,
-              },
+              env: hookEnvironment,
               input: JSON.stringify({
                 cwd: "D:\\Project",
                 hook_event_name: "UserPromptSubmit",

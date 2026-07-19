@@ -1,8 +1,8 @@
 # Codex iLink
 
-把微信变成 Windows 本机 Codex 的远程入口。微信与 Codex Desktop 使用同一份任务历史，可以查看项目、进入任务、继续对话、切换模型与权限，以及收发图片和文件。
+把微信变成 Windows 本机 Codex 的远程入口。微信与 Codex Desktop 使用同一份任务历史和实际权限设置，可以查看项目、进入任务、继续对话、查看当前任务的实际权限、切换模型，以及收发图片和文件。
 
-> 当前为开发预览版，仅支持 Windows 10/11 x64。Bridge 只负责连接和路由，不复制 Codex 对话。
+> 当前为开发预览版，仅支持 Windows 10/11 x64。Codex 持久化任务及其权限设置是唯一事实源；Bridge 只负责连接、路由和 Codex 原生审批的安全转发，不复制对话，也不保存或恢复一套 iLink 权限。
 
 ## 安装并启动
 
@@ -39,7 +39,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Obi
 
 ```powershell
 $installer = irm https://raw.githubusercontent.com/Obito-404/Codex_iLink/main/scripts/install.ps1
-& ([scriptblock]::Create($installer)) -Channel preview -Version 0.1.0-rc.1
+& ([scriptblock]::Create($installer)) -Channel preview -Version 0.1.0-rc.2
 ```
 
 预览版仍会校验 SHA-256；若未签名会明确警告。版本号必须是 GitHub 上实际存在的 SemVer 预发布版本，且不带 `v` 前缀。
@@ -83,8 +83,22 @@ ilink setup
 2. 打开微信二维码并等待扫码绑定。
 3. 注册当前 Windows 用户的登录启动任务。
 4. 启动后台 Bridge。
+5. 输出 Codex Hooks 的人工审核指引。
 
-安装完成后，刷新或重启 Codex Desktop，在信任页面审核并允许 `Codex iLink Guard` Hooks。
+### 完成 Hooks 人工信任
+
+Codex 要求非托管命令 Hook 按当前定义的 hash 由用户审核。为保留这条安全边界，`ilink setup` 不会修改 Codex 的信任存储，也不会使用危险参数绕过审核。
+
+安装完成后还需要执行一次人工操作：
+
+1. 刷新或重启 Codex Desktop。
+2. 打开 Hooks 信任页面；使用 Codex CLI 时也可以输入 `/hooks`。
+3. 找到内部 ID 为 `codex-ilink-probe`、显示名为 `Codex iLink Guard` 的插件。
+4. 审核 Hook 来源和命令后，信任该插件需要的 Hooks。
+
+完成信任后，Guard 才会捕获 Desktop 生命周期事件，随后即可在微信使用。`ilink doctor` 会检查 Guard 是否已经安装并启用，但 Codex 没有提供公开的持久信任状态查询接口，因此 `Hooks 信任` 一项只显示人工确认说明，不会声称已经自动验证。
+
+不要在普通安装或日常启动中使用 `--dangerously-bypass-hook-trust`。该参数只绕过当前一次 Codex 调用，不会持久化信任；本项目仅曾在隔离探针中使用，生产安装和运行流程均不使用。
 
 ### 开始使用
 
@@ -101,7 +115,7 @@ ilink setup
 ```powershell
 ilink setup    # 首次安装或修复配置
 ilink status   # 查看 Bridge 状态
-ilink doctor   # 检查环境、绑定和状态库
+ilink doctor   # 检查环境、Guard、绑定和状态库；Hooks 信任需人工确认
 ilink stop     # 停止 Bridge
 ilink start    # 启动 Bridge
 ilink startup status   # 查看当前用户登录启动状态
@@ -145,7 +159,7 @@ ilink setup
 
 npm 预览版把 `@latest` 替换为 `@next`。
 
-升级或插件发生变化后，需要刷新 Codex Desktop，并重新审核 Hooks。
+升级后需要刷新或重启 Codex Desktop。如果 Hook 定义发生变化，Codex 会因 hash 变化把它重新标记为待审核，此时需要在 Hooks 页面再次人工确认；仅应用版本变化而 Hook 定义未变时，以 Codex 页面显示的实际状态为准。
 
 ## 微信命令
 
@@ -158,13 +172,15 @@ npm 预览版把 `@latest` 替换为 `@next`。
 | 新建/清理 | `new`、`clear`、`compact` | `new` |
 | 停止/退出 | `stop`、`exit` | `stop` |
 | 状态 | `st` | `st` |
-| 权限 | `perm`、`perm<n>` | `perm2` |
+| 权限 | `perm`（只读） | `perm` |
 | 模型 | `model`、`model<n>`、`model:<id>` | `model2` |
 | 推理强度 | `effort`、`effort:<level>` | `effort:high` |
 | 审批 | `ok[code]`、`no[code]` | `okA7C9E2` |
 | 帮助 | `help` | `help` |
 
 短命令不带 `/`，命令和编号之间不加空格。
+
+`perm` 每次都从 Codex 读取当前任务的实际 Profile、审批策略、审批人和 Sandbox。权限只能在 Codex Desktop 中修改；同一任务在 Desktop 修改后，下一次 `perm` 会显示新值。旧版 `perm<n>` 输入也只会返回当前权限，不再切换或提升权限。`ok/no` 只回应仍在线的单次 Codex 审批请求，不代表 iLink 自己维护审批策略。
 
 ## 超时配置
 
@@ -202,7 +218,9 @@ ilink status
 
 ### 微信消息无法进入 Codex
 
-刷新或重启 Codex Desktop，确认 `Codex iLink Guard` 已安装并启用，并在信任页面允许其 Hooks。随后重新执行：
+先执行 `ilink doctor`，确认 `Codex iLink Guard` 显示为“已安装并启用”。然后刷新或重启 Codex Desktop，在 Hooks 信任页面确认内部 ID `codex-ilink-probe` 已人工允许。`doctor` 无法读取或代替这项人工信任。
+
+如果插件缺失或未启用，再执行：
 
 ```powershell
 ilink setup
@@ -244,7 +262,8 @@ Remove-Item -LiteralPath "$env:LOCALAPPDATA\Programs\Codex-iLink" -Recurse -Forc
 
 - 只接受扫码绑定的单一微信控制者。
 - 微信凭证使用当前 Windows 用户的 DPAPI 加密。
-- Codex 持久化任务是唯一对话事实源，Bridge 不保存完整聊天历史。
+- Codex 持久化任务是唯一对话与权限事实源，Bridge 不保存完整聊天历史或可回灌的权限快照。
+- Codex Hooks 始终由用户按定义 hash 人工审核；安装器不写入信任状态，也不在生产流程中绕过 Hook 信任。
 - 不要向他人发送 npm 密码、OTP、恢复码或本机凭证。
 
 安全漏洞请按 [安全政策](./SECURITY.md) 私下报告，不要先在公开 Issue 中披露。

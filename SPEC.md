@@ -8,7 +8,7 @@
 
 把微信作为 Windows 本机 Codex 的另一个入口。用户可以浏览项目和会话、进入或新建会话、继续对话、接收离开电脑后的任务通知，并在 Codex Desktop 中看到同一份会话历史。
 
-系统不是第二个 Agent，也不复制 Codex 对话。Codex 持久化会话是对话事实源；Bridge 只负责传输、路由、状态和可靠执行。
+系统不是第二个 Agent，也不复制 Codex 对话。Codex 持久化会话是对话与权限事实源；Bridge 只负责传输、路由、实时审批转发、状态和可靠执行。
 
 ## 2. 已验证事实
 
@@ -22,7 +22,7 @@
 - App Server 会产生 `thread/status/changed`、`turn/started` 和 `turn/completed` 事件。
 - 独立 App Server 不能可靠订阅另一个 Desktop 进程正在执行的实时事件，因此 Desktop 插件 Hooks 负责 Desktop 生命周期感知。
 - 当前版本生成的 App Server Schema 包含 `thread/list`、`thread/read`、`thread/resume`、`thread/unarchive`、`thread/name/set` 和 `turn/start`，没有 `project/list`。
-- 当前 Codex Desktop 的 `%USERPROFILE%\.codex\.codex-global-state.json` 中，`electron-saved-workspace-roots` 精确表示已保存项目集合，`project-order` 表示 Desktop 展示顺序；本机 6 个项目已逐项核对一致。
+- Codex Desktop `0.144.x` 可从 `%USERPROFILE%\.codex\.codex-global-state.json` 的 `electron-saved-workspace-roots` 读取已保存项目；`0.145.0-alpha.18` 已实测部分新项目只存在于 `project-order` 引用的 `local-projects` 中。项目集合必须合并两种表示，并按 `project-order` 排序；未被顺序引用的陈旧 `local-projects` 条目不得泄漏到微信列表。
 - `PermissionRequest` Hook 技术上支持返回 `allow` 或 `deny`；V1 出于安全边界不启用微信审批 Desktop 回合，Hook stdout 始终为空，Desktop 审批仍由 Desktop 自己处理。
 - Windows `GetLastInputInfo` 已在本机验证可读取键鼠空闲时间。
 - 腾讯维护的 iLink/OpenClaw 微信插件源码提供扫码、文本收发、`message_id`、`get_updates_buf` 长轮询游标和 `context_token`；本机已完成真实扫码绑定、无上下文主动测试消息、微信文本入站及 `/st` 回复验收。真实 `message_id` 为超出 JavaScript 安全整数的 64 位数字，Bridge 已在原始 JSON 解析阶段无损保留并以精确字符串去重。
@@ -53,7 +53,7 @@ flowchart LR
 - 生命周期通知的 Pipe、Spool 合计等待上限 500ms；两者都失败时放行，不阻塞 Desktop。`UserPromptSubmit` 的共享会话写入仲裁是安全边界，不使用这条 fail-open 路径。
 - `PermissionRequest` 只用于通知 Desktop 审批状态。虽然 Hook 协议支持返回 `allow` 或 `deny`，V1 的 Hook 脚本始终保持 stdout 为空，不把微信接入 Desktop 审批决定链路。
 - Bridge 启动的 App Server 带受控来源标记，Hook 据此区分 Bridge 回合和其他本机 Codex 回合，避免重复通知。
-- 插件通过个人本地 Marketplace 安装，内部 ID 为 `codex-ilink-probe`，显示名为 `Codex iLink Guard`；首次安装和变更后由用户在显示内部 ID 的信任页审核并信任 Hooks。
+- 插件通过个人本地 Marketplace 安装，内部 ID 为 `codex-ilink-probe`，显示名为 `Codex iLink Guard`；非托管命令 Hook 按当前定义 hash 由用户在显示内部 ID 的信任页人工审核。首次安装必须确认，定义变化后必须重新确认；安装器和 Bridge 不读取或写入 Codex 的持久信任状态，也不在生产流程中传入 `--dangerously-bypass-hook-trust`。
 
 ### 3.2 Bridge
 
@@ -68,10 +68,10 @@ flowchart LR
 ### 3.3 App Server
 
 - 所有微信回合由同一个常驻 App Server 执行。Bridge 不覆盖 Codex 的功能开关、插件配置或项目/全局默认值，也不拼装自定义 Sandbox；工具是否可用和最终权限判定仍由 Codex 根据当前共享会话与用户配置完成。
-- 进入既有会话时按 `thread_id` 调用 `thread/resume`。没有用户明确选择的会话级覆盖时，不覆盖模型、reasoning effort、目录、权限 Profile、审批者、审批策略或 Sandbox；存在 Bridge 已保存的明确选择时，只恢复对应字段。
-- 仅在控制者显式发送 `model<n>`、`model:<id>`、`effort<n>`、`effort:<level>` 或 `perm<n>` 时，通过 Codex 列表接口校验当前账号实际可用的选项，再用 `thread/settings/update` 修改当前共享会话的后续回合；不修改项目或全局默认值。
-- 三个内置权限模式绑定完整会话组合：`:read-only` 与 `:workspace` 使用 `approvalPolicy=on-request`、`approvalsReviewer=user`，`:danger-full-access` 使用 `approvalPolicy=never`、`approvalsReviewer=user`。完全访问在控制者明确选择后直接生效；自定义 Profile 只传 Profile ID，不推断审批策略。
-- 权限更新后重新 `thread/resume` 并校验实际 Profile、审批策略和审批人。Bridge 持久化该明确选择供重连恢复；旧版只含 Profile ID 的记录不补写审批字段，避免静默扩权。
+- 进入既有会话时按 `thread_id` 调用 `thread/resume`；不得携带 `permissions`、`approvalPolicy`、`approvalsReviewer` 或 Sandbox 覆盖值。会话恢复始终继承 Codex 当前持久化设置。
+- 仅在控制者显式发送 `model<n>`、`model:<id>`、`effort<n>` 或 `effort:<level>` 时，通过 Codex 列表接口校验当前账号实际可用的选项，再用 `thread/settings/update` 修改当前共享会话的模型或 reasoning effort；不修改权限、项目默认值或全局默认值。
+- Codex 是唯一权限策略引擎和事实源。`perm` 对当前绑定的 `thread_id` 执行无权限覆盖的 `thread/resume`，只显示 Codex 返回的实际 Profile、审批策略、审批人和 Sandbox；Bridge 不调用 `permissionProfile/list`，也不向 `thread/settings/update` 提交任何权限字段。
+- 任务权限只能在 Codex Desktop 中修改；同一任务的新设置在下一次 `perm` 或恢复时由 Bridge 重新读取。Bridge 不保存或回灌权限选择；权限查询失败只使该命令明确失败，不得让普通消息进入无限队列。
 - `/new` 使用当前 Codex 运行时默认配置；选择项目时只显式设置该项目的 `cwd`，不假设存在公开的“Desktop 项目默认模型”。
 - 微信主会话和无项目 `/new` 使用专用空白 Inbox 工作目录；微信产品上标记为“无项目”，但底层仍有合法 `cwd`，Desktop 可能按该物理路径分组显示。
 - Bridge 对自己发起的同一会话回合严格串行；若租约或 Desktop 活动观察显示目标任务正在执行，则消息排队。
@@ -87,7 +87,7 @@ flowchart LR
 ### 3.4 继承边界
 
 - 共享的是同一个持久化会话和同一 Windows 用户下的 Codex 配置，而不是复用 Desktop UI 进程。
-- 既有会话可继承已持久化的历史、模型、`cwd`、Sandbox、审批策略和审批者；用户通过微信明确修改的模型、reasoning effort 或权限组合也属于该共享会话，并在 App Server 重连时恢复。Bridge 不强制主/子 Agent 身份，也不强制是否委派 Agent。
+- 既有会话可继承已持久化的历史、模型、`cwd`、Sandbox、审批策略和审批者；用户通过微信明确修改的模型或 reasoning effort 由 Codex 写入该共享会话，权限 Profile 只在 Codex Desktop 修改。后续重连直接继承 Codex 的结果，Bridge 不负责恢复。Bridge 不强制主/子 Agent 身份，也不强制是否委派 Agent。
 - 同一用户配置中的项目指令、Skills 和可由独立 App Server 加载的 MCP 配置预计可复用，必须逐项验收。
 - 仅由 Desktop 宿主提供的 UI 状态、临时进程状态、Computer Use、设备证明或 Desktop 专属连接器不保证可用于微信回合；缺失时明确报能力不可用，不静默降级到更高权限。
 
@@ -98,7 +98,7 @@ flowchart LR
 - 只接受该控制者发来的单聊文本和受支持入站媒体，其他发送者和群消息静默丢弃且不下载媒体，不进入命令、队列或 Codex，也不泄露项目与会话信息；所有主动发送也只面向该控制者。
 - 更换设备时重新部署并扫码。
 - iLink Token 使用 Windows DPAPI 的 CurrentUser 范围加密，数据目录使用当前用户 ACL。
-- 微信可显式更改当前共享会话的 Codex 权限模式、模型和 reasoning effort；内置权限模式同时设置 Profile、审批策略和审批人，Desktop 中的同一任务同步生效，其他会话、项目默认值和全局默认值不受影响。
+- 微信可显式更改当前共享会话的模型和 reasoning effort，但只能查询权限；权限 Profile 及其策略只在 Codex Desktop 修改。iLink 不决定何时审批、不评估风险、不自动允许，只转发 Codex 产生的实时请求并回传控制者对该次请求的选择。其他会话、项目默认值和全局默认值不受影响。
 - 微信只能批准 Bridge App Server 发起且仍然在线等待的单次审批；通知发送失败持续退避重试，等待 60 秒和 5 分钟仍未处理时分别提醒一次，30 分钟未处理自动拒绝。
 - “替我审批”由会话的自动审批者处理；只有实际路由给用户的 Bridge 审批才生成 `/ok`、`/no` 编号。
 - Bridge 或 App Server 重启后，失去在线回调的审批一律拒绝并持久发送失效通知，不把数据库中的旧批准重放到新进程。
@@ -135,8 +135,7 @@ flowchart LR
 | `stop` | 中断当前会话中由 Bridge 发起且已取得 Turn ID 的活动回合 |
 | `exit` | 结束当前会话绑定，返回微信主会话 |
 | `st` | 显示当前项目与会话、实际权限组合、所有已知活动任务、队列、通知回复窗口、待审批送达/提醒状态、绑定剩余时间和连接健康 |
-| `perm` | 显示 Codex 当前实际权限 Profile、审批策略、审批人、Sandbox 和可选模式 |
-| `perm<n>` | 为当前共享会话设置所选权限模式；内置模式使用固定 Profile、审批策略和审批人组合 |
+| `perm` | 只读显示 Codex 当前任务的实际权限 Profile、审批策略、审批人和 Sandbox；权限在 Desktop 修改 |
 | `model`、`model<n>`、`model:<id>` | 查看或修改当前共享会话模型 |
 | `effort`、`effort<n>`、`effort:<level>` | 查看或修改当前共享会话 reasoning effort |
 | `ok<code>` | 批准 Bridge 发起的单次审批 |
@@ -181,12 +180,13 @@ flowchart LR
 
 - 同一会话活动时收到新消息，连同文本和附件路径的版本化 payload 保存为 FIFO 待处理消息并回复 `Queued #n`。
 - 当前回合完成后自动执行下一条；不使用跨进程 `turn/steer`。
+- 调用 `turn/start` 前若 Codex 在安全连接重试后仍无法恢复目标任务，本条输入明确回复“未执行”而不转成无限队列；已经持久排队的输入遇到同类终态失败时，必须在同一 SQLite 事务中转为失败 Outbox。
 - 全局最多 3 个微信回合并行，其余进入全局队列。
 - 绑定、队列、iLink 游标、消息去重和 Outbox 都持久化。
 - iLink 入站以“绑定账号 + 微信控制者 + `message_id`”作为去重键；同一事务内先持久化消息和路由，再推进长轮询游标。
 - 调用 `turn/start` 前先保存 Dispatch Intent，并把 iLink 去重键写入 `clientUserMessageId` 作为关联标识；收到 `turn_id` 后再提交状态变更。
 - 若进程在“App Server 已接受、SQLite 尚未记录 `turn_id`”的窗口崩溃，该 Dispatch Intent 标为状态未知，不凭时间猜测并自动重试。
-- Bridge 或 Windows 重启后恢复未过期绑定、文本与附件队列。
+- Bridge 或 Windows 重启后恢复未过期绑定、文本与附件队列；恢复范围不包括任何 iLink 本地权限状态，任务权限完全取自 Codex。
 - 崩溃时正在运行的回合先通过公开接口归类为完成、中断或状态未知。
 - 中断和未知回合不自动重试，防止重复执行文件修改或外部操作。
 - Desktop 与 Bridge 的同会话并发先由原子租约裁决；没有租约时禁止调用 `turn/start`。已经提交后遇到超时或断链仍按状态未知处理，不自动重试。
@@ -209,7 +209,7 @@ flowchart LR
 
 ## 11. 状态库与数据留存
 
-状态库存放在 `%LOCALAPPDATA%\Codex_iLink`，使用 SQLite WAL 和版本化 Migration。项目、会话目录从 Codex 公开状态派生，单次审批只属于当前运行时，不创建 `projects`、`sessions` 或 `approvals` 表。主要持久表：
+状态库存放在 `%LOCALAPPDATA%\Codex_iLink`，使用 SQLite WAL 和版本化 Migration。项目、会话目录从 Codex 公开状态派生，单次审批只属于当前运行时，不创建 `projects`、`sessions`、`approvals` 或权限快照表。schema v14 删除旧的 `thread_permission_profiles`；旧数据不得再被读取、展示或回灌。主要持久表：
 
 - `controller`：唯一微信控制者与绑定状态
 - `ilink_state`：`context_token` 与长轮询游标
@@ -221,7 +221,6 @@ flowchart LR
 - `outbound_attachment_intents`：`send_file` 已登记、等待随当前成功终态进入 Outbox 的短期附件意图；v12 以 `snapshot_provenance` 区分旧路径与本版本可信快照
 - `outbox`：未送达回复和通知
 - `notification_routes`：已送达主动通知与短期来源会话映射
-- `thread_permission_profiles`：控制者明确选择的会话级 Profile、审批策略和审批人；迁移前记录的新增字段保持 `NULL`
 - `list_snapshots`：列表或页面生成后固定 10 分钟的编号映射；直接编号命令在无有效快照时先静默生成当前映射
 
 版本化输入 payload 沿 `inbound_messages → queued_turns → dispatch_intents` 传递，只保存文本、附件种类、显示名和本地绝对路径；SQLite 不保存媒体二进制、CDN URL、AES 密钥或完整 Transcript。媒体二进制存放在 `%LOCALAPPDATA%\Codex_iLink\media\inbound\<sha256(dedupeKey)>`，至少保留到对应回合终态；提交状态未知时保留到公开接口对账完成，启动时只清理未被入站、队列或未完成 Dispatch Intent 引用的孤儿目录。
@@ -242,10 +241,10 @@ flowchart LR
 
 - 最低支持 Codex `0.144.2`；已验证兼容范围为 `0.144.x`，其中 PATH `codex-cli 0.144.4` 与 Desktop 内置 Codex `0.144.2` 已实测。
 - `ilink doctor` 把低于 `0.144.2` 或无法读取/解析的版本标为错误。高于 `0.144.x` 的 minor/major 版本标为“尚未验证”，但不阻止 `setup` 或 `start`，允许用户在明确风险下试运行。
-- App Server 的生成 Schema 随 Codex 版本变化；启动时检查所需方法、字段和审批请求形状，不兼容时停止微信执行并提示适配，不影响 Desktop。
+- App Server 的生成 Schema 随 Codex 版本变化；启动时检查所需方法和字段。`thread/resume` 的权限元数据缺失或读取失败时，`perm` 明确报查询失败，普通消息仍可执行；审批请求形状不兼容时当前回合明确失败，不能被吞成无限 `Queued`，且不影响 Desktop。
 - 第一版明确使用现有 ChatGPT 登录。Bridge 启动 App Server 时使用受控环境，移除可能污染认证的 `CODEX_API_KEY`、`OPENAI_API_KEY`，以及不应从 Desktop 父进程串入 Bridge 的 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`、`CODEX_THREAD_ID`。
 - 插件只承担官方支持的 Hooks 打包与分发，不假设插件能常驻后台、添加 Desktop UI 或直接控制 Desktop 任务。
-- 以 WeClaw v0.7.1 的 iLink 与 App Server 实现作为参考基线，但不继承其默认高权限、内存 Thread 映射、自动批准及不需要的 ACP/多 Agent fallback。仅当控制者明确选择“完全访问”时，当前共享会话使用官方 `danger-full-access + approvalPolicy=never` 组合。
+- 以 WeClaw v0.7.1 的 iLink 与 App Server 实现作为参考基线，但不继承其默认高权限、内存 Thread 映射、自动批准及不需要的 ACP/多 Agent fallback。iLink 不为“完全访问”定义本地组合语义；任何原生 Profile 的实际含义都由当前 Codex 版本决定。
 - 入站媒体 wire 与 CDN 兼容行为固定参照腾讯官方 `Tencent/openclaw-weixin` `v2.4.6`、commit `cef0bfc390393f716903e16d50408118047f87e0`；不从未经固定的新版本 README 推断协议行为。
 - 与官方固定版本一致，每条消息只选一个媒体：主消息在带 CDN 下载引用的媒体中使用 `IMAGE > VIDEO > FILE > 无转写 VOICE` 固定优先级，引用媒体仅在主消息没有可下载媒体时回退；Codex 输入映射仍按 App Server 自身的 `localImage` / `mention` 契约实现。
 - 不引入完整 OpenClaw Runtime；iLink 协议依赖锁定版本并保留兼容性测试。OpenClaw 的 `MsgContext + MediaPath` 和出站 `mediaUrl` 是其宿主契约，不视为 Codex App Server 能力。
@@ -259,7 +258,8 @@ flowchart LR
 - npm 发布固定使用 npm `11.6.2`、GitHub Actions OIDC、Trusted Publishing 与 provenance，不保存长期 npm Token；publisher、Environment 或 OIDC 身份不匹配时 fail closed。预览标签进入 `preview-release`，稳定标签进入带人工审核和 PFX Secret 的 `stable-release` Environment。
 - PowerShell 安装器默认只取最新稳定 Release，并在落盘前强制校验 SHA-256 与 Authenticode；预览安装必须显式传入 `-Channel preview -Version <完整预发布版本>`，校验 SHA-256，并对无效签名给出明确警告。
 - 本地插件通过个人 Marketplace 安装。
-- 安装流程注册当前用户登录启动任务，完成二维码绑定并提示信任 Hooks。
+- 安装流程注册当前用户登录启动任务，完成二维码绑定，并明确输出 Hooks 人工审核步骤；未完成信任时不得把安装状态描述为 Hooks 已可用。
+- `ilink doctor` 检查 Guard 是否已安装并启用，但只把 Hooks 信任显示为需要人工确认的信息项；在没有公开查询接口时不得猜测或伪造已信任状态。
 - Bridge、插件和状态都属于当前 Windows 用户。
 - 卸载移除启动任务和插件；用户选择保留或删除本地状态与凭证。
 
@@ -270,8 +270,10 @@ flowchart LR
 - Codex → 微信语音气泡、任意远程 URL 媒体发送或从普通自然语言路径猜测附件
 - 保证 Codex 能读取任意 `mention` 文件格式或越过目标会话的 Sandbox/审批策略
 - Desktop 回合远程审批或远程停止
+- 通过微信修改任务权限
 - 修改项目或全局的模型、reasoning effort 或权限默认值
 - 扫描磁盘发现项目或读取 Desktop 私有数据库
+- 替用户自动信任非托管 Codex Hooks、修改 Codex 内部信任存储或在生产流程中绕过 Hook 信任
 - 依赖当前业务会话或自由文本输出直接执行控制；AI 兜底只允许独立分类回合返回白名单结构化 Intent
 - 推理、命令或工具执行过程直播
 - 自动重试中断回合
@@ -294,7 +296,7 @@ flowchart LR
 12. Token、消息正文、二维码、Transcript、媒体 CDN URL 和 AES 密钥不出现在日志；SQLite 不含媒体二进制，正文成功后从 Bridge 状态库删除。
 13. Desktop 与 Bridge 同时向同一会话发起回合时，原子租约必须只允许一方进入 Codex；失败方阻止或排队。已经提交但接受结果不明时进入状态未知。
 14. Pipe 暂时不可用时 Hook 事件可从 Spool 恢复，Pipe 与 Spool 同时失败也不阻塞 Desktop。
-15. 独立 App Server 无法加载的 Desktop 专属能力会明确报错，不改变会话权限或悄悄改用高权限替代方案；只有显式 `perm<n>` 才能修改当前共享会话的权限组合，且旧版状态不会自动扩权。
+15. 独立 App Server 无法加载的 Desktop 专属能力会明确报错，不改变会话权限或悄悄改用高权限替代方案；`perm` 只读取当前任务实际权限，`perm<n>` 与自然语言权限修改请求也不触发 `permissionProfile/list` 或带权限字段的 `thread/settings/update`。Bridge 重启不回灌旧权限记录，权限查询失败也不阻塞普通消息。
 16. 非绑定用户和群消息的文本与媒体都不会下载或触发 Codex 执行；控制者的未知媒体类型会收到明确不支持提示。
 17. 单个较新通知回复窗口内的文本会继续正确来源会话；多个待处理窗口并存时不会静默选错会话，通知后明确选择的较新绑定仍优先。
 18. `/p` 与 Desktop 已保存项目集合及顺序一致，只显示名称；未保存的历史任务目录和完整项目路径不会出现在回复中。

@@ -821,13 +821,13 @@ test("unknown compact reconciliation reports a failed claimed turn", async () =>
   });
 });
 
-test("perm lists and perm<n> selects Codex native permission profiles", async () => {
-  await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
+test("perm reads the current Codex task permissions without a write path", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent }) => {
     codex.resumes.set("wechat-main", {
       activePermissionProfile: { id: ":workspace" },
       approvalPolicy: "on-request",
       approvalsReviewer: "user",
-      cwd: "D:\\Codex-iLink\\Inbox",
+      cwd: "D:/Codex-iLink/Inbox",
       sandbox: { type: "workspaceWrite" },
       thread: { id: "wechat-main" },
     });
@@ -837,121 +837,81 @@ test("perm lists and perm<n> selects Codex native permission profiles", async ()
     assert.equal(
       sent[0]?.text,
       [
-        "当前权限：2. 工作区（推荐） (:workspace)",
+        "Codex 当前权限：工作区（推荐） (:workspace)",
         "审批：on-request；审批人：user",
         "Sandbox：workspaceWrite",
-        "",
-        "1. 只读 (:read-only)",
-        "2. 工作区（推荐） (:workspace)",
-        "3. 完全访问 (:danger-full-access)",
-        "使用 perm<n> 直接切换当前任务权限。",
-      ].join("\n"),
+        "权限只能在 Codex Desktop 中修改；iLink 仅实时读取当前任务设置。",
+      ].join(String.fromCharCode(10)),
     );
+    assert.doesNotMatch(sent[0]?.text ?? "", /perm<n>|只读/u);
 
-    await ingest(bridge, 46, "perm3");
-
-    assert.match(sent[1]?.text ?? "", /已切换当前任务权限/u);
-    assert.match(sent[1]?.text ?? "", /3\. 完全访问 \(:danger-full-access\)/u);
-    assert.match(sent[1]?.text ?? "", /审批：never/u);
-    assert.match(sent[1]?.text ?? "", /审批人：user/u);
-    assert.match(sent[1]?.text ?? "", /Sandbox：dangerFullAccess/u);
-    assert.deepEqual(codex.permissionSelections, [
-      {
-        approvalPolicy: "never",
-        approvalsReviewer: "user",
-        permissions: ":danger-full-access",
-        threadId: "wechat-main",
-      },
-    ]);
-    assert.deepEqual(state.getThreadPermissionProfile("wechat-main"), {
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      profileId: ":danger-full-access",
-      threadId: "wechat-main",
-      updatedAtMs: 1_000,
-    });
-
-    await ingest(bridge, 47, "use the selected permissions");
-    assert.deepEqual(codex.ensuredPermissions.at(-1), {
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      permissions: ":danger-full-access",
-      threadId: "wechat-main",
-    });
-  });
-});
-
-test("perm can explicitly recover when a saved profile is no longer allowed", async () => {
-  await withNavigationBridge(async ({ bridge, codex, sent, state }) => {
-    state.setThreadPermissionProfile({
-      approvalPolicy: null,
-      approvalsReviewer: null,
-      profileId: ":danger-full-access",
-      threadId: "wechat-main",
-      updatedAtMs: 900,
-    });
-    codex.blockedPermissionProfiles.add(":danger-full-access");
-    codex.permissionProfiles[2] = {
-      allowed: false,
-      description: null,
-      id: ":danger-full-access",
-    };
-
-    await ingest(bridge, 48, "perm");
-
-    assert.match(sent[0]?.text ?? "", /Codex 未能确认当前权限/u);
-    assert.match(
-      sent[0]?.text ?? "",
-      /3\. 完全访问 \(:danger-full-access\)（不可用）/u,
-    );
-
-    await ingest(bridge, 49, "perm2");
-
-    assert.match(sent[1]?.text ?? "", /已切换当前任务权限/u);
-    assert.deepEqual(state.getThreadPermissionProfile("wechat-main"), {
-      approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-      profileId: ":workspace",
-      threadId: "wechat-main",
-      updatedAtMs: 1_000,
-    });
-  });
-});
-
-test("custom permission profiles do not persist inferred approval settings", async () => {
-  await withNavigationBridge(async ({ bridge, codex, state }) => {
-    codex.permissionProfiles.push({
-      allowed: true,
-      description: null,
-      id: "custom-team-profile",
-    });
     codex.resumes.set("wechat-main", {
-      activePermissionProfile: { id: ":workspace" },
-      approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-      cwd: "D:\\Codex-iLink\\Inbox",
-      sandbox: { type: "workspaceWrite" },
+      activePermissionProfile: { id: ":danger-full-access" },
+      approvalPolicy: "never",
+      approvalsReviewer: "auto_review",
+      cwd: "D:/Codex-iLink/Inbox",
+      sandbox: { type: "dangerFullAccess" },
       thread: { id: "wechat-main" },
     });
 
-    await ingest(bridge, 50, "perm4");
+    await ingest(bridge, 46, "perm3");
 
-    assert.deepEqual(codex.permissionSelections, [
-      { permissions: "custom-team-profile", threadId: "wechat-main" },
+    assert.equal(
+      sent[1]?.text,
+      [
+        "Codex 当前权限：完全访问 (:danger-full-access)",
+        "审批：never；审批人：auto_review",
+        "Sandbox：dangerFullAccess",
+        "权限只能在 Codex Desktop 中修改；iLink 仅实时读取当前任务设置。",
+      ].join(String.fromCharCode(10)),
+    );
+    assert.deepEqual(
+      codex.calls.filter((call) => call === "resume:wechat-main"),
+      ["resume:wechat-main", "resume:wechat-main"],
+    );
+  });
+});
+
+test("perm reports future Codex permission metadata without inference", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent }) => {
+    codex.resumes.set("wechat-main", {
+      activePermissionProfile: { id: "custom-team-profile" },
+      approvalPolicy: "future-policy",
+      approvalsReviewer: "future_reviewer",
+      cwd: "D:/Codex-iLink/Inbox",
+      sandbox: { type: "futureSandbox" },
+      thread: { id: "wechat-main" },
+    });
+
+    await ingest(bridge, 47, "perm");
+
+    assert.equal(
+      sent[0]?.text,
+      [
+        "Codex 当前权限：自定义 (custom-team-profile)",
+        "审批：future-policy；审批人：future_reviewer",
+        "Sandbox：futureSandbox",
+        "权限只能在 Codex Desktop 中修改；iLink 仅实时读取当前任务设置。",
+      ].join(String.fromCharCode(10)),
+    );
+  });
+});
+
+test("permission query failures do not block subsequent ordinary messages", async () => {
+  await withNavigationBridge(async ({ bridge, codex, sent }) => {
+    codex.resumeError = new Error("permission metadata unavailable");
+
+    await ingest(bridge, 48, "perm");
+    assert.equal(sent[0]?.text, "权限查询失败，请稍后重试。");
+
+    codex.resumeError = undefined;
+    await ingest(bridge, 49, "continue after permission query failure");
+    assert.deepEqual(codex.startedTurns, [
+      {
+        text: "continue after permission query failure",
+        threadId: "wechat-main",
+      },
     ]);
-    assert.deepEqual(state.getThreadPermissionProfile("wechat-main"), {
-      approvalPolicy: null,
-      approvalsReviewer: null,
-      profileId: "custom-team-profile",
-      threadId: "wechat-main",
-      updatedAtMs: 1_000,
-    });
-
-    await ingest(bridge, 51, "continue with the custom profile");
-    assert.deepEqual(codex.ensuredPermissions.at(-1), {
-      permissions: "custom-team-profile",
-      threadId: "wechat-main",
-    });
   });
 });
 
@@ -1252,12 +1212,12 @@ type SendInput = {
 class FakeNavigationCodex implements CodexTurnStarter {
   activeThreads: unknown[] = [];
   archivedThreads: unknown[] = [];
-  blockedPermissionProfiles = new Set<string>();
   beforeStartThread: (() => Promise<void> | void) | undefined;
   calls: string[] = [];
   reads = new Map<string, { thread: Record<string, unknown> }>();
   readFailures = new Set<string>();
   resumes = new Map<string, Record<string, unknown>>();
+  resumeError: Error | undefined;
   nextStartedThreadId = "thread-new";
   controlClassification: unknown = null;
   classifiedTexts: string[] = [];
@@ -1292,23 +1252,7 @@ class FakeNavigationCodex implements CodexTurnStarter {
     model?: string;
     threadId: string;
   }> = [];
-  permissionProfiles = [
-    { allowed: true, description: null, id: ":read-only" },
-    { allowed: true, description: null, id: ":workspace" },
-    { allowed: true, description: null, id: ":danger-full-access" },
-  ];
-  permissionSelections: Array<{
-    approvalPolicy?: "never" | "on-request" | "untrusted";
-    approvalsReviewer?: "auto_review" | "guardian_subagent" | "user";
-    permissions: string;
-    threadId: string;
-  }> = [];
-  ensuredPermissions: Array<{
-    approvalPolicy?: "never" | "on-request" | "untrusted";
-    approvalsReviewer?: "auto_review" | "guardian_subagent" | "user";
-    permissions?: string;
-    threadId: string;
-  }> = [];
+  ensuredPermissions: Array<{ threadId: string }> = [];
   compactedThreads: string[] = [];
   compactError: Error | undefined;
   interruptedTurns: Array<{ threadId: string; turnId: string }> = [];
@@ -1328,20 +1272,10 @@ class FakeNavigationCodex implements CodexTurnStarter {
     };
   }
 
-  async ensureThread(
-    threadId: string,
-    options: {
-      approvalPolicy?: "never" | "on-request" | "untrusted";
-      approvalsReviewer?: "auto_review" | "guardian_subagent" | "user";
-      permissions?: string;
-    } = {},
-  ): Promise<void> {
-    this.ensuredPermissions.push({
-      ...options,
-      threadId,
-    });
+  async ensureThread(threadId: string): Promise<void> {
+    this.ensuredPermissions.push({ threadId });
     if (this.loadedThreadIds.has(threadId)) return;
-    await this.resumeThread(threadId, options);
+    await this.resumeThread(threadId);
   }
 
   async startTurn(input: { text: string; threadId: string }): Promise<{ turn: { id: string } }> {
@@ -1374,11 +1308,6 @@ class FakeNavigationCodex implements CodexTurnStarter {
     return this.reads.get(input.threadId) ?? { thread: { id: input.threadId } };
   }
 
-  async listPermissionProfiles(input: { cwd?: string }) {
-    this.calls.push(`permissionProfiles:${input.cwd ?? "default"}`);
-    return { data: this.permissionProfiles, nextCursor: null };
-  }
-
   async listModels() {
     return { data: this.models, nextCursor: null };
   }
@@ -1389,23 +1318,11 @@ class FakeNavigationCodex implements CodexTurnStarter {
     return this.controlClassification;
   }
 
-  async resumeThread(
-    threadId: string,
-    options: {
-      approvalPolicy?: "never" | "on-request" | "untrusted";
-      approvalsReviewer?: "auto_review" | "guardian_subagent" | "user";
-      permissions?: string;
-    } = {},
-  ) {
+  async resumeThread(threadId: string) {
     this.calls.push(`resume:${threadId}`);
+    if (this.resumeError) throw this.resumeError;
     this.loadedThreadIds.add(threadId);
-    if (
-      options.permissions &&
-      this.blockedPermissionProfiles.has(options.permissions)
-    ) {
-      throw new Error("permission profile is no longer allowed");
-    }
-    const current = this.resumes.get(threadId) ?? {
+    return this.resumes.get(threadId) ?? {
       activePermissionProfile: { id: ":workspace" },
       approvalPolicy: "on-request",
       approvalsReviewer: "user",
@@ -1413,61 +1330,6 @@ class FakeNavigationCodex implements CodexTurnStarter {
       sandbox: { type: "workspaceWrite" },
       thread: { id: threadId },
     };
-    if (!options.permissions) return current;
-    this.permissionSelections.push({
-      ...options,
-      permissions: options.permissions,
-      threadId,
-    });
-    const selected = {
-      ...current,
-      activePermissionProfile: { id: options.permissions },
-      approvalPolicy: options.approvalPolicy ?? current.approvalPolicy,
-      approvalsReviewer:
-        options.approvalsReviewer ?? current.approvalsReviewer ?? "user",
-      sandbox: {
-        type:
-          options.permissions === ":danger-full-access"
-            ? "dangerFullAccess"
-            : options.permissions === ":read-only"
-              ? "readOnly"
-              : "workspaceWrite",
-      },
-    };
-    this.resumes.set(threadId, selected);
-    return selected;
-  }
-
-  async updateThreadPermissions(
-    threadId: string,
-    settings: {
-      approvalPolicy?: "never" | "on-request" | "untrusted";
-      approvalsReviewer?: "auto_review" | "guardian_subagent" | "user";
-      permissions: string;
-    },
-  ) {
-    if (this.blockedPermissionProfiles.has(settings.permissions)) {
-      throw new Error("permission profile is no longer allowed");
-    }
-    const current = await this.resumeThread(threadId);
-    this.permissionSelections.push({ ...settings, threadId });
-    const selected = {
-      ...current,
-      activePermissionProfile: { id: settings.permissions },
-      approvalPolicy: settings.approvalPolicy ?? current.approvalPolicy,
-      approvalsReviewer:
-        settings.approvalsReviewer ?? current.approvalsReviewer ?? "user",
-      sandbox: {
-        type:
-          settings.permissions === ":danger-full-access"
-            ? "dangerFullAccess"
-            : settings.permissions === ":read-only"
-              ? "readOnly"
-              : "workspaceWrite",
-      },
-    };
-    this.resumes.set(threadId, selected);
-    return selected;
   }
 
   async updateThreadModelSettings(

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { win32 } from "node:path";
 
 import {
@@ -28,11 +29,11 @@ import {
   SqliteState,
   OutboundAttachmentIntentError,
   type DispatchIntent,
+  type InboundDispatchAdmission,
   type InboundMessageInput,
   type OutboundAttachmentIntent,
   type OutboxItem,
   type PendingOutboxInput,
-  type ThreadPermissionProfile,
 } from "./sqlite-state.ts";
 import {
   extractWechatLocalFileReferences,
@@ -70,12 +71,7 @@ import {
   type InboundMediaCandidate,
   type InboundMediaResolution,
 } from "../media/inbound-media.ts";
-import {
-  CodexOutcomeUnknownError,
-  type ThreadApprovalPolicy,
-  type ThreadApprovalsReviewer,
-  type ThreadPermissionSettings,
-} from "../codex/protocol.ts";
+import { CodexOutcomeUnknownError } from "../codex/protocol.ts";
 import type { SendTypingInput } from "../ilink/ilink-client.ts";
 
 export type ILinkSender = OutboxILinkSender & {
@@ -135,18 +131,7 @@ export type CodexTurnStarter = {
     text: string;
   }): Promise<unknown>;
   compactThread?(threadId: string): Promise<Record<string, unknown>>;
-  ensureThread?(
-    threadId: string,
-    options?: ThreadPermissionSettings,
-  ): Promise<void>;
-  listPermissionProfiles?(input: { cwd?: string }): Promise<{
-    data: Array<{
-      allowed: boolean;
-      description?: string | null;
-      id: string;
-    }>;
-    nextCursor: string | null;
-  }>;
+  ensureThread?(threadId: string): Promise<void>;
   listModels?(input?: { cursor?: string | null }): Promise<{
     data: Array<{
       defaultReasoningEffort: string;
@@ -178,17 +163,10 @@ export type CodexTurnStarter = {
     id: number | string,
     result: Record<string, unknown>,
   ): boolean | void;
-  resumeThread?(
-    threadId: string,
-    options?: ThreadPermissionSettings,
-  ): Promise<Record<string, unknown>>;
+  resumeThread?(threadId: string): Promise<Record<string, unknown>>;
   startThread?(cwd: string): Promise<Record<string, unknown> & {
     thread: { id: string } & Record<string, unknown>;
   }>;
-  updateThreadPermissions?(
-    threadId: string,
-    settings: ThreadPermissionSettings & { permissions: string },
-  ): Promise<Record<string, unknown>>;
   updateThreadModelSettings?(
     threadId: string,
     settings: { effort?: string; model?: string },
@@ -239,6 +217,8 @@ const HOOK_GUARD_UNKNOWN_TEXT =
   "E_HOOK_GUARD：并发门禁未确认，结果状态未知，请在 Desktop 查看。";
 const MISSING_THREAD_TEXT =
   "原会话尚未写入 Codex 历史，已失效；请使用 new 重新创建并发送。";
+const CODEX_THREAD_RESUME_FAILED_TEXT =
+  "❌ Codex 无法恢复目标任务，本条消息未执行。请在 Codex Desktop 确认任务可打开后重发。";
 const CODEX_SLOW_TURN_TEXT =
   "⏳ Codex 任务仍在执行，已长时间没有结束；可能正在等待工具、审批或网络。任务未被取消，可用 st 查看或用 stop 停止。";
 const LEGACY_ATTACHMENT_REJECTED_TEXT =
@@ -421,6 +401,7 @@ export class BridgeEngine {
           this.#inboundReplyClientId(message.messageId),
         );
         this.#clearInbound(message.messageId);
+        await this.#cleanupMedia(this.#dedupeKey(message.messageId));
         sent += 1;
         continue;
       }
@@ -993,7 +974,6 @@ export class BridgeEngine {
           signal: this.#shutdown.signal,
         });
         if (!resolved || resolved.status !== "stored") {
-          await this.#cleanupMedia(dedupeKey);
           return fail("voice-transcript-missing");
         }
         attachments.push({
@@ -1003,7 +983,6 @@ export class BridgeEngine {
         });
       }
     } catch (error) {
-      await this.#cleanupMedia(dedupeKey);
       return fail(inboundMediaFailureCode(error));
     }
 
@@ -1019,7 +998,6 @@ export class BridgeEngine {
         turnInput,
       };
     } catch {
-      await this.#cleanupMedia(dedupeKey);
       return fail("invalid-media");
     }
   }
@@ -1057,6 +1035,11 @@ export class BridgeEngine {
       (this.#approvals?.list().length ?? 0) === 0
     ) {
       intent = { kind: "message", text: input.turnInput.text };
+    }
+    if (intent.kind !== "message" && !this.#claimInbound(input.messageId)) {
+      // Another Bridge already claimed or terminally handled this control.
+      // Only the atomic inbound winner may execute control side effects.
+      return 0;
     }
     if (intent.kind === "unknownCommand") {
       return this.#replyToCommand(
@@ -1156,14 +1139,12 @@ export class BridgeEngine {
         return controlFailureReply(error, "会话命令执行失败，请稍后重试。");
       }
     }
-    if (intent.kind === "permissions" || intent.kind === "selectPermission") {
+    if (intent.kind === "permissions") {
       try {
-        const reply = await this.#permissionReply(
-          intent.kind === "selectPermission" ? intent.index : undefined,
-        );
+        const reply = await this.#permissionReply();
         return { ok: true, reply };
       } catch (error) {
-        return controlFailureReply(error, "权限命令执行失败，请稍后重试。");
+        return controlFailureReply(error, "权限查询失败，请稍后重试。");
       }
     }
     if (intent.kind === "models" || intent.kind === "selectModel") {
@@ -1951,98 +1932,23 @@ export class BridgeEngine {
     );
   }
 
-  async #permissionReply(selectedIndex?: number): Promise<string> {
-    if (
-      !this.#codex?.resumeThread ||
-      !this.#codex.listPermissionProfiles ||
-      !this.#codex.updateThreadPermissions ||
-      !this.#mainThreadId
-    ) {
-      throw new Error("permission profiles are not configured");
+  async #permissionReply(): Promise<string> {
+    if (!this.#codex?.resumeThread || !this.#mainThreadId) {
+      throw new Error("permission metadata is not configured");
     }
     const binding = this.#state.getBinding(this.#now());
     const threadId = binding?.threadId ?? this.#mainThreadId;
-    const storedPermission = this.#state.getThreadPermissionProfile(threadId)
-      ?.profileId;
-    const cwd = binding?.projectPath ?? this.#inboxDirectory ?? undefined;
-    const listed = await this.#codex.listPermissionProfiles({
-      ...(cwd ? { cwd } : {}),
-    });
-    const profiles = listed.data.filter(isPermissionProfileSummary);
-
-    if (selectedIndex !== undefined) {
-      const selected = profiles[selectedIndex - 1];
-      if (!selected) {
-        throw new ControlCommandRejected(
-          "权限编号无效，请按 perm 当前列表选择。",
-        );
-      }
-      if (!selected.allowed) {
-        throw new ControlCommandRejected(
-          `权限 ${selected.id} 受 Codex 配置限制，当前不可切换。`,
-        );
-      }
-      const selection = permissionSettingsForProfile(selected.id);
-      const changed = await this.#codex.updateThreadPermissions(
-        threadId,
-        selection,
-      );
-      const activeId = activePermissionProfileId(changed);
-      if (
-        activeId !== selected.id ||
-        (selection.approvalPolicy !== undefined &&
-          approvalPolicyValue(changed) !== selection.approvalPolicy) ||
-        (selection.approvalsReviewer !== undefined &&
-          approvalsReviewerValue(changed) !== selection.approvalsReviewer)
-      ) {
-        throw new Error("Codex did not activate the selected permission settings");
-      }
-      this.#state.setThreadPermissionProfile({
-        approvalPolicy: selection.approvalPolicy ?? null,
-        approvalsReviewer: selection.approvalsReviewer ?? null,
-        profileId: selected.id,
-        threadId,
-        updatedAtMs: this.#now(),
-      });
-      return [
-        `已切换当前任务权限：${formatPermissionProfile(selectedIndex, selected)}`,
-        `审批：${approvalPolicyText(changed)}；审批人：${approvalsReviewerText(changed)}`,
-        `Sandbox：${sandboxTypeText(changed)}`,
-      ].join("\n");
-    }
-
-    let current: Record<string, unknown> | null = null;
-    try {
-      current = await this.#resumeThreadForControl(threadId);
-    } catch {
-      // Keep the native profile list usable so an explicitly selected allowed
-      // profile can recover a task whose previously saved profile was disabled.
-    }
-    const activeId =
-      (current ? activePermissionProfileId(current) : undefined) ??
-      storedPermission;
-    const activeIndex = profiles.findIndex((profile) => profile.id === activeId);
-    const active = activeIndex >= 0 ? profiles[activeIndex] : null;
+    const current = await this.#resumeThreadForControl(threadId);
+    const activeId = activePermissionProfileId(current);
     return [
-      `当前权限：${
-        active
-          ? formatPermissionProfile(activeIndex + 1, active)
-          : (activeId ?? "未知")
-      }`,
-      `审批：${current ? approvalPolicyText(current) : "未知"}；审批人：${
-        current ? approvalsReviewerText(current) : "未知"
-      }`,
-      `Sandbox：${current ? sandboxTypeText(current) : "未知"}`,
-      ...(current
-        ? []
-        : ["⚠️ Codex 未能确认当前权限；请选择可用 Profile 或稍后重试。"]),
-      "",
-      ...profiles.map((profile, index) =>
-        `${formatPermissionProfile(index + 1, profile)}${
-          profile.allowed ? "" : "（不可用）"
-        }`,
-      ),
-      "使用 perm<n> 直接切换当前任务权限。",
+      "Codex 当前权限：" +
+        (activeId ? permissionProfileDisplayName(activeId) : "未知"),
+      "审批：" +
+        approvalPolicyText(current) +
+        "；审批人：" +
+        approvalsReviewerText(current),
+      "Sandbox：" + sandboxTypeText(current),
+      "权限只能在 Codex Desktop 中修改；iLink 仅实时读取当前任务设置。",
     ].join("\n");
   }
 
@@ -2402,15 +2308,19 @@ export class BridgeEngine {
       text: input.turnInput.text,
     });
     if (route.kind === "ambiguousNotificationRoute") {
-      await this.#send(
-        input.contextToken,
-        "有多个可回复任务，请先用 p 选择项目，再用 s<n> 进入目标会话。",
-      );
-      this.#clearInbound(input.messageId);
-      await this.#cleanupMedia(this.#dedupeKey(input.messageId));
-      return 1;
+      if (!this.#claimInbound(input.messageId)) return 0;
+      try {
+        return await this.#replyToCommand(
+          input.contextToken,
+          input.messageId,
+          "有多个可回复任务，请先用 p 选择项目，再用 s<n> 进入目标会话。",
+        );
+      } finally {
+        await this.#cleanupMedia(this.#dedupeKey(input.messageId));
+      }
     }
-    if (route.binding) {
+    const applyRouteBinding = (): void => {
+      if (!route.binding) return;
       this.#state.setBinding({
         expiresAtMs: route.binding.expiresAtMs,
         projectPath:
@@ -2418,25 +2328,39 @@ export class BridgeEngine {
         threadId: route.binding.threadId,
         updatedAtMs: nowMs,
       });
-    }
+    };
 
     const dedupeKey = `${this.#session.botId}/${this.#session.controllerUserId}/${input.messageId}`;
+    const notifyQueued = async (queued: { id: number }): Promise<number> => {
+      try {
+        await this.#send(input.contextToken, `Queued #${queued.id}`);
+        return 1;
+      } finally {
+        await this.#drainQueuedTurns();
+      }
+    };
+    const enqueueInbound = async (): Promise<number> => {
+      const queued = this.#state.enqueueInboundTurn({
+        accountId: this.#session.botId,
+        body: serializedInput,
+        contextToken: input.contextToken,
+        controllerUserId: this.#session.controllerUserId,
+        createdAtMs: nowMs,
+        dedupeKey,
+        messageId: input.messageId,
+        threadId: route.threadId,
+      });
+      if (!queued) return 0;
+      applyRouteBinding();
+      return notifyQueued(queued);
+    };
     if (
       this.#state.countActiveDispatches() >= MAX_ACTIVE_BRIDGE_TURNS ||
       this.#state.hasActiveDispatchForThread(route.threadId) ||
       this.#state.getDesktopTurnObservation(route.threadId) !== null ||
       this.#state.peekQueuedTurn(route.threadId) !== null
     ) {
-      const queued = this.#state.enqueueQueuedTurn({
-        body: serializedInput,
-        contextToken: input.contextToken,
-        createdAtMs: nowMs,
-        dedupeKey,
-        threadId: route.threadId,
-      });
-      this.#clearInbound(input.messageId);
-      await this.#send(input.contextToken, `Queued #${queued.id}`);
-      return 1;
+      return enqueueInbound();
     }
 
     const operationId = this.#newId();
@@ -2449,92 +2373,89 @@ export class BridgeEngine {
       turnId: null,
     });
     if (!lease.acquired) {
-      const queued = this.#state.enqueueQueuedTurn({
-        body: serializedInput,
-        contextToken: input.contextToken,
-        createdAtMs: nowMs,
-        dedupeKey,
-        threadId: route.threadId,
-      });
-      this.#clearInbound(input.messageId);
-      await this.#send(input.contextToken, `Queued #${queued.id}`);
-      return 1;
+      return enqueueInbound();
     }
 
     try {
       await this.#ensureThread(route.threadId);
     } catch (error) {
-      this.#leases.release({
-        instanceId: this.#bridgeInstanceId,
-        operationId,
-        owner: "bridge",
-        threadId: route.threadId,
-        turnId: null,
-      });
-      if (isMissingThreadError(error)) {
-        if (currentBinding?.threadId === route.threadId) {
-          this.#state.clearNavigationRoutes();
+      try {
+        if (isMissingThreadError(error)) {
+          const failedOutbox =
+            this.#state.rejectInboundMessageAndReleaseLeaseWithOutbox({
+              accountId: this.#session.botId,
+              controllerUserId: this.#session.controllerUserId,
+              lease: lease.lease,
+              messageId: input.messageId,
+              outbox: {
+                body: MISSING_THREAD_TEXT,
+                clientId: this.#inboundReplyClientId(input.messageId),
+                contextToken: input.contextToken,
+                createdAtMs: this.#now(),
+                targetUserId: this.#session.controllerUserId,
+              },
+            });
+          if (!failedOutbox) return 0;
+          if (currentBinding?.threadId === route.threadId) {
+            this.#state.clearNavigationRoutes();
+          }
+          await this.#cleanupMedia(dedupeKey);
+          await this.#sendPersistedOutbox(failedOutbox);
+          return 1;
         }
-        this.#clearInbound(input.messageId);
+        const failedOutbox =
+          this.#state.rejectInboundMessageAndReleaseLeaseWithOutbox({
+            accountId: this.#session.botId,
+            controllerUserId: this.#session.controllerUserId,
+            lease: lease.lease,
+            messageId: input.messageId,
+            outbox: {
+              body: CODEX_THREAD_RESUME_FAILED_TEXT,
+              clientId: this.#inboundReplyClientId(input.messageId),
+              contextToken: input.contextToken,
+              createdAtMs: this.#now(),
+              targetUserId: this.#session.controllerUserId,
+            },
+          });
+        if (!failedOutbox) return 0;
         await this.#cleanupMedia(dedupeKey);
-        await this.#send(
-          input.contextToken,
-          MISSING_THREAD_TEXT,
-          this.#inboundReplyClientId(input.messageId),
-        );
+        await this.#sendPersistedOutbox(failedOutbox);
         return 1;
+      } finally {
+        this.#leases.release(lease.lease);
+        await this.#drainQueuedTurns();
       }
-      const queued = this.#state.enqueueQueuedTurn({
-        body: serializedInput,
-        contextToken: input.contextToken,
-        createdAtMs: nowMs,
-        dedupeKey,
-        threadId: route.threadId,
-      });
-      this.#clearInbound(input.messageId);
-      await this.#send(input.contextToken, `Queued #${queued.id}`);
-      return 1;
     }
 
+    let admission: InboundDispatchAdmission;
     try {
-      const dispatch = this.#state.tryCreateDispatchIntent({
+      admission = this.#state.admitInboundDispatchWithLease({
+        accountId: this.#session.botId,
         body: serializedInput,
         contextToken: input.contextToken,
+        controllerUserId: this.#session.controllerUserId,
         createdAtMs: nowMs,
         dedupeKey,
+        lease: lease.lease,
         maxActiveDispatches: MAX_ACTIVE_BRIDGE_TURNS,
+        messageId: input.messageId,
         operationId,
         threadId: route.threadId,
       });
-      if (!dispatch) {
-        this.#leases.release({
-          instanceId: this.#bridgeInstanceId,
-          operationId,
-          owner: "bridge",
-          threadId: route.threadId,
-          turnId: null,
-        });
-        const queued = this.#state.enqueueQueuedTurn({
-          body: serializedInput,
-          contextToken: input.contextToken,
-          createdAtMs: nowMs,
-          dedupeKey,
-          threadId: route.threadId,
-        });
-        this.#clearInbound(input.messageId);
-        await this.#send(input.contextToken, `Queued #${queued.id}`);
-        return 1;
-      }
     } catch (error) {
-      this.#leases.release({
-        instanceId: this.#bridgeInstanceId,
-        operationId,
-        owner: "bridge",
-        threadId: route.threadId,
-        turnId: null,
-      });
+      this.#leases.release(lease.lease);
+      await this.#drainQueuedTurns();
       throw error;
     }
+    if (admission.kind === "terminal") {
+      await this.#drainQueuedTurns();
+      return 0;
+    }
+    if (admission.kind === "queued") {
+      applyRouteBinding();
+      return notifyQueued(admission.queued);
+    }
+    applyRouteBinding();
 
     let started: { turn: { id: string } };
     try {
@@ -2554,7 +2475,6 @@ export class BridgeEngine {
           operationId,
           contextToken: input.contextToken,
         });
-        this.#clearInbound(input.messageId);
         await this.#drainQueuedTurns();
         return 1;
       }
@@ -2564,7 +2484,6 @@ export class BridgeEngine {
         operationId,
         CODEX_OUTCOME_UNKNOWN_TEXT,
       );
-      this.#clearInbound(input.messageId);
       return 1;
     }
     this.#leases.claimBridgeTurn({
@@ -2591,12 +2510,10 @@ export class BridgeEngine {
         operationId,
         HOOK_GUARD_UNKNOWN_TEXT,
       );
-      this.#clearInbound(input.messageId);
       return 1;
     }
     this.#state.markDispatchAccepted(operationId, started.turn.id, this.#now());
     this.#beginTyping(started.turn.id, input.contextToken);
-    this.#clearInbound(input.messageId);
     return 0;
   }
 
@@ -2802,168 +2719,205 @@ export class BridgeEngine {
       return;
     }
 
-    for (const queued of this.#state.listQueuedTurns()) {
-      if (this.#state.countActiveDispatches() >= MAX_ACTIVE_BRIDGE_TURNS) return;
-      if (this.#state.hasActiveDispatchForThread(queued.threadId)) continue;
-      if (this.#state.getDesktopTurnObservation(queued.threadId)) continue;
-      const contextToken =
-        queued.contextToken ||
-        this.#state.getILinkState(this.#session.botId)?.contextToken;
-      if (!contextToken) continue;
-      let queuedInput: DurableTurnInput;
-      try {
-        queuedInput = parseDurableTurnInput(queued.body);
-      } catch {
-        this.#state.deleteQueuedTurn(queued.id);
-        await this.#cleanupMedia(queued.dedupeKey);
-        await this.#send(
-          contextToken,
-          inboundFailureText("invalid-media"),
-          `codex-ilink:queued:${String(queued.id)}:invalid-input`,
-        );
-        continue;
-      }
-
-      const operationId = this.#newId();
-      const lease = this.#leases.tryAcquire({
-        createdAtMs: this.#now(),
-        instanceId: this.#bridgeInstanceId,
-        operationId,
-        owner: "bridge",
-        threadId: queued.threadId,
-        turnId: null,
-      });
-      if (!lease.acquired) continue;
-
-      try {
-        await this.#ensureThread(queued.threadId);
-      } catch (error) {
-        this.#leases.release({
-          instanceId: this.#bridgeInstanceId,
-          operationId,
-          owner: "bridge",
-          threadId: queued.threadId,
-          turnId: null,
-        });
-        if (isMissingThreadError(error)) {
-          this.#state.deleteQueuedTurn(queued.id);
-          await this.#cleanupMedia(queued.dedupeKey);
-          const binding = this.#state.getBinding(this.#now());
-          if (binding?.threadId === queued.threadId) {
-            this.#state.clearNavigationRoutes();
-          }
-          await this.#send(
-            contextToken,
-            MISSING_THREAD_TEXT,
-            `codex-ilink:queued:${String(queued.id)}:missing-thread`,
-          );
-        }
-        continue;
-      }
-      if (this.#closing) {
-        this.#leases.release({
-          instanceId: this.#bridgeInstanceId,
-          operationId,
-          owner: "bridge",
-          threadId: queued.threadId,
-          turnId: null,
-        });
-        return;
-      }
-
-      let dispatch: NonNullable<
-        ReturnType<SqliteState["promoteQueuedTurn"]>
-      >;
-      try {
-        const promoted = this.#state.promoteQueuedTurn({
-          contextToken,
-          createdAtMs: this.#now(),
-          maxActiveDispatches: MAX_ACTIVE_BRIDGE_TURNS,
-          operationId,
-          queuedTurnId: queued.id,
-        });
-        if (!promoted) {
-          this.#leases.release({
-            instanceId: this.#bridgeInstanceId,
-            operationId,
-            owner: "bridge",
-            threadId: queued.threadId,
-            turnId: null,
-          });
+    let rescan = true;
+    while (rescan) {
+      rescan = false;
+      for (const queued of this.#state.listQueuedTurns()) {
+        if (this.#state.countActiveDispatches() >= MAX_ACTIVE_BRIDGE_TURNS) return;
+        if (this.#state.hasActiveDispatchForThread(queued.threadId)) continue;
+        if (this.#state.getDesktopTurnObservation(queued.threadId)) continue;
+        const contextToken =
+          queued.contextToken ||
+          this.#state.getILinkState(this.#session.botId)?.contextToken;
+        if (!contextToken) continue;
+        const head = this.#state.peekQueuedTurn(queued.threadId);
+        if (
+          !head ||
+          head.id !== queued.id ||
+          head.dedupeKey !== queued.dedupeKey
+        ) {
           continue;
         }
-        dispatch = promoted;
-      } catch {
-        this.#leases.release({
+        try {
+          parseDurableTurnInput(queued.body);
+        } catch {
+          const failedOutbox = this.#state.rejectQueuedTurnWithOutbox({
+            dedupeKey: queued.dedupeKey,
+            queuedTurnId: queued.id,
+            threadId: queued.threadId,
+            outbox: {
+              body: inboundFailureText("invalid-media"),
+              clientId: queuedFailureClientId(queued.dedupeKey, "invalid-input"),
+              contextToken,
+              createdAtMs: this.#now(),
+              targetUserId: this.#session.controllerUserId,
+            },
+          });
+          if (!failedOutbox) {
+            rescan = true;
+            continue;
+          }
+          await this.#cleanupMedia(queued.dedupeKey);
+          await this.#sendPersistedOutbox(failedOutbox);
+          continue;
+        }
+
+        const operationId = this.#newId();
+        const lease = this.#leases.tryAcquire({
+          createdAtMs: this.#now(),
           instanceId: this.#bridgeInstanceId,
           operationId,
           owner: "bridge",
           threadId: queued.threadId,
           turnId: null,
         });
-        continue;
-      }
+        if (!lease.acquired) continue;
 
-      let started: { turn: { id: string } };
-      try {
-        started = await this.#codex.startTurn({
-          ...(queuedInput.attachments.length > 0
-            ? { attachments: queuedInput.attachments }
-            : {}),
-          clientUserMessageId: dispatch.dedupeKey,
-          text: queuedInput.text,
-          threadId: queued.threadId,
-        });
-      } catch (error) {
-        if (!(error instanceof CodexOutcomeUnknownError)) {
+        try {
+          await this.#ensureThread(queued.threadId);
+        } catch (error) {
+          let failedOutbox: OutboxItem | null;
+          try {
+            failedOutbox =
+              this.#state.rejectQueuedTurnAndReleaseLeaseWithOutbox({
+                dedupeKey: queued.dedupeKey,
+                lease: lease.lease,
+                queuedTurnId: queued.id,
+                threadId: queued.threadId,
+                outbox: {
+                  body: isMissingThreadError(error)
+                    ? MISSING_THREAD_TEXT
+                    : CODEX_THREAD_RESUME_FAILED_TEXT,
+                  clientId: queuedFailureClientId(
+                    queued.dedupeKey,
+                    isMissingThreadError(error)
+                      ? "missing-thread"
+                      : "resume-failed",
+                  ),
+                  contextToken,
+                  createdAtMs: this.#now(),
+                  targetUserId: this.#session.controllerUserId,
+                },
+              });
+          } catch {
+            this.#leases.release(lease.lease);
+            continue;
+          }
+          rescan = true;
+          if (!failedOutbox) continue;
+          await this.#cleanupMedia(queued.dedupeKey);
+          if (isMissingThreadError(error)) {
+            const binding = this.#state.getBinding(this.#now());
+            if (binding?.threadId === queued.threadId) {
+              this.#state.clearNavigationRoutes();
+            }
+          }
+          await this.#sendPersistedOutbox(failedOutbox);
+          continue;
+        }
+        if (this.#closing) {
+          this.#leases.release(lease.lease);
+          return;
+        }
+
+        let dispatch: DispatchIntent;
+        try {
+          const promotion = this.#state.promoteQueuedTurnWithLease({
+            contextToken,
+            createdAtMs: this.#now(),
+            dedupeKey: queued.dedupeKey,
+            lease: lease.lease,
+            maxActiveDispatches: MAX_ACTIVE_BRIDGE_TURNS,
+            operationId,
+            queuedTurnId: queued.id,
+            threadId: queued.threadId,
+          });
+          if (promotion.kind !== "promoted") {
+            if (promotion.kind === "stale") rescan = true;
+            continue;
+          }
+          dispatch = promotion.dispatch;
+        } catch {
+          this.#leases.release(lease.lease);
+          continue;
+        }
+
+        const dispatchContextToken = dispatch.contextToken || contextToken;
+        let dispatchInput: DurableTurnInput;
+        try {
+          if (dispatch.body === null) throw new Error("missing queued body");
+          dispatchInput = parseDurableTurnInput(dispatch.body);
+        } catch {
           await this.#completeRejectedDispatch({
+            contextToken: dispatchContextToken,
             dedupeKey: dispatch.dedupeKey,
             lease: lease.lease,
             operationId,
-            contextToken,
           });
           continue;
         }
-        this.#state.markDispatchUnknown(operationId, this.#now());
-        await this.#persistUnknownDiagnostic(
-          contextToken,
-          operationId,
-          CODEX_OUTCOME_UNKNOWN_TEXT,
-        );
-        continue;
-      }
-      this.#leases.claimBridgeTurn({
-        instanceId: this.#bridgeInstanceId,
-        threadId: queued.threadId,
-        turnId: started.turn.id,
-      });
-      if (
-        !this.#leases.isHeldBy({
+
+        let started: { turn: { id: string } };
+        try {
+          started = await this.#codex.startTurn({
+            ...(dispatchInput.attachments.length > 0
+              ? { attachments: dispatchInput.attachments }
+              : {}),
+            clientUserMessageId: dispatch.dedupeKey,
+            text: dispatchInput.text,
+            threadId: dispatch.threadId,
+          });
+        } catch (error) {
+          if (!(error instanceof CodexOutcomeUnknownError)) {
+            await this.#completeRejectedDispatch({
+              contextToken: dispatchContextToken,
+              dedupeKey: dispatch.dedupeKey,
+              lease: lease.lease,
+              operationId,
+            });
+            continue;
+          }
+          this.#state.markDispatchUnknown(operationId, this.#now());
+          await this.#persistUnknownDiagnostic(
+            dispatchContextToken,
+            operationId,
+            CODEX_OUTCOME_UNKNOWN_TEXT,
+          );
+          continue;
+        }
+        this.#leases.claimBridgeTurn({
           instanceId: this.#bridgeInstanceId,
-          operationId,
-          owner: "bridge",
-          threadId: queued.threadId,
+          threadId: dispatch.threadId,
           turnId: started.turn.id,
-        })
-      ) {
-        this.#state.markDispatchUnknown(
+        });
+        if (
+          !this.#leases.isHeldBy({
+            instanceId: this.#bridgeInstanceId,
+            operationId,
+            owner: "bridge",
+            threadId: dispatch.threadId,
+            turnId: started.turn.id,
+          })
+        ) {
+          this.#state.markDispatchUnknown(
+            operationId,
+            this.#now(),
+            started.turn.id,
+          );
+          await this.#persistUnknownDiagnostic(
+            dispatchContextToken,
+            operationId,
+            HOOK_GUARD_UNKNOWN_TEXT,
+          );
+          continue;
+        }
+        this.#state.markDispatchAccepted(
           operationId,
-          this.#now(),
           started.turn.id,
+          this.#now(),
         );
-        await this.#persistUnknownDiagnostic(
-          contextToken,
-          operationId,
-          HOOK_GUARD_UNKNOWN_TEXT,
-        );
-        continue;
+        this.#beginTyping(started.turn.id, dispatchContextToken);
       }
-      this.#state.markDispatchAccepted(
-        operationId,
-        started.turn.id,
-        this.#now(),
-      );
-      this.#beginTyping(started.turn.id, contextToken);
     }
   }
 
@@ -3109,10 +3063,10 @@ export class BridgeEngine {
       throw new Error("E_BRIDGE_REJECTED_LEASE_RELEASE");
     }
     await this.#cleanupMedia(input.dedupeKey);
-    await this.#sendRejectedOutbox(rejectedOutbox);
+    await this.#sendPersistedOutbox(rejectedOutbox);
   }
 
-  async #sendRejectedOutbox(item: OutboxItem): Promise<void> {
+  async #sendPersistedOutbox(item: OutboxItem): Promise<void> {
     if (item.status === "confirmed") return;
     if (item.body === null) throw new Error("pending rejected reply has no body");
     try {
@@ -3127,27 +3081,27 @@ export class BridgeEngine {
     return `${this.#session.botId}/${this.#session.controllerUserId}/${messageId}`;
   }
 
-  #clearInbound(messageId: string): void {
-    this.#state.clearInboundBody(
+  #claimInbound(messageId: string): boolean {
+    return this.#state.clearInboundBody(
       this.#session.botId,
       this.#session.controllerUserId,
       messageId,
     );
   }
 
+  #clearInbound(messageId: string): void {
+    this.#claimInbound(messageId);
+  }
+
   async #ensureThread(threadId: string): Promise<void> {
-    const storedPermission = this.#state.getThreadPermissionProfile(threadId);
-    const options = storedPermission
-      ? permissionSettingsFromStored(storedPermission)
-      : undefined;
     if (this.#codex?.ensureThread) {
-      await this.#codex.ensureThread(threadId, options);
+      await this.#codex.ensureThread(threadId);
       return;
     }
     if (!this.#codex?.resumeThread) {
       throw new Error("Codex thread resume is not configured");
     }
-    await this.#codex.resumeThread(threadId, options);
+    await this.#codex.resumeThread(threadId);
   }
 
   async #resumeThreadForControl(
@@ -3156,12 +3110,7 @@ export class BridgeEngine {
     if (!this.#codex?.resumeThread) {
       throw new Error("Codex thread resume is not configured");
     }
-    const storedPermission = this.#state.getThreadPermissionProfile(threadId);
-    if (!storedPermission) return this.#codex.resumeThread(threadId);
-    return this.#codex.resumeThread(
-      threadId,
-      permissionSettingsFromStored(storedPermission),
-    );
+    return this.#codex.resumeThread(threadId);
   }
 
   async #readThreadForReconciliation(
@@ -3351,22 +3300,6 @@ function stringField(
   return typeof field === "string" ? field : undefined;
 }
 
-function isPermissionProfileSummary(value: unknown): value is {
-  allowed: boolean;
-  description?: string | null;
-  id: string;
-} {
-  const profile = asObject(value);
-  return (
-    typeof profile?.allowed === "boolean" &&
-    typeof profile.id === "string" &&
-    profile.id.length > 0 &&
-    (profile.description === undefined ||
-      profile.description === null ||
-      typeof profile.description === "string")
-  );
-}
-
 function isModelCatalogEntry(value: unknown): value is ModelCatalogEntry {
   const model = asObject(value);
   return (
@@ -3443,67 +3376,33 @@ function activePermissionProfileId(
 
 function approvalPolicyText(metadata: Record<string, unknown>): string {
   const policy = metadata.approvalPolicy;
-  return typeof policy === "string"
+  return typeof policy === "string" && policy.length > 0
     ? policy
     : asObject(policy)?.granular
       ? "granular"
       : "未知";
 }
 
-function approvalPolicyValue(
-  metadata: Record<string, unknown>,
-): ThreadApprovalPolicy | null {
-  const policy = metadata.approvalPolicy;
-  return policy === "never" || policy === "on-request" || policy === "untrusted"
-    ? policy
-    : null;
+function queuedFailureClientId(
+  dedupeKey: string,
+  reason: "invalid-input" | "missing-thread" | "resume-failed",
+): string {
+  const identity = createHash("sha256")
+    .update(dedupeKey, "utf8")
+    .digest("hex")
+    .slice(0, 32);
+  return `codex-ilink:queued:${identity}:${reason}`;
 }
 
 function approvalsReviewerValue(
   metadata: Record<string, unknown>,
-): ThreadApprovalsReviewer | null {
+): string | null {
   const reviewer = metadata.approvalsReviewer;
-  return reviewer === "auto_review" ||
-    reviewer === "guardian_subagent" ||
-    reviewer === "user"
-    ? reviewer
-    : null;
+  return typeof reviewer === "string" && reviewer.length > 0 ? reviewer : null;
 }
 
 function approvalsReviewerText(metadata: Record<string, unknown>): string {
   return approvalsReviewerValue(metadata) ?? "未知";
-}
-
-function permissionSettingsForProfile(
-  permissions: string,
-): ThreadPermissionSettings & { permissions: string } {
-  if (
-    permissions !== ":read-only" &&
-    permissions !== ":workspace" &&
-    permissions !== ":danger-full-access"
-  ) {
-    return { permissions };
-  }
-  return {
-    approvalPolicy:
-      permissions === ":danger-full-access" ? "never" : "on-request",
-    approvalsReviewer: "user",
-    permissions,
-  };
-}
-
-function permissionSettingsFromStored(
-  stored: ThreadPermissionProfile,
-): ThreadPermissionSettings & { permissions: string } {
-  return {
-    ...(stored.approvalPolicy
-      ? { approvalPolicy: stored.approvalPolicy }
-      : {}),
-    ...(stored.approvalsReviewer
-      ? { approvalsReviewer: stored.approvalsReviewer }
-      : {}),
-    permissions: stored.profileId,
-  };
 }
 
 function sandboxTypeText(metadata: Record<string, unknown>): string {
@@ -3512,14 +3411,6 @@ function sandboxTypeText(metadata: Record<string, unknown>): string {
     stringField(objectField(metadata, "sandboxPolicy"), "type") ??
     "未知"
   );
-}
-
-function formatPermissionProfile(
-  index: number,
-  profile: { description?: string | null; id: string },
-): string {
-  const builtInLabel = permissionProfileLabel(profile.id);
-  return `${String(index)}. ${builtInLabel} (${profile.id})`;
 }
 
 function permissionProfileDisplayName(id: string): string {

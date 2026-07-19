@@ -42,6 +42,7 @@
 - App Server 当前有 `thread/list`，没有 `project/list`；项目只能从会话与 Hook 观察数据派生。
 - App Server Schema 是版本相关产物，升级 Codex 后必须先做兼容检查。
 - `PermissionRequest` Hook 协议允许返回 `allow` 或 `deny`，但 V1 主动放弃这项能力：微信不参与 Desktop 回合审批，Hook stdout 始终为空，审批在 Desktop 内完成。
+- 非托管命令 Hook 的持久信任绑定当前定义 hash，首次安装和定义变化后都需要用户人工审核。普通安装没有受支持的自动持久信任接口；`--dangerously-bypass-hook-trust` 只适用于已经在 Codex 外部审查来源的单次自动化调用，本项目生产流程不使用。
 - Hook Transcript 格式不是稳定接口；插件不解析 Transcript，最终结果通过公开会话接口获取。
 - 插件可以打包 Hooks，但不是后台服务，也不能被当成稳定的 Desktop UI 扩展点。
 - 微信回合共享持久化会话和本机 Codex 配置，不等于复用 Desktop UI 进程或所有宿主能力。

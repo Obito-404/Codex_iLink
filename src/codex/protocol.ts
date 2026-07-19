@@ -30,29 +30,6 @@ export type ThreadListResult = JsonObject & {
   nextCursor: string | null;
 };
 
-export type PermissionProfileSummary = JsonObject & {
-  allowed: boolean;
-  description?: string | null;
-  id: string;
-};
-
-export type PermissionProfileListResult = JsonObject & {
-  data: PermissionProfileSummary[];
-  nextCursor: string | null;
-};
-
-export type ThreadApprovalPolicy = "never" | "on-request" | "untrusted";
-export type ThreadApprovalsReviewer =
-  | "auto_review"
-  | "guardian_subagent"
-  | "user";
-
-export type ThreadPermissionSettings = {
-  approvalPolicy?: ThreadApprovalPolicy;
-  approvalsReviewer?: ThreadApprovalsReviewer;
-  permissions?: string;
-};
-
 export type ModelSummary = JsonObject & {
   defaultReasoningEffort: string;
   displayName: string;

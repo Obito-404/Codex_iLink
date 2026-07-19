@@ -57,9 +57,12 @@ export function parseDesktopProjects(value: unknown): DesktopProject[] {
     throw invalidDesktopProjectState();
   }
   for (const orderEntry of projectOrder ?? []) {
-    const orderedRoots = resolveOrderedRoots(orderEntry, localProjects);
-    for (const cwd of orderedRoots) {
+    const resolved = resolveOrderedRoots(orderEntry, localProjects);
+    for (const cwd of resolved.roots) {
       const key = pathKey(cwd);
+      if (resolved.isLocalProject && !roots.has(key)) {
+        roots.set(key, cwd);
+      }
       const saved = roots.get(key);
       if (!saved || seen.has(key)) continue;
       ordered.push(saved);
@@ -87,9 +90,9 @@ export function parseDesktopProjects(value: unknown): DesktopProject[] {
 function resolveOrderedRoots(
   orderEntry: unknown,
   localProjects: Record<string, unknown> | undefined,
-): string[] {
+): { isLocalProject: boolean; roots: string[] } {
   const directRoot = normalizeProjectPath(orderEntry);
-  if (directRoot) return [directRoot];
+  if (directRoot) return { isLocalProject: false, roots: [directRoot] };
   if (typeof orderEntry !== "string" || !localProjects) {
     throw invalidDesktopProjectState();
   }
@@ -97,11 +100,14 @@ function resolveOrderedRoots(
   if (!isRecord(project) || !Array.isArray(project.rootPaths)) {
     throw invalidDesktopProjectState();
   }
-  return project.rootPaths.map((root) => {
-    const cwd = normalizeProjectPath(root);
-    if (!cwd) throw invalidDesktopProjectState();
-    return cwd;
-  });
+  return {
+    isLocalProject: true,
+    roots: project.rootPaths.map((root) => {
+      const cwd = normalizeProjectPath(root);
+      if (!cwd) throw invalidDesktopProjectState();
+      return cwd;
+    }),
+  };
 }
 
 function normalizeProjectPath(value: unknown): string | null {

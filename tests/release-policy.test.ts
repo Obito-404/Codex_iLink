@@ -130,7 +130,7 @@ test("the workflow CLI reads package.json and writes typed GitHub outputs", () =
       env: {
         ...process.env,
         GITHUB_OUTPUT: output,
-        RELEASE_TAG: "v0.1.0-rc.1",
+        RELEASE_TAG: "v0.1.0-rc.2",
       },
       windowsHide: true,
     });
@@ -139,8 +139,8 @@ test("the workflow CLI reads package.json and writes typed GitHub outputs", () =
     assert.equal(
       readFileSync(output, "utf8"),
       [
-        "version=0.1.0-rc.1",
-        "tag=v0.1.0-rc.1",
+        "version=0.1.0-rc.2",
+        "tag=v0.1.0-rc.2",
         "github_prerelease=true",
         "npm_tag=next",
         "requires_authenticode=false",
@@ -154,7 +154,7 @@ test("the workflow CLI reads package.json and writes typed GitHub outputs", () =
 
 function runInstaller(...args: string[]) {
   return spawnSync(
-    "pwsh",
+    process.platform === "win32" ? "powershell.exe" : "pwsh",
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", "scripts/install.ps1", ...args],
     { cwd: process.cwd(), encoding: "utf8", windowsHide: true },
   );

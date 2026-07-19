@@ -36,10 +36,7 @@ test("the documented short command table is parsed exactly", () => {
   assert.deepEqual(parseInboundText("exit"), { kind: "exitSession" });
   assert.deepEqual(parseInboundText("st"), { kind: "status" });
   assert.deepEqual(parseInboundText("perm"), { kind: "permissions" });
-  assert.deepEqual(parseInboundText("perm3"), {
-    index: 3,
-    kind: "selectPermission",
-  });
+  assert.deepEqual(parseInboundText("perm3"), { kind: "permissions" });
   assert.deepEqual(parseInboundText("model"), { kind: "models" });
   assert.deepEqual(parseInboundText("model2"), {
     index: 2,
@@ -85,7 +82,7 @@ test("explicit Chinese control requests map to the same command intents", () => 
     ["回到主会话", { kind: "exitSession" }],
     ["看一下当前状态", { kind: "status" }],
     ["权限列表", { kind: "permissions" }],
-    ["切换到第3个权限", { index: 3, kind: "selectPermission" }],
+    ["切换到第3个权限", { kind: "permissions" }],
     ["有哪些模型", { kind: "models" }],
     ["把当前任务模型换成 gpt-5.6-sol", {
       id: "gpt-5.6-sol",
@@ -230,6 +227,10 @@ test("ambiguous control-like text is isolated for AI fallback", () => {
     },
   );
   assert.equal(routedControlIntent({ index: 0, kind: "selectProject" }), null);
+  assert.equal(
+    routedControlIntent({ index: 3, kind: "selectPermission" }),
+    null,
+  );
   assert.equal(routedControlIntent({ code: "wrong", kind: "approve" }), null);
   assert.equal(
     routedControlIntent({

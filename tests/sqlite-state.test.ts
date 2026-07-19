@@ -11,6 +11,7 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 import { SqliteState } from "../src/bridge/sqlite-state.ts";
+import { SqliteTurnLeaseStore } from "../src/coordination/turn-lease.ts";
 
 test("a constructor waiting on a concurrent migration does not replay a stale schema version", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-race-"));
@@ -94,7 +95,7 @@ try {
     const reopened = new SqliteState(path);
     assert.deepEqual(reopened.storageDiagnostics(), {
       journalMode: "wal",
-      schemaVersion: 13,
+      schemaVersion: 14,
       synchronous: "full",
     });
     assert.deepEqual(reopened.listQueuedTurns(), [
@@ -221,7 +222,7 @@ test("schema v11 attachment intents migrate as untrusted legacy paths", () => {
     database.close();
 
     migrated = new SqliteState(path);
-    assert.equal(migrated.storageDiagnostics().schemaVersion, 13);
+    assert.equal(migrated.storageDiagnostics().schemaVersion, 14);
     assert.equal(
       migrated.listOutboundAttachmentIntents("legacy-turn")[0]
         ?.snapshotProvenance,
@@ -297,7 +298,7 @@ test("schema v13 adds bounded transport indexes without losing state", () => {
     database.close();
 
     state = new SqliteState(path);
-    assert.equal(state.storageDiagnostics().schemaVersion, 13);
+    assert.equal(state.storageDiagnostics().schemaVersion, 14);
     assert.equal(state.listInboundMessages()[0]?.messageId, "message-index");
     state.close();
     state = null;
@@ -706,7 +707,7 @@ test("controller identity and database configuration survive reopening", () => {
     const first = new SqliteState(path);
     assert.deepEqual(first.storageDiagnostics(), {
       journalMode: "wal",
-      schemaVersion: 13,
+      schemaVersion: 14,
       synchronous: "full",
     });
     assert.deepEqual(
@@ -746,90 +747,51 @@ test("controller identity and database configuration survive reopening", () => {
   }
 });
 
-test("selected Codex permission profile survives Bridge reopening per thread", () => {
-  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-permissions-"));
-  const path = join(directory, "state.db");
-
-  try {
-    const first = new SqliteState(path);
-    first.setThreadPermissionProfile({
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      profileId: ":danger-full-access",
-      threadId: "thread-permission-a",
-      updatedAtMs: 100,
-    });
-    first.setThreadPermissionProfile({
-      approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-      profileId: ":read-only",
-      threadId: "thread-permission-b",
-      updatedAtMs: 200,
-    });
-    first.close();
-
-    const reopened = new SqliteState(path);
-    assert.deepEqual(reopened.getThreadPermissionProfile("thread-permission-a"), {
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      profileId: ":danger-full-access",
-      threadId: "thread-permission-a",
-      updatedAtMs: 100,
-    });
-    assert.deepEqual(reopened.getThreadPermissionProfile("thread-permission-b"), {
-      approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-      profileId: ":read-only",
-      threadId: "thread-permission-b",
-      updatedAtMs: 200,
-    });
-    reopened.close();
-  } finally {
-    rmSync(directory, { force: true, recursive: true });
-  }
-});
-
-test("legacy permission profiles keep their existing approval behavior after migration", () => {
-  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-permissions-v7-"));
+test("schema v14 removes legacy local permission profiles", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-permissions-v14-"));
   const path = join(directory, "state.db");
   const database = new DatabaseSync(path);
+  let migrated: SqliteState | null = null;
 
   try {
-    const migrations = join(process.cwd(), "src", "bridge", "migrations");
-    for (let version = 1; version <= 7; version += 1) {
-      const filename = `${String(version).padStart(3, "0")}-${[
-        "initial",
-        "list-snapshots",
-        "turn-scheduler",
-        "desktop-observations",
-        "desktop-observation-tombstones",
-        "durable-turn-input",
-        "thread-permission-profiles",
-      ][version - 1]}.sql`;
-      database.exec(readFileSync(join(migrations, filename), "utf8"));
-    }
-    database.exec("PRAGMA user_version = 7");
+    applyMigrations(database, 1, 13);
+    database.exec("PRAGMA user_version = 13");
     database
       .prepare(
         `INSERT INTO thread_permission_profiles
-          (thread_id, profile_id, updated_at_ms) VALUES (?, ?, ?)`,
+          (thread_id, profile_id, approval_policy, approvals_reviewer, updated_at_ms)
+         VALUES (?, ?, ?, ?, ?)`,
       )
-      .run("thread-legacy-permission", ":danger-full-access", 300);
+      .run(
+        "thread-legacy-permission",
+        ":danger-full-access",
+        "never",
+        "user",
+        300,
+      );
     database.close();
 
-    const migrated = new SqliteState(path);
-    assert.deepEqual(
-      migrated.getThreadPermissionProfile("thread-legacy-permission"),
-      {
-        approvalPolicy: null,
-        approvalsReviewer: null,
-        profileId: ":danger-full-access",
-        threadId: "thread-legacy-permission",
-        updatedAtMs: 300,
-      },
-    );
+    migrated = new SqliteState(path);
+    assert.equal(migrated.storageDiagnostics().schemaVersion, 14);
     migrated.close();
+    migrated = null;
+
+    const inspected = new DatabaseSync(path);
+    try {
+      assert.equal(
+        inspected
+          .prepare(
+            `SELECT name FROM sqlite_schema
+             WHERE type = 'table' AND name = 'thread_permission_profiles'`,
+          )
+          .get(),
+        undefined,
+      );
+    } finally {
+      inspected.close();
+    }
   } finally {
+    migrated?.close();
     try {
       database.close();
     } catch {}
@@ -1137,6 +1099,423 @@ test("binding, notification routes, and queued turns preserve routing order", ()
   }
 });
 
+test("queued rejection and failure outbox commit atomically", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-queued-rejection-"));
+  const state = new SqliteState(join(directory, "state.db"));
+
+  try {
+    const first = state.enqueueQueuedTurn({
+      body: "first",
+      contextToken: "context-first",
+      createdAtMs: 1,
+      dedupeKey: "dedupe-first",
+      threadId: "thread-first",
+    });
+    const rejected = state.rejectQueuedTurnWithOutbox({
+      dedupeKey: first.dedupeKey,
+      queuedTurnId: first.id,
+      threadId: first.threadId,
+      outbox: {
+        body: "resume failed",
+        clientId: "queued-first-failed",
+        contextToken: "context-first",
+        createdAtMs: 2,
+        targetUserId: "wechat-user",
+      },
+    });
+    assert.ok(rejected);
+    assert.equal(state.peekQueuedTurn("thread-first"), null);
+    assert.equal(rejected.status, "pending");
+    assert.equal(state.getOutbox("queued-first-failed")?.body, "resume failed");
+
+    const second = state.enqueueQueuedTurn({
+      body: "second",
+      contextToken: "context-second",
+      createdAtMs: 3,
+      dedupeKey: "dedupe-second",
+      threadId: "thread-second",
+    });
+    state.enqueueOutbox({
+      body: "existing",
+      clientId: "queued-collision",
+      contextToken: "context-second",
+      createdAtMs: 4,
+      targetUserId: "wechat-user",
+    });
+    assert.throws(
+      () =>
+        state.rejectQueuedTurnWithOutbox({
+          dedupeKey: second.dedupeKey,
+          queuedTurnId: second.id,
+          threadId: second.threadId,
+          outbox: {
+            body: "different",
+            clientId: "queued-collision",
+            contextToken: "context-second",
+            createdAtMs: 5,
+            targetUserId: "wechat-user",
+          },
+        }),
+      /client id collision/u,
+    );
+    assert.equal(state.peekQueuedTurn("thread-second")?.id, second.id);
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a stale queued drainer cannot touch a replacement that reused its integer id", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-queued-reuse-"));
+  const databasePath = join(directory, "state.db");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+
+  try {
+    const original = state.enqueueQueuedTurn({
+      body: "original body",
+      contextToken: "context-original",
+      createdAtMs: 1,
+      dedupeKey: "dedupe-original",
+      threadId: "thread-original",
+    });
+    const originalLease = leases.tryAcquire({
+      createdAtMs: 2,
+      instanceId: "bridge-original",
+      operationId: "operation-original",
+      owner: "bridge",
+      threadId: original.threadId,
+      turnId: null,
+    });
+    assert.equal(originalLease.acquired, true);
+    if (!originalLease.acquired) assert.fail("expected original lease");
+    assert.equal(leases.release(originalLease.lease), true);
+    assert.ok(
+      state.rejectQueuedTurnWithOutbox({
+        dedupeKey: original.dedupeKey,
+        queuedTurnId: original.id,
+        threadId: original.threadId,
+        outbox: {
+          body: "original removed",
+          clientId: "queued-original-removed",
+          contextToken: original.contextToken,
+          createdAtMs: 3,
+          targetUserId: "wechat-user",
+        },
+      }),
+    );
+
+    const replacement = state.enqueueQueuedTurn({
+      body: "replacement body",
+      contextToken: "context-replacement",
+      createdAtMs: 4,
+      dedupeKey: "dedupe-replacement",
+      threadId: "thread-replacement",
+    });
+    assert.equal(replacement.id, original.id);
+    const replacementLease = leases.tryAcquire({
+      createdAtMs: 5,
+      instanceId: "bridge-replacement",
+      operationId: "operation-replacement",
+      owner: "bridge",
+      threadId: replacement.threadId,
+      turnId: null,
+    });
+    assert.equal(replacementLease.acquired, true);
+    if (!replacementLease.acquired) assert.fail("expected replacement lease");
+
+    assert.equal(
+      state.rejectQueuedTurnAndReleaseLeaseWithOutbox({
+        dedupeKey: original.dedupeKey,
+        lease: originalLease.lease,
+        queuedTurnId: original.id,
+        threadId: original.threadId,
+        outbox: {
+          body: "stale rejection",
+          clientId: "queued-stale-rejection",
+          contextToken: original.contextToken,
+          createdAtMs: 6,
+          targetUserId: "wechat-user",
+        },
+      }),
+      null,
+    );
+    assert.deepEqual(
+      state.promoteQueuedTurnWithLease({
+        contextToken: original.contextToken,
+        createdAtMs: 7,
+        dedupeKey: original.dedupeKey,
+        lease: originalLease.lease,
+        maxActiveDispatches: 3,
+        operationId: originalLease.lease.operationId,
+        queuedTurnId: original.id,
+        threadId: original.threadId,
+      }),
+      { kind: "stale" },
+    );
+    assert.deepEqual(state.peekQueuedTurn(replacement.threadId), replacement);
+    assert.deepEqual(
+      leases.getLease(replacement.threadId),
+      replacementLease.lease,
+    );
+    assert.equal(state.getOutbox("queued-stale-rejection"), null);
+
+    const promoted = state.promoteQueuedTurnWithLease({
+      contextToken: replacement.contextToken,
+      createdAtMs: 8,
+      dedupeKey: replacement.dedupeKey,
+      lease: replacementLease.lease,
+      maxActiveDispatches: 3,
+      operationId: replacementLease.lease.operationId,
+      queuedTurnId: replacement.id,
+      threadId: replacement.threadId,
+    });
+    assert.equal(promoted.kind, "promoted");
+    assert.deepEqual(
+      promoted.kind === "promoted"
+        ? {
+            body: promoted.dispatch.body,
+            dedupeKey: promoted.dispatch.dedupeKey,
+            threadId: promoted.dispatch.threadId,
+          }
+        : null,
+      {
+        body: replacement.body,
+        dedupeKey: replacement.dedupeKey,
+        threadId: replacement.threadId,
+      },
+    );
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("inbound rejection releases only its exact lease in the same transaction", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-inbound-rejection-"));
+  const databasePath = join(directory, "state.db");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const accountId = "bot-inbound-rejection";
+  const controllerUserId = "controller-inbound-rejection";
+
+  try {
+    state.bindController({ accountId, boundAtMs: 1, userId: controllerUserId });
+    state.acceptInboundBatch({
+      accountId,
+      controllerUserId,
+      messages: [
+        {
+          body: "first message",
+          contextToken: "context-first",
+          messageId: "message-first",
+          receivedAtMs: 1,
+        },
+      ],
+      nextCursor: "cursor-first",
+      updatedAtMs: 1,
+    });
+    const firstLease = leases.tryAcquire({
+      createdAtMs: 2,
+      instanceId: "bridge-first",
+      operationId: "operation-first",
+      owner: "bridge",
+      threadId: "thread-first",
+      turnId: null,
+    });
+    assert.equal(firstLease.acquired, true);
+    if (!firstLease.acquired) assert.fail("expected first lease");
+
+    const rejected = state.rejectInboundMessageAndReleaseLeaseWithOutbox({
+      accountId,
+      controllerUserId,
+      lease: firstLease.lease,
+      messageId: "message-first",
+      outbox: {
+        body: "resume failed",
+        clientId: "inbound-first-failed",
+        contextToken: "context-first",
+        createdAtMs: 3,
+        targetUserId: controllerUserId,
+      },
+    });
+    assert.ok(rejected);
+    assert.equal(rejected.status, "pending");
+    assert.equal(leases.getLease("thread-first"), null);
+    assert.equal(state.listInboundMessages()[0]?.body, null);
+    assert.equal(state.getOutbox("inbound-first-failed")?.body, "resume failed");
+
+    const staleLease = leases.tryAcquire({
+      createdAtMs: 4,
+      instanceId: "bridge-stale",
+      operationId: "operation-stale",
+      owner: "bridge",
+      threadId: "thread-first",
+      turnId: null,
+    });
+    assert.equal(staleLease.acquired, true);
+    if (!staleLease.acquired) assert.fail("expected stale lease");
+    assert.equal(leases.release(staleLease.lease), true);
+    const replacementLease = leases.tryAcquire({
+      createdAtMs: 5,
+      instanceId: "bridge-replacement",
+      operationId: "operation-replacement",
+      owner: "bridge",
+      threadId: "thread-first",
+      turnId: null,
+    });
+    assert.equal(replacementLease.acquired, true);
+    if (!replacementLease.acquired) assert.fail("expected replacement lease");
+    assert.deepEqual(
+      state.admitInboundDispatchWithLease({
+        accountId,
+        body: "first message",
+        contextToken: "context-first",
+        controllerUserId,
+        createdAtMs: 4,
+        dedupeKey: `${accountId}/${controllerUserId}/message-first`,
+        lease: staleLease.lease,
+        maxActiveDispatches: 3,
+        messageId: "message-first",
+        operationId: "operation-stale",
+        threadId: "thread-first",
+      }),
+      { kind: "terminal" },
+    );
+    assert.deepEqual(
+      leases.getLease("thread-first"),
+      replacementLease.lease,
+    );
+    assert.equal(state.getDispatchIntent("operation-stale"), null);
+    assert.equal(
+      state.rejectInboundMessageAndReleaseLeaseWithOutbox({
+        accountId,
+        controllerUserId,
+        lease: staleLease.lease,
+        messageId: "message-first",
+        outbox: {
+          body: "stale failure must not be sent",
+          clientId: "inbound-stale-failed",
+          contextToken: "context-first",
+          createdAtMs: 5,
+          targetUserId: controllerUserId,
+        },
+      }),
+      null,
+    );
+    assert.deepEqual(
+      leases.getLease("thread-first"),
+      replacementLease.lease,
+    );
+    assert.equal(state.getOutbox("inbound-stale-failed"), null);
+    assert.equal(leases.release(replacementLease.lease), true);
+
+    state.acceptInboundBatch({
+      accountId,
+      controllerUserId,
+      messages: [
+        {
+          body: "second message",
+          contextToken: "context-second",
+          messageId: "message-second",
+          receivedAtMs: 4,
+        },
+      ],
+      nextCursor: "cursor-second",
+      updatedAtMs: 4,
+    });
+    const secondLease = leases.tryAcquire({
+      createdAtMs: 5,
+      instanceId: "bridge-second",
+      operationId: "operation-second",
+      owner: "bridge",
+      threadId: "thread-second",
+      turnId: null,
+    });
+    assert.equal(secondLease.acquired, true);
+    if (!secondLease.acquired) assert.fail("expected second lease");
+
+    assert.throws(
+      () =>
+        state.rejectInboundMessageAndReleaseLeaseWithOutbox({
+          accountId,
+          controllerUserId,
+          lease: { ...secondLease.lease, operationId: "wrong-operation" },
+          messageId: "message-second",
+          outbox: {
+            body: "must roll back",
+            clientId: "inbound-second-failed",
+            contextToken: "context-second",
+            createdAtMs: 6,
+            targetUserId: controllerUserId,
+          },
+        }),
+      /lost lease ownership/u,
+    );
+    assert.deepEqual(leases.getLease("thread-second"), secondLease.lease);
+    assert.equal(
+      state
+        .listInboundMessages()
+        .find(({ messageId }) => messageId === "message-second")?.body,
+      "second message",
+    );
+    assert.equal(state.getOutbox("inbound-second-failed"), null);
+
+    const admitted = state.admitInboundDispatchWithLease({
+      accountId,
+      body: "second message",
+      contextToken: "context-second",
+      controllerUserId,
+      createdAtMs: 7,
+      dedupeKey: `${accountId}/${controllerUserId}/message-second`,
+      lease: secondLease.lease,
+      maxActiveDispatches: 3,
+      messageId: "message-second",
+      operationId: "operation-second",
+      threadId: "thread-second",
+    });
+    assert.equal(admitted.kind, "created");
+    const lateRejectLease = leases.tryAcquire({
+      createdAtMs: 8,
+      instanceId: "bridge-late-reject",
+      operationId: "operation-late-reject",
+      owner: "bridge",
+      threadId: "thread-late-reject",
+      turnId: null,
+    });
+    assert.equal(lateRejectLease.acquired, true);
+    if (!lateRejectLease.acquired) assert.fail("expected late rejection lease");
+    assert.equal(
+      state.rejectInboundMessageAndReleaseLeaseWithOutbox({
+        accountId,
+        controllerUserId,
+        lease: lateRejectLease.lease,
+        messageId: "message-second",
+        outbox: {
+          body: "must not be sent",
+          clientId: "inbound-late-failed",
+          contextToken: "context-second",
+          createdAtMs: 9,
+          targetUserId: controllerUserId,
+        },
+      }),
+      null,
+    );
+    assert.equal(leases.getLease("thread-late-reject"), null);
+    assert.deepEqual(leases.getLease("thread-second"), secondLease.lease);
+    assert.equal(
+      state.getDispatchIntent("operation-second")?.dedupeKey,
+      `${accountId}/${controllerUserId}/message-second`,
+    );
+    assert.equal(state.getOutbox("inbound-late-failed"), null);
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("changing the session timeout immediately recalculates an active binding", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-timeout-"));
   const state = new SqliteState(join(directory, "state.db"));
@@ -1310,9 +1689,30 @@ test("guarded threads include only live WeChat routing and work", () => {
 
 test("dispatch admission cannot bypass a thread queue or promote a non-head turn", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-fifo-admission-"));
-  const state = new SqliteState(join(directory, "state.db"));
+  const databasePath = join(directory, "state.db");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
 
   try {
+    state.bindController({
+      accountId: "bot-fifo",
+      boundAtMs: 1,
+      userId: "controller-fifo",
+    });
+    state.acceptInboundBatch({
+      accountId: "bot-fifo",
+      controllerUserId: "controller-fifo",
+      messages: [
+        {
+          body: "newer direct request",
+          contextToken: "ctx-newer",
+          messageId: "message-newer",
+          receivedAtMs: 3,
+        },
+      ],
+      nextCursor: "cursor-newer",
+      updatedAtMs: 3,
+    });
     const first = state.enqueueQueuedTurn({
       body: "first",
       contextToken: "ctx-first",
@@ -1327,38 +1727,84 @@ test("dispatch admission cannot bypass a thread queue or promote a non-head turn
       dedupeKey: "fifo-second",
       threadId: "thread-fifo",
     });
+    const acquired = leases.tryAcquire({
+      createdAtMs: 3,
+      instanceId: "bridge-fifo",
+      operationId: "fifo-newer-operation",
+      owner: "bridge",
+      threadId: "thread-fifo",
+      turnId: null,
+    });
+    assert.equal(acquired.acquired, true);
+    if (!acquired.acquired) assert.fail("expected FIFO admission lease");
 
+    const admission = state.admitInboundDispatchWithLease({
+      accountId: "bot-fifo",
+      body: "newer direct request",
+      contextToken: "ctx-newer",
+      controllerUserId: "controller-fifo",
+      createdAtMs: 3,
+      dedupeKey: "fifo-newer",
+      lease: acquired.lease,
+      maxActiveDispatches: 3,
+      messageId: "message-newer",
+      operationId: "fifo-newer-operation",
+      threadId: "thread-fifo",
+    });
+    assert.equal(admission.kind, "queued");
     assert.equal(
-      state.tryCreateDispatchIntent({
-        body: "newer direct request",
-        contextToken: "ctx-newer",
-        createdAtMs: 3,
-        dedupeKey: "fifo-newer",
-        maxActiveDispatches: 3,
-        operationId: "fifo-newer-operation",
-        threadId: "thread-fifo",
-      }),
-      null,
+      admission.kind === "queued" ? admission.queued.dedupeKey : null,
+      "fifo-newer",
     );
-    assert.equal(
-      state.promoteQueuedTurn({
+    assert.equal(leases.getLease("thread-fifo"), null);
+    const secondLease = leases.tryAcquire({
+      createdAtMs: 4,
+      instanceId: "bridge-fifo",
+      operationId: "fifo-second-operation",
+      owner: "bridge",
+      threadId: "thread-fifo",
+      turnId: null,
+    });
+    assert.equal(secondLease.acquired, true);
+    if (!secondLease.acquired) assert.fail("expected second FIFO lease");
+    assert.deepEqual(
+      state.promoteQueuedTurnWithLease({
         createdAtMs: 4,
+        dedupeKey: second.dedupeKey,
+        lease: secondLease.lease,
         maxActiveDispatches: 3,
         operationId: "fifo-second-operation",
         queuedTurnId: second.id,
+        threadId: second.threadId,
       }),
-      null,
+      { kind: "blocked" },
     );
-    assert.equal(
-      state.promoteQueuedTurn({
+    const firstLease = leases.tryAcquire({
+      createdAtMs: 5,
+      instanceId: "bridge-fifo",
+      operationId: "fifo-first-operation",
+      owner: "bridge",
+      threadId: "thread-fifo",
+      turnId: null,
+    });
+    assert.equal(firstLease.acquired, true);
+    if (!firstLease.acquired) assert.fail("expected first FIFO lease");
+    const promoted = state.promoteQueuedTurnWithLease({
         createdAtMs: 5,
+      dedupeKey: first.dedupeKey,
+      lease: firstLease.lease,
         maxActiveDispatches: 3,
         operationId: "fifo-first-operation",
         queuedTurnId: first.id,
-      })?.dedupeKey,
+      threadId: first.threadId,
+    });
+    assert.equal(promoted.kind, "promoted");
+    assert.equal(
+      promoted.kind === "promoted" ? promoted.dispatch.dedupeKey : null,
       "fifo-first",
     );
   } finally {
+    leases.close();
     state.close();
     rmSync(directory, { force: true, recursive: true });
   }
@@ -1902,7 +2348,7 @@ test("schema v6 deletes legacy plain-text scheduler payloads", () => {
     database.close();
 
     state = new SqliteState(path);
-    assert.equal(state.storageDiagnostics().schemaVersion, 13);
+    assert.equal(state.storageDiagnostics().schemaVersion, 14);
     assert.deepEqual(state.listQueuedTurns(), []);
     assert.equal(state.getDispatchIntent("legacy-operation"), null);
     assert.equal(state.countActiveDispatches(), 0);
@@ -2194,6 +2640,7 @@ function applyMigrations(
     "thread-permission-settings",
     "outbound-attachment-provenance",
     "transport-retention-indexes",
+    "drop-thread-permission-profiles",
   ];
   const migrations = join(process.cwd(), "src", "bridge", "migrations");
   for (let version = firstVersion; version <= lastVersion; version += 1) {

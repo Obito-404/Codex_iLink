@@ -270,21 +270,148 @@ test("an inbound image reaches Codex as local media and is cleaned after complet
   }
 });
 
+test("a losing Bridge cannot clean media accepted by another Bridge", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-media-owner-race-"));
+  const databasePath = join(directory, "state.sqlite");
+  const mediaPath = join(directory, "shared-report.pdf");
+  const winnerState = new SqliteState(databasePath);
+  const loserState = new SqliteState(databasePath);
+  const winnerLeases = new SqliteTurnLeaseStore(databasePath);
+  let loserCleanupCalls = 0;
+  let winnerStartCalls = 0;
+  let releaseLoserResolution: () => void = () => {};
+  let reportLoserResolutionStarted: () => void = () => {};
+  const loserResolutionGate = new Promise<void>((resolve) => {
+    releaseLoserResolution = resolve;
+  });
+  const loserResolutionStarted = new Promise<void>((resolve) => {
+    reportLoserResolutionStarted = resolve;
+  });
+  winnerState.bindController({
+    accountId: "bot-a",
+    boundAtMs: 1,
+    userId: "controller-a",
+  });
+
+  const loserBridge = new BridgeEngine({
+    ilink: {
+      async sendText() {
+        assert.fail("the duplicate loser must not reply");
+      },
+    },
+    media: {
+      async cleanup() {
+        loserCleanupCalls += 1;
+        rmSync(mediaPath, { force: true });
+      },
+      async resolve() {
+        reportLoserResolutionStarted();
+        await loserResolutionGate;
+        throw new InboundMediaError(
+          "DOWNLOAD_FAILED",
+          "the duplicate preparation lost its download",
+        );
+      },
+    },
+    newId: () => "media-loser-client",
+    now: () => 7_100,
+    session,
+    state: loserState,
+  });
+  const winnerBridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-media-winner",
+    codex: {
+      async resumeThread(threadId) {
+        return { thread: { id: threadId } };
+      },
+      async startTurn(input) {
+        winnerStartCalls += 1;
+        assert.equal(input.attachments?.[0]?.path, mediaPath);
+        assert.equal(existsSync(mediaPath), true);
+        return { turn: { id: "turn-media-owner-race" } };
+      },
+    },
+    ilink: {
+      async sendText() {
+        assert.fail("a successful media dispatch has no immediate reply");
+      },
+    },
+    leases: winnerLeases,
+    mainThreadId: "thread-main",
+    media: {
+      async cleanup() {},
+      async resolve() {
+        writeFileSync(mediaPath, "accepted media");
+        return {
+          byteLength: 14,
+          displayName: "report.pdf",
+          kind: "file" as const,
+          path: mediaPath,
+          status: "stored" as const,
+        };
+      },
+    },
+    newId: () => "media-owner-operation",
+    now: () => 7_100,
+    session,
+    state: winnerState,
+  });
+  const message = fileMessage(76, "read the shared file");
+  const loserIngest = loserBridge.ingestBatch({
+    cursor: "cursor-media-loser",
+    messages: [message],
+  });
+
+  try {
+    await loserResolutionStarted;
+    assert.deepEqual(
+      await winnerBridge.ingestBatch({
+        cursor: "cursor-media-winner",
+        messages: [message],
+      }),
+      { accepted: 1, sent: 0 },
+    );
+    assert.equal(winnerStartCalls, 1);
+    assert.equal(existsSync(mediaPath), true);
+
+    releaseLoserResolution();
+    assert.deepEqual(await loserIngest, { accepted: 0, sent: 0 });
+    assert.equal(loserCleanupCalls, 0);
+    assert.equal(existsSync(mediaPath), true);
+  } finally {
+    releaseLoserResolution();
+    await loserIngest.catch(() => undefined);
+    loserBridge.close();
+    winnerBridge.close();
+    winnerLeases.close();
+    loserState.close();
+    winnerState.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("media survives FIFO queuing without a second CDN download", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-media-queue-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
-  let resumeFails = true;
   let downloads = 0;
   const started: Array<Record<string, unknown>> = [];
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  const blockingLease = leases.tryAcquire({
+    createdAtMs: 7_999,
+    instanceId: "desktop",
+    operationId: "desktop-media-queue",
+    owner: "desktop",
+    threadId: "thread-main",
+    turnId: "desktop-media-queue",
+  });
+  if (!blockingLease.acquired) assert.fail("expected Desktop lease");
 
   const bridge = new BridgeEngine({
     bridgeInstanceId: "bridge-instance",
     codex: {
       async resumeThread(threadId) {
-        if (resumeFails) throw new Error("temporary resume failure");
         return { thread: { id: threadId } };
       },
       async startTurn(input) {
@@ -351,7 +478,7 @@ test("media survives FIFO queuing without a second CDN download", async () => {
     );
     assert.equal(downloads, 1);
 
-    resumeFails = false;
+    assert.equal(leases.release(blockingLease.lease), true);
     await bridge.scheduleQueuedTurns();
     assert.equal(downloads, 1);
     assert.deepEqual(started[0], {
@@ -401,11 +528,20 @@ test("queued media survives a Bridge restart and reaches App Server before clean
       boundAtMs: 1,
       userId: "controller-a",
     });
+    const blockingLease = firstLeases.tryAcquire({
+      createdAtMs: 9_999,
+      instanceId: "desktop",
+      operationId: "desktop-media-restart",
+      owner: "desktop",
+      threadId: "thread-main",
+      turnId: "desktop-media-restart",
+    });
+    if (!blockingLease.acquired) assert.fail("expected Desktop lease");
     const firstBridge = new BridgeEngine({
       bridgeInstanceId: "bridge-before-restart",
       codex: {
-        async resumeThread() {
-          throw new Error("queue until restart");
+        async resumeThread(threadId) {
+          return { thread: { id: threadId } };
         },
         async startTurn() {
           assert.fail("the first Bridge must leave the media queued");
@@ -462,6 +598,7 @@ test("queued media survives a Bridge restart and reaches App Server before clean
       assert.ok(storedPath);
       assert.deepEqual(readFileSync(storedPath), plaintext);
       assert.equal(downloads, 1);
+      assert.equal(firstLeases.release(blockingLease.lease), true);
     } finally {
       firstBridge.close();
       firstLeases.close();
@@ -4026,7 +4163,7 @@ test("Bridge starts at most three turns across different shared threads", async 
   }
 });
 
-test("a resume failure keeps the inbound turn safely queued without calling startTurn", async () => {
+test("a resume failure atomically reports not executed without leaving recoverable input", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-resume-failure-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -4047,8 +4184,8 @@ test("a resume failure keeps the inbound turn safely queued without calling star
       },
     },
     ilink: {
-      async sendText(input) {
-        return { accepted: true, clientId: input.clientId };
+      async sendText() {
+        throw new Error("temporary iLink delivery failure");
       },
     },
     leases,
@@ -4066,10 +4203,21 @@ test("a resume failure keeps the inbound turn safely queued without calling star
     });
     assert.equal(startCalls, 0);
     assert.equal(state.countActiveDispatches(), 0);
-    assert.equal(
-      state.peekQueuedTurn("thread-main")?.body,
-      turnBody("retry only when safe"),
-    );
+    assert.equal(state.countQueuedTurns(), 0);
+    assert.equal(state.listInboundMessages()[0]?.body, null);
+    assert.deepEqual(state.listPendingOutbox(), [
+      {
+        body: "❌ Codex 无法恢复目标任务，本条消息未执行。请在 Codex Desktop 确认任务可打开后重发。",
+        clientId: "codex-ilink:inbound:bot-a:61:reply",
+        confirmedAtMs: null,
+        contextToken: "ctx-61",
+        createdAtMs: 6_000,
+        status: "pending",
+        targetUserId: "controller-a",
+      },
+    ]);
+    await bridge.recoverPendingWork();
+    assert.equal(startCalls, 0);
     assert.equal(
       leases.tryAcquire({
         createdAtMs: 6_001,
@@ -4085,6 +4233,525 @@ test("a resume failure keeps the inbound turn safely queued without calling star
     bridge.close();
     leases.close();
     state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a stale in-memory inbound cannot run after another Bridge rejects it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-stale-inbound-"));
+  const databasePath = join(directory, "state.sqlite");
+  const staleState = new SqliteState(databasePath);
+  const rejectingState = new SqliteState(databasePath);
+  const staleLeases = new SqliteTurnLeaseStore(databasePath);
+  const rejectingLeases = new SqliteTurnLeaseStore(databasePath);
+  const rejectedReplies: SendInput[] = [];
+  const staleReplies: SendInput[] = [];
+  let staleStartCalls = 0;
+  let releaseStale: () => void = () => {};
+  let reportStalePaused: () => void = () => {};
+  const staleGate = new Promise<void>((resolve) => {
+    releaseStale = resolve;
+  });
+  const stalePaused = new Promise<void>((resolve) => {
+    reportStalePaused = resolve;
+  });
+  staleState.bindController({
+    accountId: "bot-a",
+    boundAtMs: 1,
+    userId: "controller-a",
+  });
+
+  const staleBridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-stale",
+    codex: {
+      async resumeThread(threadId) {
+        return { thread: { id: threadId } };
+      },
+      async startTurn() {
+        staleStartCalls += 1;
+        return { turn: { id: "must-not-start" } };
+      },
+    },
+    ilink: {
+      async sendText(input) {
+        staleReplies.push(input);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases: staleLeases,
+    mainThreadId: "thread-main",
+    newId: () => "stale-operation",
+    now: () => 7_000,
+    session,
+    state: staleState,
+  });
+  const rejectingBridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-rejecting",
+    codex: {
+      async resumeThread() {
+        throw new Error("App Server temporarily unavailable");
+      },
+      async startTurn() {
+        assert.fail("the rejecting Bridge must not start a turn");
+      },
+    },
+    ilink: {
+      async sendText(input) {
+        rejectedReplies.push(input);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases: rejectingLeases,
+    mainThreadId: "thread-main",
+    newId: () => "rejecting-operation",
+    now: () => 7_000,
+    session,
+    state: rejectingState,
+  });
+  const staleIngest = staleBridge.ingestBatch({
+    beforeAcceptedMessage: async () => {
+      reportStalePaused();
+      await staleGate;
+    },
+    cursor: "cursor-stale-inbound",
+    messages: [textMessage(62, "run only once")],
+  });
+
+  try {
+    await stalePaused;
+    await rejectingBridge.recoverPendingWork();
+    assert.equal(rejectingState.listInboundMessages()[0]?.body, null);
+    assert.equal(rejectedReplies.length, 1);
+    assert.match(rejectedReplies[0]?.text ?? "", /本条消息未执行/u);
+
+    releaseStale();
+    assert.deepEqual(await staleIngest, { accepted: 1, sent: 0 });
+    assert.equal(staleStartCalls, 0);
+    assert.equal(staleReplies.length, 0);
+    assert.equal(staleState.countActiveDispatches(), 0);
+    assert.equal(staleState.countQueuedTurns(), 0);
+    assert.equal(staleLeases.getLease("thread-main"), null);
+  } finally {
+    releaseStale();
+    await staleIngest.catch(() => undefined);
+    staleBridge.close();
+    rejectingBridge.close();
+    staleLeases.close();
+    rejectingLeases.close();
+    staleState.close();
+    rejectingState.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a stale in-memory control cannot execute after another Bridge claims it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-stale-control-"));
+  const databasePath = join(directory, "state.sqlite");
+  const staleState = new SqliteState(databasePath);
+  const claimingState = new SqliteState(databasePath);
+  const replies: SendInput[] = [];
+  let staleStartThreadCalls = 0;
+  let claimingStartThreadCalls = 0;
+  let releaseStale: () => void = () => {};
+  let reportStalePaused: () => void = () => {};
+  const staleGate = new Promise<void>((resolve) => {
+    releaseStale = resolve;
+  });
+  const stalePaused = new Promise<void>((resolve) => {
+    reportStalePaused = resolve;
+  });
+  staleState.bindController({
+    accountId: "bot-a",
+    boundAtMs: 1,
+    userId: "controller-a",
+  });
+
+  const staleBridge = new BridgeEngine({
+    codex: {
+      async startTurn() {
+        assert.fail("a new-session control must not start a turn");
+      },
+      async startThread() {
+        staleStartThreadCalls += 1;
+        return { thread: { id: "thread-stale-control" } };
+      },
+    },
+    ilink: {
+      async sendText() {
+        assert.fail("the stale control owner must not reply");
+      },
+    },
+    inboxDirectory: "D:\\Codex_iLink\\inbox",
+    newId: () => "stale-control-client",
+    now: () => 7_200,
+    session,
+    state: staleState,
+  });
+  const claimingBridge = new BridgeEngine({
+    codex: {
+      async startTurn() {
+        assert.fail("a new-session control must not start a turn");
+      },
+      async startThread() {
+        claimingStartThreadCalls += 1;
+        return { thread: { id: "thread-claimed-control" } };
+      },
+    },
+    ilink: {
+      async sendText(input) {
+        replies.push(input);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    inboxDirectory: "D:\\Codex_iLink\\inbox",
+    newId: () => "claiming-control-client",
+    now: () => 7_200,
+    session,
+    state: claimingState,
+  });
+  const staleIngest = staleBridge.ingestBatch({
+    beforeAcceptedMessage: async () => {
+      reportStalePaused();
+      await staleGate;
+    },
+    cursor: "cursor-stale-control",
+    messages: [textMessage(77, "new")],
+  });
+
+  try {
+    await stalePaused;
+    await claimingBridge.recoverPendingWork();
+    assert.equal(claimingStartThreadCalls, 1);
+    assert.equal(replies.length, 1);
+    assert.equal(claimingState.listInboundMessages()[0]?.body, null);
+
+    releaseStale();
+    assert.deepEqual(await staleIngest, { accepted: 1, sent: 0 });
+    assert.equal(staleStartThreadCalls, 0);
+    assert.equal(claimingStartThreadCalls, 1);
+    assert.equal(replies.length, 1);
+  } finally {
+    releaseStale();
+    await staleIngest.catch(() => undefined);
+    staleBridge.close();
+    claimingBridge.close();
+    staleState.close();
+    claimingState.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("only the Bridge that claims an ambiguous route may reply or clean media", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-ambiguous-owner-"));
+  const databasePath = join(directory, "state.sqlite");
+  const staleState = new SqliteState(databasePath);
+  const claimingState = new SqliteState(databasePath);
+  const staleLeases = new SqliteTurnLeaseStore(databasePath);
+  const claimingLeases = new SqliteTurnLeaseStore(databasePath);
+  const replies: SendInput[] = [];
+  let staleCleanupCalls = 0;
+  let claimingCleanupCalls = 0;
+  let releaseStale: () => void = () => {};
+  let reportStalePaused: () => void = () => {};
+  const staleGate = new Promise<void>((resolve) => {
+    releaseStale = resolve;
+  });
+  const stalePaused = new Promise<void>((resolve) => {
+    reportStalePaused = resolve;
+  });
+  staleState.bindController({
+    accountId: "bot-a",
+    boundAtMs: 1,
+    userId: "controller-a",
+  });
+  staleState.putNotificationRoute({
+    deliveredAtMs: 7_900,
+    eventId: "ambiguous-a",
+    expiresAtMs: 9_000,
+    threadId: "thread-a",
+  });
+  staleState.putNotificationRoute({
+    deliveredAtMs: 7_901,
+    eventId: "ambiguous-b",
+    expiresAtMs: 9_000,
+    threadId: "thread-b",
+  });
+  const codex = {
+    async resumeThread() {
+      assert.fail("an ambiguous route must not resume a thread");
+    },
+    async startTurn() {
+      assert.fail("an ambiguous route must not start a turn");
+    },
+  };
+  const staleBridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-ambiguous-stale",
+    codex,
+    ilink: {
+      async sendText() {
+        assert.fail("the stale ambiguous owner must not reply");
+      },
+    },
+    leases: staleLeases,
+    mainThreadId: "thread-main",
+    media: {
+      async cleanup() {
+        staleCleanupCalls += 1;
+      },
+      async resolve() {
+        assert.fail("the text-only route has no media to resolve");
+      },
+    },
+    newId: () => "ambiguous-stale-client",
+    now: () => 8_000,
+    session,
+    state: staleState,
+  });
+  const claimingBridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-ambiguous-claiming",
+    codex,
+    ilink: {
+      async sendText(input) {
+        replies.push(input);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases: claimingLeases,
+    mainThreadId: "thread-main",
+    media: {
+      async cleanup() {
+        claimingCleanupCalls += 1;
+      },
+      async resolve() {
+        assert.fail("the text-only route has no media to resolve");
+      },
+    },
+    newId: () => "ambiguous-claiming-client",
+    now: () => 8_000,
+    session,
+    state: claimingState,
+  });
+  const staleIngest = staleBridge.ingestBatch({
+    beforeAcceptedMessage: async () => {
+      reportStalePaused();
+      await staleGate;
+    },
+    cursor: "cursor-ambiguous-owner",
+    messages: [textMessage(78, "continue")],
+  });
+
+  try {
+    await stalePaused;
+    await claimingBridge.recoverPendingWork();
+    assert.equal(replies.length, 1);
+    assert.equal(claimingCleanupCalls, 1);
+
+    releaseStale();
+    assert.deepEqual(await staleIngest, { accepted: 1, sent: 0 });
+    assert.equal(replies.length, 1);
+    assert.equal(staleCleanupCalls, 0);
+    assert.equal(claimingCleanupCalls, 1);
+  } finally {
+    releaseStale();
+    await staleIngest.catch(() => undefined);
+    staleBridge.close();
+    claimingBridge.close();
+    staleLeases.close();
+    claimingLeases.close();
+    staleState.close();
+    claimingState.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a queue inserted after its blocker releases schedules without another event", async () => {
+  class ReleaseBeforeEnqueueState extends SqliteState {
+    releaseBlocker: (() => void) | null = null;
+
+    override enqueueInboundTurn(
+      input: Parameters<SqliteState["enqueueInboundTurn"]>[0],
+    ) {
+      const releaseBlocker = this.releaseBlocker;
+      this.releaseBlocker = null;
+      releaseBlocker?.();
+      return super.enqueueInboundTurn(input);
+    }
+  }
+
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-queue-wakeup-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new ReleaseBeforeEnqueueState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const started: string[] = [];
+  const sent: SendInput[] = [];
+  let nextOperation = 1;
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  const blocker = leases.tryAcquire({
+    createdAtMs: 1,
+    instanceId: "desktop",
+    operationId: "desktop-blocker",
+    owner: "desktop",
+    threadId: "thread-main",
+    turnId: "desktop-blocker",
+  });
+  assert.equal(blocker.acquired, true);
+  if (!blocker.acquired) assert.fail("expected blocker lease");
+  state.releaseBlocker = () => {
+    assert.equal(leases.release(blocker.lease), true);
+  };
+
+  const bridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      async resumeThread(threadId) {
+        return { thread: { id: threadId } };
+      },
+      async startTurn(input) {
+        started.push(input.text);
+        return { turn: { id: "turn-after-wakeup" } };
+      },
+    },
+    ilink: {
+      async sendText(input) {
+        sent.push(input);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases,
+    mainThreadId: "thread-main",
+    newId: () => `queue-wakeup-${String(nextOperation++)}`,
+    now: () => 8_000,
+    session,
+    state,
+  });
+
+  try {
+    assert.deepEqual(
+      await bridge.ingestBatch({
+        cursor: "cursor-queue-wakeup",
+        messages: [textMessage(64, "run after blocker release")],
+      }),
+      { accepted: 1, sent: 1 },
+    );
+    assert.deepEqual(sent.map(({ text }) => text), ["Queued #1"]);
+    assert.deepEqual(started, ["run after blocker release"]);
+    assert.equal(state.countQueuedTurns(), 0);
+    assert.equal(state.countActiveDispatches(), 1);
+  } finally {
+    bridge.close();
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a failed pre-dispatch owner wakes work queued behind its lease", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-owner-wakeup-"));
+  const databasePath = join(directory, "state.sqlite");
+  const ownerState = new SqliteState(databasePath);
+  const waiterState = new SqliteState(databasePath);
+  const ownerLeases = new SqliteTurnLeaseStore(databasePath);
+  const waiterLeases = new SqliteTurnLeaseStore(databasePath);
+  const started: string[] = [];
+  const queuedReplies: SendInput[] = [];
+  let ownerResumeCalls = 0;
+  let nextOwnerOperation = 1;
+  let releaseOwnerResume: () => void = () => {};
+  let reportOwnerPaused: () => void = () => {};
+  const ownerResumeGate = new Promise<void>((resolve) => {
+    releaseOwnerResume = resolve;
+  });
+  const ownerPaused = new Promise<void>((resolve) => {
+    reportOwnerPaused = resolve;
+  });
+  ownerState.bindController({
+    accountId: "bot-a",
+    boundAtMs: 1,
+    userId: "controller-a",
+  });
+
+  const ownerBridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-owner",
+    codex: {
+      async resumeThread(threadId) {
+        ownerResumeCalls += 1;
+        if (ownerResumeCalls === 1) {
+          reportOwnerPaused();
+          await ownerResumeGate;
+          throw new Error("first resume fails after waiter queues");
+        }
+        return { thread: { id: threadId } };
+      },
+      async startTurn(input) {
+        started.push(input.text);
+        return { turn: { id: "turn-owner-wakeup" } };
+      },
+    },
+    ilink: {
+      async sendText(input) {
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases: ownerLeases,
+    mainThreadId: "thread-main",
+    newId: () => `owner-operation-${String(nextOwnerOperation++)}`,
+    now: () => 9_000,
+    session,
+    state: ownerState,
+  });
+  const waiterBridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-waiter",
+    codex: {
+      async resumeThread(threadId) {
+        return { thread: { id: threadId } };
+      },
+      async startTurn() {
+        assert.fail("the waiter cannot start while the owner lease is held");
+      },
+    },
+    ilink: {
+      async sendText(input) {
+        queuedReplies.push(input);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases: waiterLeases,
+    mainThreadId: "thread-main",
+    newId: () => "waiter-operation",
+    now: () => 9_000,
+    session,
+    state: waiterState,
+  });
+  const ownerIngest = ownerBridge.ingestBatch({
+    cursor: "cursor-owner-wakeup",
+    messages: [textMessage(66, "wake queued work")],
+  });
+
+  try {
+    await ownerPaused;
+    await waiterBridge.recoverPendingWork();
+    assert.equal(waiterState.countQueuedTurns(), 1);
+    assert.equal(started.length, 0);
+    assert.deepEqual(
+      queuedReplies.map(({ text }) => text),
+      ["Queued #1"],
+    );
+
+    releaseOwnerResume();
+    assert.deepEqual(await ownerIngest, { accepted: 1, sent: 0 });
+    assert.equal(ownerResumeCalls, 2);
+    assert.deepEqual(started, ["wake queued work"]);
+    assert.equal(ownerState.countQueuedTurns(), 0);
+    assert.equal(ownerState.countActiveDispatches(), 1);
+  } finally {
+    releaseOwnerResume();
+    await ownerIngest.catch(() => undefined);
+    ownerBridge.close();
+    waiterBridge.close();
+    ownerLeases.close();
+    waiterLeases.close();
+    ownerState.close();
+    waiterState.close();
     rmSync(directory, { force: true, recursive: true });
   }
 });
@@ -4198,7 +4865,95 @@ test("startup removes an already queued turn whose thread never materialized", a
   }
 });
 
-test("a newer message cannot bypass an older turn queued after resume fails", async () => {
+test("a queued resume failure commits a durable error before delivery", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-queued-resume-failure-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  const queued = state.enqueueQueuedTurn({
+    body: turnBody("queued resume failure"),
+    contextToken: "ctx-queued-resume-failure",
+    createdAtMs: 1,
+    dedupeKey: "queued-resume-failure",
+    threadId: "thread-main",
+  });
+  const queuedClientId =
+    `codex-ilink:queued:${createHash("sha256")
+      .update(queued.dedupeKey, "utf8")
+      .digest("hex")
+      .slice(0, 32)}:resume-failed`;
+
+  const bridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      async resumeThread() {
+        throw new Error("App Server unavailable after safe retry");
+      },
+      async startTurn() {
+        assert.fail("a failed resume must not start a turn");
+      },
+    },
+    ilink: {
+      async sendText() {
+        throw new Error("temporary iLink delivery failure");
+      },
+    },
+    leases,
+    mainThreadId: "thread-main",
+    newId: () => "queued-resume-failure-operation",
+    now: () => 6_050,
+    session,
+    state,
+  });
+
+  try {
+    await bridge.scheduleQueuedTurns();
+    assert.equal(state.countQueuedTurns(), 0);
+    assert.equal(leases.getLease("thread-main"), null);
+    assert.deepEqual(state.listPendingOutbox(), [
+      {
+        body: "❌ Codex 无法恢复目标任务，本条消息未执行。请在 Codex Desktop 确认任务可打开后重发。",
+        clientId: queuedClientId,
+        confirmedAtMs: null,
+        contextToken: "ctx-queued-resume-failure",
+        createdAtMs: 6_050,
+        status: "pending",
+        targetUserId: "controller-a",
+      },
+    ]);
+
+    const reusedId = state.enqueueQueuedTurn({
+      body: turnBody("different queued resume failure"),
+      contextToken: "ctx-different-queued-resume-failure",
+      createdAtMs: 2,
+      dedupeKey: "different-queued-resume-failure",
+      threadId: "thread-main",
+    });
+    assert.equal(reusedId.id, queued.id);
+    await bridge.scheduleQueuedTurns();
+    assert.equal(state.countQueuedTurns(), 0);
+    const reusedClientId =
+      `codex-ilink:queued:${createHash("sha256")
+        .update(reusedId.dedupeKey, "utf8")
+        .digest("hex")
+        .slice(0, 32)}:resume-failed`;
+    assert.deepEqual(
+      state
+        .listPendingOutbox()
+        .map(({ clientId }) => clientId)
+        .sort(),
+      [queuedClientId, reusedClientId].sort(),
+    );
+  } finally {
+    bridge.close();
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a resume failure does not leave later messages blocked behind a stale queue", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-resume-fifo-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -4253,18 +5008,9 @@ test("a newer message cannot bypass an older turn queued after resume fails", as
       messages: [textMessage(63, "newer")],
     });
 
-    assert.deepEqual(started, []);
-    assert.deepEqual(
-      state.listQueuedTurns().map(({ body }) => body),
-      [turnBody("older"), turnBody("newer")],
-    );
-
-    await bridge.scheduleQueuedTurns();
-    assert.deepEqual(started, ["older"]);
-    assert.deepEqual(
-      state.listQueuedTurns().map(({ body }) => body),
-      [turnBody("newer")],
-    );
+    assert.deepEqual(started, ["newer"]);
+    assert.equal(resumeCalls, 2);
+    assert.deepEqual(state.listQueuedTurns(), []);
   } finally {
     bridge.close();
     leases.close();

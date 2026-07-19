@@ -57,7 +57,7 @@ export const CLI_HELP = `用法: ilink <command>
   start   在后台启动微信 Bridge
   startup 管理登录后自动启动
   status  查看 Bridge 状态
-  doctor  检查运行环境与绑定状态
+  doctor  检查运行环境、Guard、绑定与启动状态
   stop    优雅停止后台 Bridge`;
 
 export type CliIo = {
@@ -199,7 +199,9 @@ export async function runSetupInstallation(
   const startCode = await actions.start();
   if (startCode !== 0) return startCode;
 
-  io.log("安装完成。请刷新 Codex Desktop 并信任 Codex iLink Guard Hooks，然后即可在微信使用。");
+  io.log("安装完成。Codex 出于安全考虑要求人工审核 Hooks；ilink 不会自动信任或绕过审核。");
+  io.log("最后一步：刷新或重启 Codex Desktop，打开 Hooks，审核并信任 codex-ilink-probe（Codex iLink Guard）。");
+  io.log("Hook 定义变化后需要重新审核；完成信任后即可在微信使用。");
   return 0;
 }
 
@@ -247,7 +249,7 @@ export async function runCli(
 
 export type DoctorCheck = {
   detail: string;
-  level: "error" | "ok" | "warn";
+  level: "error" | "info" | "ok" | "warn";
   name: string;
 };
 
@@ -305,22 +307,35 @@ export async function collectDoctorChecks(
   }
 
   if (codexExecutable) {
+    const runCodex = dependencies.runCodex ?? runCodexCommand;
     const assessment = inspectCodexVersion(
       codexExecutable,
-      dependencies.runCodex ?? runCodexCommand,
+      runCodex,
     );
     checks.push({
       detail: assessment.detail,
       level: assessment.level,
       name: "Codex 版本",
     });
+    checks.push(inspectGuardPlugin(codexExecutable, runCodex));
   } else {
     checks.push({
       detail: "无法读取 Codex 版本：未找到 Codex Desktop 内置 codex.exe",
       level: "error",
       name: "Codex 版本",
     });
+    checks.push({
+      detail: "无法检查：未找到 Codex Desktop 内置 codex.exe",
+      level: "error",
+      name: "Codex iLink Guard",
+    });
   }
+
+  checks.push({
+    detail: "需在 Codex Desktop 的 Hooks 页面人工审核；ilink 不自动读取或写入信任状态",
+    level: "info",
+    name: "Hooks 信任",
+  });
 
   try {
     const startupStatus = (
@@ -760,7 +775,14 @@ async function startupCommand(
 async function doctorCommand(io: CliIo): Promise<number> {
   const checks = await collectDoctorChecks();
   for (const check of checks) {
-    const icon = check.level === "ok" ? "✅" : check.level === "warn" ? "⚠️" : "❌";
+    const icon =
+      check.level === "ok"
+        ? "✅"
+        : check.level === "warn"
+          ? "⚠️"
+          : check.level === "info"
+            ? "ℹ️"
+            : "❌";
     io.log(`${icon} ${check.name}: ${check.detail}`);
   }
   return checks.some((check) => check.level === "error") ? 1 : 0;
@@ -915,6 +937,43 @@ function requireLocalAppData(): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function inspectGuardPlugin(
+  codexExecutable: string,
+  runCodex: CodexVersionCommandRunner,
+): DoctorCheck {
+  let result: CodexCommandResult;
+  try {
+    result = runCodex(codexExecutable, ["plugin", "list"]);
+  } catch (error) {
+    return {
+      detail: `无法读取插件状态：${errorMessage(error)}`,
+      level: "error",
+      name: "Codex iLink Guard",
+    };
+  }
+  if (result.status !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim();
+    return {
+      detail: detail ? `无法读取插件状态：${detail}` : "无法读取插件状态",
+      level: "error",
+      name: "Codex iLink Guard",
+    };
+  }
+  const version = installedGuardVersion(result.stdout);
+  if (version) {
+    return {
+      detail: `已安装并启用 ${version}`,
+      level: "ok",
+      name: "Codex iLink Guard",
+    };
+  }
+  return {
+    detail: "未安装或未启用，请运行 ilink setup",
+    level: "error",
+    name: "Codex iLink Guard",
+  };
 }
 
 

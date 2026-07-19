@@ -68,13 +68,13 @@ _Avoid_: 插话、并发回合、改变当前回合
 共享会话自身的 Sandbox、审批策略和审批者设置；它属于会话，而不属于微信入口。
 _Avoid_: 微信权限、远程权限覆盖
 
-**权限 Profile 选择**:
-微信控制者为当前任务选择 Codex `permissionProfile/list` 实际返回且允许的原生 Profile。对三个内置模式，Bridge 同时设置并保存约定的审批策略和审批者；自定义 Profile 只转交 Profile ID，最终权限判定仍由 Codex 完成。
-_Avoid_: Bridge 拼装自定义 Sandbox、猜测自定义 Profile 策略、修改 Desktop 全局权限、跨任务权限继承
+**权限只读查询**:
+`perm` 对当前绑定任务执行无覆盖恢复，显示 Codex 回读的 Profile、审批策略、审批者和 Sandbox。权限只能在 Codex Desktop 中修改；同一项目的不同任务可以拥有不同权限，Bridge 不提供远程编辑入口。
+_Avoid_: `permissionProfile/list`、权限编号选择、Bridge 提交权限字段、拼装自定义 Sandbox、跨任务权限继承
 
-**内置权限组合**:
-只读和工作区使用 `on-request + user`；完全访问使用 `danger-full-access + never + user`。只有微信控制者明确选择后才写入当前共享会话，旧版仅含 Profile ID 的记录不会自动补成更宽松的审批策略。
-_Avoid_: 单独把 Sandbox 当成完全访问、旧状态静默扩权、跨会话自动套用
+**权限事实源**:
+Codex 持久化任务的当前权限设置是唯一事实源；权限属于任务/会话，而不是项目或微信入口。既有任务恢复不携带权限覆盖字段；Codex 升级后原生 Profile 的含义自然随 Codex 改变。
+_Avoid_: SQLite 权限快照、重启回灌、根据 Profile 名称推断审批策略
 
 **单次审批**:
 某个微信回合为一项具体受限操作发出的临时授权请求。

@@ -111,6 +111,60 @@ test("doctor reports Codex version as a separate compatibility check", async () 
   );
 });
 
+test("doctor reports an installed and enabled Guard without claiming hook trust", async () => {
+  const checks = await collectDoctorChecks({}, {
+    findCodexExecutable: () => "D:\\Codex\\codex.exe",
+    inspectStartupTask: () => "disabled",
+    runCodex: (_executable, args) =>
+      args[0] === "--version"
+        ? { status: 0, stderr: "", stdout: "codex-cli 0.144.2\n" }
+        : {
+            status: 0,
+            stderr: "",
+            stdout:
+              "PLUGIN STATUS VERSION PATH\n" +
+              "codex-ilink-probe@codex-ilink installed, enabled 0.1.3 C:\\plugin\n",
+          },
+  });
+
+  assert.deepEqual(
+    checks.find((check) => check.name === "Codex iLink Guard"),
+    {
+      detail: "已安装并启用 0.1.3",
+      level: "ok",
+      name: "Codex iLink Guard",
+    },
+  );
+  assert.deepEqual(
+    checks.find((check) => check.name === "Hooks 信任"),
+    {
+      detail: "需在 Codex Desktop 的 Hooks 页面人工审核；ilink 不自动读取或写入信任状态",
+      level: "info",
+      name: "Hooks 信任",
+    },
+  );
+});
+
+test("doctor rejects a missing or disabled Guard", async () => {
+  const checks = await collectDoctorChecks({}, {
+    findCodexExecutable: () => "D:\\Codex\\codex.exe",
+    inspectStartupTask: () => "disabled",
+    runCodex: (_executable, args) =>
+      args[0] === "--version"
+        ? { status: 0, stderr: "", stdout: "codex-cli 0.144.2\n" }
+        : { status: 0, stderr: "", stdout: "PLUGIN STATUS VERSION PATH\n" },
+  });
+
+  assert.deepEqual(
+    checks.find((check) => check.name === "Codex iLink Guard"),
+    {
+      detail: "未安装或未启用，请运行 ilink setup",
+      level: "error",
+      name: "Codex iLink Guard",
+    },
+  );
+});
+
 test("doctor reports enabled login startup as healthy", async () => {
   const checks = await collectDoctorChecks({}, {
     findCodexExecutable: () => "D:\\Codex\\codex.exe",

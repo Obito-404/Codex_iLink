@@ -93,6 +93,9 @@ test("the release workflow serializes dist-tags and verifies public assets", () 
   assert.match(workflow, /--source-digest \$env:GITHUB_SHA/u);
   assert.match(workflow, /已公开稳定版的 Authenticode 签名无效/u);
   assert.match(workflow, /GitHub Release 已公开但 npm 版本不存在/u);
+  assert.match(workflow, /这是用于正式验收的预发布候选版/u);
+  assert.match(workflow, /Desktop → 微信 → 同会话 → Desktop 完整端到端闭环/u);
+  assert.match(workflow, /\$releaseArgs \+= @\("--notes", \$previewNotes\)/u);
   assert.ok(advanceGate >= 0 && advanceGate < publish);
 });
 
@@ -127,7 +130,7 @@ test("the workflow CLI reads package.json and writes typed GitHub outputs", () =
       env: {
         ...process.env,
         GITHUB_OUTPUT: output,
-        RELEASE_TAG: "v0.1.0-beta.1",
+        RELEASE_TAG: "v0.1.0-rc.1",
       },
       windowsHide: true,
     });
@@ -136,8 +139,8 @@ test("the workflow CLI reads package.json and writes typed GitHub outputs", () =
     assert.equal(
       readFileSync(output, "utf8"),
       [
-        "version=0.1.0-beta.1",
-        "tag=v0.1.0-beta.1",
+        "version=0.1.0-rc.1",
+        "tag=v0.1.0-rc.1",
         "github_prerelease=true",
         "npm_tag=next",
         "requires_authenticode=false",

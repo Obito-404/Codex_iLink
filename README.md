@@ -39,7 +39,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Obi
 
 ```powershell
 $installer = irm https://raw.githubusercontent.com/Obito-404/Codex_iLink/main/scripts/install.ps1
-& ([scriptblock]::Create($installer)) -Channel preview -Version 0.1.0-beta.1
+& ([scriptblock]::Create($installer)) -Channel preview -Version 0.1.0-rc.1
 ```
 
 预览版仍会校验 SHA-256；若未签名会明确警告。版本号必须是 GitHub 上实际存在的 SemVer 预发布版本，且不带 `v` 前缀。

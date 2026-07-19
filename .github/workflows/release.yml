@@ -135,10 +135,30 @@ jobs:
               throw "无法识别 GitHub Release draft 状态：$draftState"
             }
           } else {
+            $previewNotes = @"
+          > [!WARNING]
+          > 这是用于正式验收的预发布候选版，不代表稳定版验收已经完成。
+
+          尚待外部实机确认：
+
+          - Windows 10/11 x64 干净安装、升级与卸载；
+          - Codex Desktop 最低版本、另一已验证版本及更高版本提示；
+          - 真实微信绑定、第二账号和群聊隔离；
+          - Desktop/Bridge 共享会话与并发仲裁；
+          - 主动通知、Outbox、断网与重启恢复；
+          - Bridge/Desktop 审批边界、重试与超时；
+          - 图片、文件、视频、语音及出站附件；
+          - Desktop → 微信 → 同会话 → Desktop 完整端到端闭环。
+
+          完整标准见 `docs/release-acceptance.md`。预览版可能未签名，Windows 可能显示未知发布者。
+          "@
             $releaseArgs = @(
               "release", "create", $tag, $exe, $checksum,
               "--draft", "--generate-notes", "--verify-tag"
             )
+            if ("${{ steps.policy.outputs.github_prerelease }}" -eq "true") {
+              $releaseArgs += @("--notes", $previewNotes)
+            }
             & gh @releaseArgs
             if ($LASTEXITCODE -ne 0) {
               throw "GitHub Release 创建失败。"

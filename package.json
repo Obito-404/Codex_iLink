@@ -1,6 +1,6 @@
 {
   "name": "codex-ilink",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-rc.1",
   "description": "Use WeChat as a secure remote entry point to local Codex sessions on Windows.",
   "author": "Obito <tipturengufersan@gmail.com>",
   "license": "MIT",

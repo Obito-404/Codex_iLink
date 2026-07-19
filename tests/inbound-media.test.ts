@@ -568,8 +568,8 @@ test("does not expose CDN URLs, query credentials, or AES keys in errors", async
     (error: unknown) => {
       assert.ok(error instanceof InboundMediaError);
       assert.equal(error.code, "HTTP_ERROR");
-      assert.doesNotMatch(error.message, new RegExp(secretQuery));
-      assert.doesNotMatch(error.message, new RegExp(secretKey));
+      assert.equal(error.message.includes(secretQuery), false);
+      assert.equal(error.message.includes(secretKey), false);
       assert.doesNotMatch(error.message, /novac2c/u);
       return true;
     },

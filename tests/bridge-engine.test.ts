@@ -1755,6 +1755,114 @@ test("startup reconciliation reports an interrupted turn without forwarding comm
   }
 });
 
+test("startup reconciliation cancels restored typing when a terminal Desktop lease missed its Stop hook", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-missed-stop-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const sent: SendInput[] = [];
+  const typing: Array<"cancel" | "typing"> = [];
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  state.createDispatchIntent({
+    body: "continue",
+    contextToken: "ctx-missed-stop",
+    createdAtMs: 100,
+    dedupeKey: "missed-stop-message",
+    operationId: "missed-stop-operation",
+    threadId: "thread-missed-stop",
+  });
+  state.markDispatchAccepted(
+    "missed-stop-operation",
+    "turn-missed-stop-bridge",
+    101,
+  );
+  leases.tryAcquire({
+    createdAtMs: 102,
+    instanceId: "desktop",
+    operationId: "turn-missed-stop-desktop",
+    owner: "desktop",
+    threadId: "thread-missed-stop",
+    turnId: "turn-missed-stop-desktop",
+  });
+
+  const bridge = new BridgeEngine({
+    bridgeInstanceId: "new-instance",
+    codex: {
+      async readThread() {
+        return {
+          thread: {
+            id: "thread-missed-stop",
+            status: { type: "idle" },
+            turns: [
+              {
+                error: null,
+                id: "turn-missed-stop-bridge",
+                items: [],
+                status: "interrupted",
+              },
+              {
+                error: null,
+                id: "turn-missed-stop-desktop",
+                items: [],
+                status: "interrupted",
+              },
+            ],
+          },
+        };
+      },
+      async resumeThread(threadId) {
+        return { thread: { id: threadId } };
+      },
+      async startTurn() {
+        assert.fail("terminal reconciliation must not start another copy");
+      },
+    },
+    ilink: {
+      async sendTyping(input) {
+        typing.push(input.status);
+        return true;
+      },
+      async sendText(input) {
+        sent.push(input);
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases,
+    mainThreadId: "thread-main",
+    newId: () => "unused-operation",
+    now: () => 200,
+    session,
+    state,
+  });
+
+  try {
+    await bridge.recoverPendingWork();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(
+      {
+        dispatchCompletedAtMs: state.getDispatchIntent("missed-stop-operation")
+          ?.completedAtMs,
+        leaseTurnId: leases.getLease("thread-missed-stop")?.turnId,
+        sent: sent.map(({ text }) => text),
+        typing,
+      },
+      {
+        dispatchCompletedAtMs: 200,
+        leaseTurnId: "turn-missed-stop-desktop",
+        sent: [
+          "❌ Codex 任务已中断，未生成最终结果。请重试；详情请在 Codex Desktop 查看。",
+        ],
+        typing: ["typing", "cancel"],
+      },
+    );
+  } finally {
+    bridge.close();
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("a long-running turn sends one durable progress notice without releasing its lease", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-slow-turn-"));
   const databasePath = join(directory, "state.sqlite");

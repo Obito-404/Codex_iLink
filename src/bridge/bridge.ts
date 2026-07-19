@@ -558,8 +558,14 @@ export class BridgeEngine {
       : null;
     const knownLease =
       dispatch.completedAtMs === null ? this.#leases.getLease(threadId) : null;
+    const exactDispatchLease =
+      knownLease?.owner === "bridge" &&
+      knownLease.operationId === dispatch.operationId &&
+      knownLease.turnId === turnId
+        ? knownLease
+        : null;
     const needsThreadForLeaseRelease =
-      dispatch.completedAtMs === null && knownLease === null;
+      dispatch.completedAtMs === null && exactDispatchLease === null;
     const readThread =
       mustPersistFinal &&
       (!preliminaryFailureText ||
@@ -605,23 +611,32 @@ export class BridgeEngine {
           )
         : null;
     if (dispatch.completedAtMs === null) {
-      const lease = knownLease ?? this.#leases.getLease(threadId);
-      if (lease) {
-        if (
-          lease.owner !== "bridge" ||
-          lease.operationId !== dispatch.operationId ||
-          lease.turnId !== turnId ||
-          !this.#leases.release(lease)
-        ) {
+      if (exactDispatchLease) {
+        if (!this.#leases.release(exactDispatchLease)) {
           return false;
         }
       } else {
-        const turn = readThread ? findThreadTurn(readThread, turnId) : undefined;
+        const persistedDispatchTurn = readThread
+          ? findThreadTurn(readThread, turnId)
+          : undefined;
         if (
           !readThread ||
           !isExplicitlyIdleThread(readThread) ||
-          !isTerminalTurnStatus(turn?.status)
+          !isTerminalTurnStatus(persistedDispatchTurn?.status)
         ) {
+          return false;
+        }
+        if (knownLease) {
+          const persistedLeaseTurn = knownLease.turnId
+            ? findThreadTurn(readThread, knownLease.turnId)
+            : undefined;
+          if (
+            !this.#leases.isHeldBy(knownLease) ||
+            !isTerminalTurnStatus(persistedLeaseTurn?.status)
+          ) {
+            return false;
+          }
+        } else if (this.#leases.getLease(threadId) !== null) {
           return false;
         }
       }
@@ -2709,9 +2724,10 @@ export class BridgeEngine {
     }
 
     for (const dispatch of this.#state.listUnresolvedDispatchIntents()) {
+      const threadLease = this.#leases.getLease(dispatch.threadId);
       if (
         leasedOperations.has(dispatch.operationId) ||
-        this.#leases.getLease(dispatch.threadId) !== null ||
+        (threadLease !== null && dispatch.status !== "accepted") ||
         (dispatch.status !== "accepted" && dispatch.status !== "unknown")
       ) {
         continue;

@@ -1,10 +1,34 @@
+[CmdletBinding()]
+param(
+  [ValidateSet("stable", "preview")]
+  [string] $Channel = "stable",
+
+  [string] $Version
+)
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+if ($Channel -eq "preview") {
+  if ([string]::IsNullOrWhiteSpace($Version)) {
+    throw "Preview installation requires an explicit -Version (for example 0.1.0-beta.1)."
+  }
+  $previewVersionPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*$'
+  if ($Version -notmatch $previewVersionPattern) {
+    throw "Preview -Version must be a prerelease SemVer without the v prefix or +build metadata."
+  }
+} elseif (-not [string]::IsNullOrWhiteSpace($Version)) {
+  throw "-Version is only valid with -Channel preview; stable always installs releases/latest."
+}
 
 $repository = "Obito-404/Codex_iLink"
 $assetName = "codex-ilink-x86_64-pc-windows-msvc.exe"
 $checksumName = "$assetName.sha256"
-$releaseBase = "https://github.com/$repository/releases/latest/download"
+$releaseBase = if ($Channel -eq "preview") {
+  "https://github.com/$repository/releases/download/v$Version"
+} else {
+  "https://github.com/$repository/releases/latest/download"
+}
 $installDirectory = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\Codex-iLink"
 $destination = Join-Path $installDirectory "ilink.exe"
 $downloadDirectory = Join-Path ([IO.Path]::GetTempPath()) "codex-ilink-install-$([Guid]::NewGuid().ToString('N'))"
@@ -25,6 +49,15 @@ try {
   $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $downloadedExecutable).Hash.ToLowerInvariant()
   if ($actualHash -ne $expectedHash) {
     throw "SHA-256 verification failed."
+  }
+
+  $signature = Get-AuthenticodeSignature -LiteralPath $downloadedExecutable
+  if ($Channel -eq "stable") {
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+      throw "Stable release Authenticode verification failed: $($signature.Status)."
+    }
+  } elseif ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+    Write-Warning "Preview release is not backed by a valid Authenticode signature: $($signature.Status)."
   }
 
   if (Test-Path -LiteralPath $destination) {

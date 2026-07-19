@@ -36,6 +36,10 @@ function fixtureCommands(calls: string[]): CliCommands {
       calls.push("start");
       return 12;
     },
+    startup: async (args) => {
+      calls.push(["startup", ...args].join(" "));
+      return 16;
+    },
     status: async () => {
       calls.push("status");
       return 13;
@@ -47,13 +51,14 @@ function fixtureCommands(calls: string[]): CliCommands {
   };
 }
 
-test("CLI exposes its seven public commands", async () => {
+test("CLI exposes its eight public commands", async () => {
   for (const [command, expectedCode] of [
     ["config", 9],
     ["doctor", 10],
     ["login", 11],
     ["setup", 15],
     ["start", 12],
+    ["startup", 16],
     ["status", 13],
     ["stop", 14],
   ] as const) {
@@ -91,12 +96,25 @@ test("CLI help is concise and does not invoke a command", async () => {
     "login",
     "setup",
     "start",
+    "startup",
     "status",
     "doctor",
     "stop",
   ]) {
     assert.match(CLI_HELP, new RegExp(`\\b${command}\\b`, "u"));
   }
+});
+
+test("CLI forwards the startup action", async () => {
+  const calls: string[] = [];
+  assert.equal(
+    await runCli(["startup", "enable"], {
+      commands: fixtureCommands(calls),
+      io: { error: () => undefined, log: () => undefined },
+    }),
+    16,
+  );
+  assert.deepEqual(calls, ["startup enable"]);
 });
 
 test("CLI reports unknown commands and command failures without a stack trace", async () => {
@@ -132,6 +150,9 @@ test("setup installs the Guard, binds WeChat, and starts the Bridge", async () =
     configurePlugin: async () => {
       calls.push("plugin");
     },
+    configureStartup: async () => {
+      calls.push("startup");
+    },
     hasUsableSession: () => false,
     login: async () => {
       calls.push("login");
@@ -149,7 +170,7 @@ test("setup installs the Guard, binds WeChat, and starts the Bridge", async () =
   );
 
   assert.equal(code, 0);
-  assert.deepEqual(calls, ["plugin", "login", "start"]);
+  assert.deepEqual(calls, ["plugin", "login", "startup", "start"]);
   assert.match(output.join("\n"), /安装 Codex iLink Guard/u);
   assert.match(output.join("\n"), /绑定微信/u);
   assert.match(output.at(-1) ?? "", /安装完成/u);

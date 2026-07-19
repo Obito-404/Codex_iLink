@@ -1335,6 +1335,7 @@ test("schema v6 deletes legacy plain-text scheduler payloads", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-v2-"));
   const path = join(directory, "state.db");
   const database = new DatabaseSync(path);
+  let state: SqliteState | undefined;
 
   try {
     const migrations = join(process.cwd(), "src", "bridge", "migrations");
@@ -1365,19 +1366,22 @@ test("schema v6 deletes legacy plain-text scheduler payloads", () => {
       );
     database.close();
 
-    const state = new SqliteState(path);
-    assert.equal(state.storageDiagnostics().schemaVersion, 11);
+    state = new SqliteState(path);
+    assert.equal(state.storageDiagnostics().schemaVersion, 12);
     assert.deepEqual(state.listQueuedTurns(), []);
     assert.equal(state.getDispatchIntent("legacy-operation"), null);
     assert.equal(state.countActiveDispatches(), 0);
-    state.close();
   } finally {
     try {
-      database.close();
-    } catch {
-      // The successful migration path already closed the setup connection.
+      state?.close();
+    } finally {
+      try {
+        database.close();
+      } catch {
+        // The successful migration path already closed the setup connection.
+      }
+      rmSync(directory, { force: true, recursive: true });
     }
-    rmSync(directory, { force: true, recursive: true });
   }
 });
 

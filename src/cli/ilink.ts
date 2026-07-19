@@ -27,6 +27,10 @@ import {
   unprotectForCurrentUser,
 } from "../windows/dpapi.ts";
 import {
+  inspectCodexVersion,
+  type CodexVersionCommandRunner,
+} from "../windows/codex-version.ts";
+import {
   findDesktopCodexExecutable,
   hostControlPipePath,
   requestHostControl,
@@ -34,6 +38,11 @@ import {
   type HostStatus,
 } from "../windows/host.ts";
 import { runtimePaths } from "../windows/runtime-paths.ts";
+import {
+  disableWindowsStartupTask,
+  enableWindowsStartupTask,
+  inspectWindowsStartupTask,
+} from "../windows/startup-task.ts";
 import { runLoginFlow } from "./login-flow.ts";
 
 const START_TIMEOUT_MS = 60_000;
@@ -46,6 +55,7 @@ export const CLI_HELP = `用法: ilink <command>
   setup   完成插件安装、微信绑定并启动 Bridge
   login   扫码绑定唯一微信用户
   start   在后台启动微信 Bridge
+  startup 管理登录后自动启动
   status  查看 Bridge 状态
   doctor  检查运行环境与绑定状态
   stop    优雅停止后台 Bridge`;
@@ -61,12 +71,14 @@ export type CliCommands = {
   login(): Promise<number>;
   setup(): Promise<number>;
   start(): Promise<number>;
+  startup(args: readonly string[]): Promise<number>;
   status(): Promise<number>;
   stop(): Promise<number>;
 };
 
 export type SetupActions = {
   configurePlugin(): Promise<void>;
+  configureStartup(): Promise<void>;
   hasUsableSession(): boolean;
   login(): Promise<number>;
   start(): Promise<number>;
@@ -169,18 +181,21 @@ export async function runSetupInstallation(
   io: CliIo,
   actions: SetupActions,
 ): Promise<number> {
-  io.log("[1/3] 正在安装 Codex iLink Guard…");
+  io.log("[1/4] 正在安装 Codex iLink Guard…");
   await actions.configurePlugin();
 
   if (actions.hasUsableSession()) {
-    io.log("[2/3] 微信已绑定，跳过扫码。");
+    io.log("[2/4] 微信已绑定，跳过扫码。");
   } else {
-    io.log("[2/3] 正在绑定微信…");
+    io.log("[2/4] 正在绑定微信…");
     const loginCode = await actions.login();
     if (loginCode !== 0) return loginCode;
   }
 
-  io.log("[3/3] 正在启动 Bridge…");
+  io.log("[3/4] 正在配置登录后自动启动…");
+  await actions.configureStartup();
+
+  io.log("[4/4] 正在启动 Bridge…");
   const startCode = await actions.start();
   if (startCode !== 0) return startCode;
 
@@ -202,7 +217,12 @@ export async function runCli(
     io.log(CLI_HELP);
     return 0;
   }
-  if (command !== "config" && command !== "__hook" && argv.length !== 1) {
+  if (
+    command !== "config" &&
+    command !== "startup" &&
+    command !== "__hook" &&
+    argv.length !== 1
+  ) {
     io.error(`参数过多。\n${CLI_HELP}`);
     return 2;
   }
@@ -211,6 +231,7 @@ export async function runCli(
     if (command === "login") return await commands.login();
     if (command === "setup") return await commands.setup();
     if (command === "start") return await commands.start();
+    if (command === "startup") return await commands.startup(argv.slice(1));
     if (command === "status") return await commands.status();
     if (command === "doctor") return await commands.doctor();
     if (command === "stop") return await commands.stop();
@@ -230,8 +251,15 @@ export type DoctorCheck = {
   name: string;
 };
 
+export type DoctorDependencies = {
+  findCodexExecutable?: typeof findDesktopCodexExecutable;
+  inspectStartupTask?: typeof inspectWindowsStartupTask;
+  runCodex?: CodexVersionCommandRunner;
+};
+
 export async function collectDoctorChecks(
   environment: NodeJS.ProcessEnv = process.env,
+  dependencies: DoctorDependencies = {},
 ): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
   if (process.platform === "win32") {
@@ -258,9 +286,13 @@ export async function collectDoctorChecks(
     });
   }
 
+  let codexExecutable: string | undefined;
   try {
+    codexExecutable = (dependencies.findCodexExecutable ?? findDesktopCodexExecutable)(
+      environment,
+    );
     checks.push({
-      detail: findDesktopCodexExecutable(environment),
+      detail: codexExecutable,
       level: "ok",
       name: "Desktop Codex",
     });
@@ -269,6 +301,41 @@ export async function collectDoctorChecks(
       detail: "未找到 Codex Desktop 内置 codex.exe",
       level: "error",
       name: "Desktop Codex",
+    });
+  }
+
+  if (codexExecutable) {
+    const assessment = inspectCodexVersion(
+      codexExecutable,
+      dependencies.runCodex ?? runCodexCommand,
+    );
+    checks.push({
+      detail: assessment.detail,
+      level: assessment.level,
+      name: "Codex 版本",
+    });
+  } else {
+    checks.push({
+      detail: "无法读取 Codex 版本：未找到 Codex Desktop 内置 codex.exe",
+      level: "error",
+      name: "Codex 版本",
+    });
+  }
+
+  try {
+    const startupStatus = (
+      dependencies.inspectStartupTask ?? inspectWindowsStartupTask
+    )({ environment });
+    checks.push({
+      detail: startupStatus === "enabled" ? "已启用" : "未启用",
+      level: startupStatus === "enabled" ? "ok" : "warn",
+      name: "登录启动",
+    });
+  } catch (error) {
+    checks.push({
+      detail: `查询失败：${errorMessage(error)}`,
+      level: "error",
+      name: "登录启动",
     });
   }
 
@@ -365,6 +432,7 @@ function productionCommands(io: CliIo): CliCommands {
     login: () => loginCommand(io),
     setup: () => setupCommand(io),
     start: () => startCommand(io),
+    startup: (args) => startupCommand(io, args),
     status: () => statusCommand(io),
     stop: () => stopCommand(io),
   };
@@ -383,6 +451,7 @@ async function setupCommand(io: CliIo): Promise<number> {
         pluginVersion,
         runCodex: (args) => runCodexCommand(codexExecutable, args),
       }),
+    configureStartup: async () => enableWindowsStartupTask(daemonLaunch()),
     hasUsableSession: () => hasUsableILinkSession(),
     login: () => loginCommand(io),
     start: () => startCommand(io),
@@ -654,6 +723,38 @@ async function statusCommand(io: CliIo): Promise<number> {
     `Bridge ${phaseLabel(status.phase)}，PID ${status.pid}，启动于 ${new Date(status.startedAtMs).toLocaleString()}`,
   );
   return 0;
+}
+
+async function startupCommand(
+  io: CliIo,
+  args: readonly string[],
+): Promise<number> {
+  assertWindows();
+  const action = args[0] ?? "status";
+  if (
+    args.length > 1 ||
+    (action !== "status" && action !== "enable" && action !== "disable")
+  ) {
+    io.error("用法: ilink startup [status|enable|disable]");
+    return 2;
+  }
+  if (action === "enable") {
+    enableWindowsStartupTask(daemonLaunch());
+    io.log("已启用登录后自动启动。");
+    return 0;
+  }
+  if (action === "disable") {
+    disableWindowsStartupTask();
+    io.log("已禁用登录后自动启动；当前 Bridge 不会被停止。");
+    return 0;
+  }
+  const status = inspectWindowsStartupTask();
+  io.log(
+    status === "enabled"
+      ? "登录后自动启动：已启用。"
+      : "登录后自动启动：未启用。",
+  );
+  return status === "enabled" ? 0 : 1;
 }
 
 async function doctorCommand(io: CliIo): Promise<number> {

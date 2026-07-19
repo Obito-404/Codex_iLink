@@ -6,31 +6,75 @@ on:
       - "v*"
 
 permissions:
+  attestations: write
   contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ contains(github.ref_name, '-') && 'preview' || 'stable' }}
+  cancel-in-progress: false
 
 jobs:
   windows-x64:
     runs-on: windows-latest
+    environment:
+      name: ${{ contains(github.ref_name, '-') && 'preview-release' || 'stable-release' }}
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 11.7.0
           run_install: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.23.1"
           cache: pnpm
+      - name: Install trusted-publishing npm CLI
+        shell: pwsh
+        run: |
+          npm install --global npm@11.6.2
+          if ((npm --version).Trim() -ne "11.6.2") {
+            throw "npm CLI 版本不符合 trusted publishing 门禁。"
+          }
+      - name: Resolve release policy
+        id: policy
+        shell: pwsh
+        run: node scripts/release-policy.mjs
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Verify npm release
         run: pnpm release:check
       - name: Build standalone executable
         run: pnpm build:sea
+      - name: Sign stable executable with Authenticode PFX
+        if: steps.policy.outputs.requires_authenticode == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: >-
+          ./scripts/sign-windows-release.ps1
+          -ExecutablePath ./artifacts/codex-ilink-x86_64-pc-windows-msvc.exe
+      - name: Verify release checksum
+        shell: pwsh
+        run: |
+          $exe = ".\artifacts\codex-ilink-x86_64-pc-windows-msvc.exe"
+          $checksum = (Get-Content -LiteralPath "$exe.sha256" -Raw).Trim() -split "\s+"
+          $actual = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($checksum.Count -lt 2 -or $checksum[0] -ne $actual -or $checksum[1] -ne (Split-Path -Leaf $exe)) {
+            throw "发布产物 SHA-256 校验失败。"
+          }
       - name: Smoke test standalone executable
         shell: pwsh
         run: '& ".\artifacts\codex-ilink-x86_64-pc-windows-msvc.exe" --help'
-      - name: Publish GitHub Release assets
+      - name: Attest standalone executable provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: ./artifacts/codex-ilink-x86_64-pc-windows-msvc.exe
+      - name: Stage GitHub Release draft
+        id: github_release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -38,9 +82,169 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           $exe = ".\artifacts\codex-ilink-x86_64-pc-windows-msvc.exe"
           $checksum = "$exe.sha256"
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $exe $checksum --clobber
+          $draftState = (& gh release view $tag --json isDraft --jq .isDraft 2>$null | Out-String).Trim()
+          $viewExitCode = $LASTEXITCODE
+          if ($viewExitCode -eq 0) {
+            if ($draftState -eq "true") {
+              gh release upload $tag $exe $checksum --clobber
+              if ($LASTEXITCODE -ne 0) {
+                throw "GitHub Release draft 产物上传失败。"
+              }
+              Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "was_public=false"
+            } elseif ($draftState -eq "false") {
+              $verifyRoot = Join-Path ([IO.Path]::GetTempPath()) "codex-ilink-release-$([Guid]::NewGuid().ToString('N'))"
+              New-Item -ItemType Directory -Path $verifyRoot | Out-Null
+              try {
+                $exeName = Split-Path -Leaf $exe
+                $checksumName = Split-Path -Leaf $checksum
+                gh release download $tag --pattern $exeName --pattern $checksumName --dir $verifyRoot
+                if ($LASTEXITCODE -ne 0) {
+                  throw "无法下载已公开 GitHub Release 的既有产物。"
+                }
+                $publishedExe = Join-Path $verifyRoot $exeName
+                $publishedChecksum = Join-Path $verifyRoot $checksumName
+                if (-not (Test-Path -LiteralPath $publishedExe) -or -not (Test-Path -LiteralPath $publishedChecksum)) {
+                  throw "已公开 GitHub Release 缺少预期产物。"
+                }
+                $tokens = (Get-Content -LiteralPath $publishedChecksum -Raw).Trim() -split "\s+"
+                $publishedHash = (Get-FileHash -LiteralPath $publishedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($tokens.Count -lt 2 -or $tokens[0] -ne $publishedHash -or $tokens[1] -ne $exeName) {
+                  throw "已公开 GitHub Release 的 SHA-256 校验失败。"
+                }
+                if ("${{ steps.policy.outputs.requires_authenticode }}" -eq "true") {
+                  $publishedSignature = Get-AuthenticodeSignature -LiteralPath $publishedExe
+                  if ($publishedSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+                    throw "已公开稳定版的 Authenticode 签名无效：$($publishedSignature.Status)"
+                  }
+                }
+                gh attestation verify $publishedExe `
+                  --repo $env:GITHUB_REPOSITORY `
+                  --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/release.yml" `
+                  --source-digest $env:GITHUB_SHA `
+                  --source-ref $env:GITHUB_REF `
+                  --deny-self-hosted-runners
+                if ($LASTEXITCODE -ne 0) {
+                  throw "已公开 GitHub Release 的 build provenance 与当前候选提交不一致。"
+                }
+              } finally {
+                Remove-Item -LiteralPath $verifyRoot -Recurse -Force -ErrorAction SilentlyContinue
+              }
+              Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "was_public=true"
+              Write-Host "GitHub Release 已发布且既有产物有效；只允许幂等验证 npm。"
+            } else {
+              throw "无法识别 GitHub Release draft 状态：$draftState"
+            }
           } else {
-            gh release create $tag $exe $checksum --generate-notes --verify-tag
+            $releaseArgs = @(
+              "release", "create", $tag, $exe, $checksum,
+              "--draft", "--generate-notes", "--verify-tag"
+            )
+            & gh @releaseArgs
+            if ($LASTEXITCODE -ne 0) {
+              throw "GitHub Release 创建失败。"
+            }
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "was_public=false"
+          }
+      - name: Publish npm package
+        shell: pwsh
+        run: |
+          $packageName = "codex-ilink"
+          $version = "${{ steps.policy.outputs.version }}"
+          $npmTag = "${{ steps.policy.outputs.npm_tag }}"
+          $registry = "https://registry.npmjs.org/"
+
+          function Invoke-NpmCaptured([string[]] $NpmArguments) {
+            $captureRoot = Join-Path ([IO.Path]::GetTempPath()) "codex-ilink-npm-$([Guid]::NewGuid().ToString('N'))"
+            $stdoutPath = "$captureRoot.stdout"
+            $stderrPath = "$captureRoot.stderr"
+            try {
+              & npm @NpmArguments 1> $stdoutPath 2> $stderrPath
+              return [pscustomobject]@{
+                ExitCode = $LASTEXITCODE
+                Stdout = [IO.File]::ReadAllText($stdoutPath).Trim()
+                Stderr = [IO.File]::ReadAllText($stderrPath).Trim()
+              }
+            } finally {
+              Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+          $view = Invoke-NpmCaptured -NpmArguments @(
+            "view", "$packageName@$version", "version", "gitHead", "--json", "--registry=$registry"
+          )
+          $viewDiagnostic = "$($view.Stdout)`n$($view.Stderr)".Trim()
+          if ($view.ExitCode -eq 0) {
+            try {
+              $published = $view.Stdout | ConvertFrom-Json
+            } catch {
+              throw "无法解析 npm 已发布版本元数据：$viewDiagnostic"
+            }
+            $expectedGitHead = (& git rev-parse HEAD).Trim()
+            if ($LASTEXITCODE -ne 0) {
+              throw "无法读取当前 tag 的 Git commit。"
+            }
+            if ($published.version -ne $version -or $published.gitHead -ne $expectedGitHead) {
+              throw "npm 上同版本并非当前 tag 提交，拒绝覆盖或改写。"
+            }
+            $tagView = Invoke-NpmCaptured -NpmArguments @(
+              "view", "$packageName@$npmTag", "version", "--json", "--registry=$registry"
+            )
+            if ($tagView.ExitCode -ne 0) {
+              throw "无法验证 npm dist-tag $npmTag：$($tagView.Stderr)"
+            }
+            $taggedVersion = $tagView.Stdout | ConvertFrom-Json
+            if ($taggedVersion -ne $version) {
+              throw "npm dist-tag $npmTag 当前指向 $taggedVersion，拒绝回退到 $version。"
+            }
+            Write-Host "npm $packageName@$version 已存在，来源和 dist-tag 均一致；跳过重复发布。"
+          } elseif ($viewDiagnostic -match "(?m)\bE404\b") {
+            if ("${{ steps.github_release.outputs.was_public }}" -eq "true") {
+              throw "GitHub Release 已公开但 npm 版本不存在，拒绝倒序补发；请按发布事故处理并使用新版本。"
+            }
+            $tagView = Invoke-NpmCaptured -NpmArguments @(
+              "view", "$packageName@$npmTag", "version", "--json", "--registry=$registry"
+            )
+            $tagDiagnostic = "$($tagView.Stdout)`n$($tagView.Stderr)".Trim()
+            if ($tagView.ExitCode -eq 0) {
+              try {
+                $currentVersion = $tagView.Stdout | ConvertFrom-Json
+              } catch {
+                throw "无法解析 npm dist-tag $npmTag：$tagDiagnostic"
+              }
+              node scripts/release-policy.mjs `
+                --version $version `
+                --tag $env:GITHUB_REF_NAME `
+                --current-version $currentVersion
+              if ($LASTEXITCODE -ne 0) {
+                throw "npm dist-tag $npmTag 版本前进门禁失败。"
+              }
+            } elseif ($tagDiagnostic -notmatch "(?m)\bE404\b") {
+              throw "无法读取 npm dist-tag $npmTag，拒绝盲目发布：$tagDiagnostic"
+            }
+            if (
+              [string]::IsNullOrWhiteSpace($env:ACTIONS_ID_TOKEN_REQUEST_URL) -or
+              [string]::IsNullOrWhiteSpace($env:ACTIONS_ID_TOKEN_REQUEST_TOKEN)
+            ) {
+              throw "GitHub OIDC 不可用，拒绝回退到长期 npm token。"
+            }
+            npm publish --access public --tag $npmTag --provenance --registry=$registry
+            if ($LASTEXITCODE -ne 0) {
+              throw "npm 发布失败。"
+            }
+          } else {
+            throw "无法确认 npm 版本是否存在，拒绝盲目发布：$viewDiagnostic"
+          }
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ("${{ steps.policy.outputs.github_prerelease }}" -eq "true") {
+            gh release edit $tag --draft=false --prerelease --latest=false
+          } else {
+            gh release edit $tag --draft=false --prerelease=false --latest
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release 发布失败；draft 已保留，可安全重跑。"
           }

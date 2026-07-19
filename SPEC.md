@@ -1,7 +1,7 @@
 # Codex iLink 规格
 
 设计状态：已确认  
-实现状态：核心模块及真实微信文本收发已验证；微信入站媒体与本地附件出站链路已实现，真实微信媒体、离开状态主动推送与最终实机抢占仍待验收  
+实现状态：核心模块及真实微信文本收发已验证；微信入站媒体与本地附件出站链路已实现，真实微信媒体、离开状态主动推送、固定 `client_id` 语义与最终实机抢占仍待按发布清单验收
 日期：2026-07-18
 
 ## 1. 目标
@@ -242,7 +242,8 @@ flowchart LR
 
 ## 13. Codex 兼容性与认证
 
-- 已验证 PATH 中的 `codex-cli 0.144.4` 与 Desktop 内置 Codex `0.144.2`。
+- 最低支持 Codex `0.144.2`；已验证兼容范围为 `0.144.x`，其中 PATH `codex-cli 0.144.4` 与 Desktop 内置 Codex `0.144.2` 已实测。
+- `ilink doctor` 把低于 `0.144.2` 或无法读取/解析的版本标为错误。高于 `0.144.x` 的 minor/major 版本标为“尚未验证”，但不阻止 `setup` 或 `start`，允许用户在明确风险下试运行。
 - App Server 的生成 Schema 随 Codex 版本变化；启动时检查所需方法、字段和审批请求形状，不兼容时停止微信执行并提示适配，不影响 Desktop。
 - 第一版明确使用现有 ChatGPT 登录。Bridge 启动 App Server 时使用受控环境，移除可能污染认证的 `CODEX_API_KEY`、`OPENAI_API_KEY`，以及不应从 Desktop 父进程串入 Bridge 的 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`、`CODEX_THREAD_ID`。
 - 插件只承担官方支持的 Hooks 打包与分发，不假设插件能常驻后台、添加 Desktop UI 或直接控制 Desktop 任务。
@@ -253,6 +254,12 @@ flowchart LR
 
 ## 14. 安装与卸载
 
+- 支持平台限定为 Windows 10/11 x64；Windows on Arm 不在当前支持范围。
+- 稳定版本使用无预发布后缀的 SemVer、GitHub 正式 Release 和 npm `latest`；预发布版本使用 SemVer 预发布后缀、GitHub Pre-release 和 npm `next`，不得移动 `latest`。发布版本拒绝 `+build` metadata，保证 GitHub Environment 与预发布判定同源。
+- 稳定版 Windows 独立 exe 必须在 SEA 注入后通过 Authenticode 签名并重新生成 SHA-256；签名凭证缺失、签名无效或版本/标签不一致时发布流程 fail closed。预览版可不签名，但必须明确标记为 Pre-release。
+- 每个预览版和稳定版独立 exe 都必须生成 GitHub build provenance attestation，将产物摘要绑定到候选 commit、tag ref 与 `release.yml`；公开 Release 的幂等重跑必须复验该来源身份，不能只信任可同时替换的 checksum。
+- npm 发布固定使用 npm `11.6.2`、GitHub Actions OIDC、Trusted Publishing 与 provenance，不保存长期 npm Token；publisher、Environment 或 OIDC 身份不匹配时 fail closed。预览标签进入 `preview-release`，稳定标签进入带人工审核和 PFX Secret 的 `stable-release` Environment。
+- PowerShell 安装器默认只取最新稳定 Release，并在落盘前强制校验 SHA-256 与 Authenticode；预览安装必须显式传入 `-Channel preview -Version <完整预发布版本>`，校验 SHA-256，并对无效签名给出明确警告。
 - 本地插件通过个人 Marketplace 安装。
 - 安装流程注册当前用户登录启动任务，完成二维码绑定并提示信任 Hooks。
 - Bridge、插件和状态都属于当前 Windows 用户。
@@ -272,6 +279,8 @@ flowchart LR
 - 自动重试中断回合
 
 ## 16. 验收标准
+
+本节定义产品行为。每个候选版本的实机结果、证据和签字记录在 [`docs/release-acceptance.md`](./docs/release-acceptance.md)；自动化测试不能替代其中标记为“外部实机/凭证”的项目。发布到 `latest` 前，清单不得保留待验收或未知的必选项。
 
 1. 本地插件 Hook 能取得真实 `session_id`、`turn_id` 和 `cwd`，其中 `session_id` 可用于 `thread/resume`。
 2. Desktop 创建的会话可从微信进入；微信回合完成后，Desktop 同一 `thread_id` 显示新增消息与结果。
@@ -297,6 +306,7 @@ flowchart LR
 22. 媒体下载、HTTP、超时、大小、URL、解密和落盘失败都产生明确脱敏微信回复，不提交空回合；错误与日志不泄露 CDN query 或密钥。
 23. 版本化媒体 payload 能跨 `inbound_messages`、`queued_turns`、`dispatch_intents` 和进程重启恢复；媒体文件保留到回合终态或未知提交完成对账，孤儿目录可安全清理。
 24. iLink 新建任务可用 `send_file(path)` 显式发送当前 thread canonical `cwd` 内的图片、视频或普通文件；登记后只发送私有不可变快照。Markdown 本地链接、普通路径、URL、cwd 外文件以及链接/硬链接均不会触发附件外发；无法补装工具的旧任务必须新建 iLink 任务后再发送。
+25. 版本、Git 标签与发布通道严格对应：预发布版本只进入 GitHub Pre-release 和 npm `next`；稳定版本进入正式 GitHub Release 和 npm `latest`，且未通过 Authenticode 签名时不能生成稳定发布。
 
 ## 17. 开发门禁
 
@@ -305,12 +315,13 @@ flowchart LR
 1. **已通过**：Desktop 本地插件 Hook 探针。内部 ID `codex-ilink-probe`（显示名 `Codex iLink Guard`）的四项 Hook 均已人工信任；新版生产 Hook 已在 Desktop 既有任务的继续回合中捕获 `SessionStart`、`UserPromptSubmit`、`Stop`，三者的 `session_id`、`turn_id` 与 `cwd` 对应正确；运行中精确租约、Stop 后释放和缺 Stop 跨 Bridge 重启保留也已实机验证。
 2. **已通过**：Hook `session_id` → App Server `thread/resume` 探针；PATH CLI `0.144.4` 与 Desktop 内置 Codex `0.144.2` 均能在不覆盖配置的情况下恢复。
 3. **历史失败，已替换方案**：两个独立 App Server 会同时接受同一 `thread_id` 的回合，且真实历史发生错组；`idle + Busy` 方案已废弃。
-4. **已实现，待最终实机验收**：原子 SQLite 租约与 `UserPromptSubmit continue:false` 仲裁门禁已接入；仍需确认 Desktop 与 Bridge 同时抢占时恰有一方进入 Codex。
-5. 既有会话配置继承、`/new` 默认配置和 Desktop 专属能力差异探针。
+4. **已实现，待最终实机验收**：原子 SQLite 租约与 `UserPromptSubmit continue:false` 仲裁门禁已接入；仍需确认 Desktop 与 Bridge 同时抢占时恰有一方进入 Codex，并分别覆盖 Desktop 与 Bridge 胜出。
+5. **待外部实机验收**：既有会话配置继承、`/new` 默认配置和 Desktop 专属能力差异探针。
 6. **已实现，待长期实机验收**：Named Pipe、Spool、来源标记与单实例 Bridge。
 7. **已实现**：SQLite 队列、去重、Dispatch Intent、Outbox、最多 3 个并行微信回合，以及最终回复最多 3 条、每条 2000 UTF-8 字节的边界。
 8. **已实现，待长期实机验收**：Presence、无新输入的延迟离开通知、最后一轮摘要与最终回答、通知送达后 30 分钟回复路由与活动任务电源保持。
 9. **已实现，待真实微信验收**：Bridge App Server 审批往返、通知退避重试、60 秒/5 分钟提醒、30 分钟过期及审批中重启失效处理。
-10. **文本闭环已通过，其他路径待验收**：已完成真实 iLink 扫码绑定及文本收发；固定 `client_id` 重放和主动通知仍待验证。
+10. **文本闭环已通过，其他路径待真实微信验收**：已完成真实 iLink 扫码绑定及文本收发；固定 `client_id` 跨普通重试和重启复用、服务端幂等表现及主动通知仍待验证并记录。
 11. **已实现，待真实微信验收**：入站图片 `localImage`、文件/视频 `mention`、语音转写文本、100 MiB 限制、受信 CDN、AES 解密、版本化队列恢复和明确媒体错误。
-12. 完整 Desktop → 微信 → 同会话 → Desktop 端到端验收。
+12. **待外部实机与凭证**：完整 Desktop → 微信主动通知 → 同会话回复 → Desktop 可见的端到端验收。
+13. **正式发布阻断项**：Windows 10/11 x64、真实微信、共享会话抢占、固定 `client_id`、媒体、审批、主动通知和完整 E2E 必须在 [`docs/release-acceptance.md`](./docs/release-acceptance.md) 逐项签字；完成前只能发布明确标记的预览版，不能发布到 `latest`。

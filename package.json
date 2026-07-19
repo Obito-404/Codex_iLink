@@ -24,7 +24,9 @@
     "docs/diagrams/",
     "docs/feasibility.md",
     "docs/npm-publishing.md",
+    "docs/release-acceptance.md",
     "plugins/",
+    "SECURITY.md",
     "SPEC.md"
   ],
   "keywords": [
@@ -37,6 +39,9 @@
   "os": [
     "win32"
   ],
+  "cpu": [
+    "x64"
+  ],
   "engines": {
     "node": ">=22.13.0"
   },
@@ -47,6 +52,7 @@
     "build:sea": "npm run build --silent && node scripts/build-sea.mjs",
     "test": "npm run build --silent && node --disable-warning=ExperimentalWarning --experimental-strip-types --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
+    "release:policy": "node scripts/release-policy.mjs",
     "release:metadata": "node scripts/check-release.mjs",
     "release:check": "npm run release:metadata --silent && npm run typecheck --silent && npm test --silent && npm pack --dry-run --ignore-scripts",
     "prepublishOnly": "npm run release:metadata --silent && npm run typecheck --silent && npm test --silent",

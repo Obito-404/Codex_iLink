@@ -67,6 +67,8 @@ export type PendingDesktopNotification = {
 };
 
 const DESKTOP_OBSERVATION_TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const INBOUND_DEDUPE_QUERY_CHUNK_SIZE = 500;
+const TRANSPORT_METADATA_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export type QueuedTurn = {
   body: string;
@@ -214,6 +216,75 @@ export class SqliteState {
     };
   }
 
+  pruneExpiredTransportState(nowMs: number): {
+    completedDispatchIntents: number;
+    confirmedOutbox: number;
+    expiredNotificationRoutes: number;
+    terminalInboundMessages: number;
+  } {
+    const cutoffMs = nowMs - TRANSPORT_METADATA_RETENTION_MS;
+    return this.#transaction(() => {
+      const expiredNotificationRoutes = this.#database
+        .prepare(
+          `DELETE FROM notification_routes
+           WHERE expires_at_ms <= ?`,
+        )
+        .run(nowMs);
+      const confirmedOutbox = this.#database
+        .prepare(
+          `DELETE FROM outbox
+           WHERE status = 'confirmed' AND confirmed_at_ms <= ?`,
+        )
+        .run(cutoffMs);
+      const completedDispatchIntents = this.#database
+        .prepare(
+          `DELETE FROM dispatch_intents
+           WHERE completed_at_ms <= ?
+             AND NOT EXISTS (
+               SELECT 1 FROM outbound_attachment_intents
+               WHERE outbound_attachment_intents.operation_id =
+                 dispatch_intents.operation_id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM outbox
+               WHERE outbox.client_id IN (
+                 'codex-ilink:' || dispatch_intents.turn_id || ':final',
+                 'codex-ilink:' || dispatch_intents.turn_id || ':final:part:1',
+                 'codex-ilink:' || dispatch_intents.turn_id || ':final:part:2',
+                 'codex-ilink:' || dispatch_intents.turn_id || ':final:part:3'
+               )
+             )`,
+        )
+        .run(cutoffMs);
+      const terminalInboundMessages = this.#database
+        .prepare(
+          `DELETE FROM inbound_messages
+           WHERE body IS NULL AND accepted_at_ms <= ?
+             AND NOT EXISTS (
+               SELECT 1 FROM queued_turns
+               WHERE queued_turns.dedupe_key =
+                 inbound_messages.account_id || '/' ||
+                 inbound_messages.controller_user_id || '/' ||
+                 inbound_messages.message_id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM dispatch_intents
+               WHERE dispatch_intents.dedupe_key =
+                 inbound_messages.account_id || '/' ||
+                 inbound_messages.controller_user_id || '/' ||
+                 inbound_messages.message_id
+             )`,
+        )
+        .run(cutoffMs);
+      return {
+        completedDispatchIntents: Number(completedDispatchIntents.changes),
+        confirmedOutbox: Number(confirmedOutbox.changes),
+        expiredNotificationRoutes: Number(expiredNotificationRoutes.changes),
+        terminalInboundMessages: Number(terminalInboundMessages.changes),
+      };
+    });
+  }
+
   bindController(controller: Controller): Controller {
     const current = this.getController();
     if (current) {
@@ -270,8 +341,9 @@ export class SqliteState {
 
       const insert = this.#database.prepare(
         `INSERT INTO inbound_messages
-          (account_id, controller_user_id, message_id, context_token, body, received_at_ms)
-         VALUES (?, ?, ?, ?, ?, ?)
+          (account_id, controller_user_id, message_id, context_token, body,
+           received_at_ms, accepted_at_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (account_id, controller_user_id, message_id) DO NOTHING`,
       );
       const acceptedMessageIds: string[] = [];
@@ -283,6 +355,7 @@ export class SqliteState {
           message.contextToken,
           message.body,
           message.receivedAtMs,
+          input.updatedAtMs,
         );
         if (Number(result.changes) === 1) acceptedMessageIds.push(message.messageId);
       }
@@ -329,6 +402,37 @@ export class SqliteState {
           updatedAtMs: row.updated_at_ms,
         }
       : null;
+  }
+
+  findExistingInboundMessageIds(input: {
+    accountId: string;
+    candidateMessageIds: readonly string[];
+    controllerUserId: string;
+  }): Set<string> {
+    const candidateMessageIds = [...new Set(input.candidateMessageIds)];
+    const existingMessageIds = new Set<string>();
+    for (
+      let offset = 0;
+      offset < candidateMessageIds.length;
+      offset += INBOUND_DEDUPE_QUERY_CHUNK_SIZE
+    ) {
+      const chunk = candidateMessageIds.slice(
+        offset,
+        offset + INBOUND_DEDUPE_QUERY_CHUNK_SIZE,
+      );
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = this.#database
+        .prepare(
+          `SELECT message_id FROM inbound_messages
+           WHERE account_id = ? AND controller_user_id = ?
+             AND message_id IN (${placeholders})`,
+        )
+        .all(input.accountId, input.controllerUserId, ...chunk) as Array<{
+        message_id: string;
+      }>;
+      for (const { message_id } of rows) existingMessageIds.add(message_id);
+    }
+    return existingMessageIds;
   }
 
   listInboundMessages(): InboundMessage[] {
@@ -1819,6 +1923,7 @@ export class SqliteState {
       "./migrations/010-user-timing-settings.sql",
       "./migrations/011-thread-permission-settings.sql",
       "./migrations/012-outbound-attachment-provenance.sql",
+      "./migrations/013-transport-retention-indexes.sql",
     ];
     const observed = this.#database.prepare("PRAGMA user_version").get() as
       | { user_version: number }

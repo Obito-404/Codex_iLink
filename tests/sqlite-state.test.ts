@@ -94,7 +94,7 @@ try {
     const reopened = new SqliteState(path);
     assert.deepEqual(reopened.storageDiagnostics(), {
       journalMode: "wal",
-      schemaVersion: 12,
+      schemaVersion: 13,
       synchronous: "full",
     });
     assert.deepEqual(reopened.listQueuedTurns(), [
@@ -221,7 +221,7 @@ test("schema v11 attachment intents migrate as untrusted legacy paths", () => {
     database.close();
 
     migrated = new SqliteState(path);
-    assert.equal(migrated.storageDiagnostics().schemaVersion, 12);
+    assert.equal(migrated.storageDiagnostics().schemaVersion, 13);
     assert.equal(
       migrated.listOutboundAttachmentIntents("legacy-turn")[0]
         ?.snapshotProvenance,
@@ -276,6 +276,428 @@ test("schema v11 attachment intents migrate as untrusted legacy paths", () => {
   }
 });
 
+test("schema v13 adds bounded transport indexes without losing state", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-v13-indexes-"));
+  const path = join(directory, "state.db");
+  const database = new DatabaseSync(path);
+  let state: SqliteState | null = null;
+
+  try {
+    database.exec("PRAGMA journal_mode = WAL");
+    applyMigrations(database, 1, 12);
+    database
+      .prepare(
+        `INSERT INTO inbound_messages
+          (account_id, controller_user_id, message_id, context_token, body,
+           received_at_ms)
+         VALUES (?, ?, ?, ?, NULL, ?)`,
+      )
+      .run("bot-index", "controller-index", "message-index", "ctx-index", 1);
+    database.exec("PRAGMA user_version = 12");
+    database.close();
+
+    state = new SqliteState(path);
+    assert.equal(state.storageDiagnostics().schemaVersion, 13);
+    assert.equal(state.listInboundMessages()[0]?.messageId, "message-index");
+    state.close();
+    state = null;
+
+    const upgraded = new DatabaseSync(path);
+    try {
+      const indexes = upgraded
+        .prepare(
+          `SELECT name FROM sqlite_schema
+           WHERE type = 'index' AND name IN (
+             'dispatch_intents_turn_id',
+             'inbound_messages_terminal_retention',
+             'notification_routes_expiry',
+             'outbox_confirmed_retention'
+           )
+           ORDER BY name`,
+        )
+        .all() as Array<{ name: string }>;
+      assert.deepEqual(
+        indexes.map(({ name }) => name),
+        [
+          "dispatch_intents_turn_id",
+          "inbound_messages_terminal_retention",
+          "notification_routes_expiry",
+          "outbox_confirmed_retention",
+        ],
+      );
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    state?.close();
+    if (database.isOpen) database.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("schema v13 gives legacy inbound dedupe a fresh local retention window", () => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "codex-ilink-state-v13-inbound-retention-"),
+  );
+  const path = join(directory, "state.db");
+  const database = new DatabaseSync(path);
+  let state: SqliteState | null = null;
+
+  try {
+    database.exec("PRAGMA journal_mode = WAL");
+    applyMigrations(database, 1, 12);
+    database
+      .prepare(
+        `INSERT INTO inbound_messages
+          (account_id, controller_user_id, message_id, context_token, body,
+           received_at_ms)
+         VALUES (?, ?, ?, ?, NULL, ?)`,
+      )
+      .run(
+        "bot-legacy-retention",
+        "controller-legacy-retention",
+        "message-legacy-retention",
+        "ctx-legacy-retention",
+        0,
+      );
+    database.exec("PRAGMA user_version = 12");
+    database.close();
+
+    state = new SqliteState(path);
+    assert.equal(
+      state.pruneExpiredTransportState(Date.now()).terminalInboundMessages,
+      0,
+    );
+    assert.deepEqual(
+      state.listInboundMessages().map(({ messageId }) => messageId),
+      ["message-legacy-retention"],
+    );
+  } finally {
+    state?.close();
+    if (database.isOpen) database.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("transport retention starts when an inbound message is accepted locally", () => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "codex-ilink-state-inbound-acceptance-retention-"),
+  );
+  const state = new SqliteState(join(directory, "state.db"));
+  const dayMs = 24 * 60 * 60 * 1_000;
+  const acceptedAtMs = 40 * dayMs;
+
+  try {
+    state.bindController({
+      accountId: "bot-inbound-acceptance",
+      boundAtMs: 1,
+      userId: "controller-inbound-acceptance",
+    });
+    state.acceptInboundBatch({
+      accountId: "bot-inbound-acceptance",
+      controllerUserId: "controller-inbound-acceptance",
+      messages: [
+        {
+          body: "missing remote timestamp",
+          contextToken: "ctx-missing-timestamp",
+          messageId: "missing-timestamp",
+          receivedAtMs: 0,
+        },
+        {
+          body: "old remote timestamp",
+          contextToken: "ctx-old-timestamp",
+          messageId: "old-timestamp",
+          receivedAtMs: dayMs,
+        },
+      ],
+      nextCursor: "cursor-inbound-acceptance",
+      updatedAtMs: acceptedAtMs,
+    });
+    assert.equal(
+      state.clearInboundBody(
+        "bot-inbound-acceptance",
+        "controller-inbound-acceptance",
+        "missing-timestamp",
+      ),
+      true,
+    );
+    assert.equal(
+      state.clearInboundBody(
+        "bot-inbound-acceptance",
+        "controller-inbound-acceptance",
+        "old-timestamp",
+      ),
+      true,
+    );
+
+    assert.equal(
+      state.pruneExpiredTransportState(acceptedAtMs).terminalInboundMessages,
+      0,
+    );
+    assert.deepEqual(
+      state.listInboundMessages().map(({ messageId }) => messageId),
+      ["missing-timestamp", "old-timestamp"],
+    );
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("transport retention deletes only metadata past its safe terminal window", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-retention-"));
+  const path = join(directory, "state.db");
+  const state = new SqliteState(path);
+  const dayMs = 24 * 60 * 60 * 1_000;
+  const nowMs = 40 * dayMs;
+  const cutoffMs = nowMs - 30 * dayMs;
+  const controller = {
+    accountId: "bot-retention",
+    boundAtMs: 1,
+    userId: "controller-retention",
+  };
+  const dedupeKey = (messageId: string) =>
+    `${controller.accountId}/${controller.userId}/${messageId}`;
+  const createAcceptedDispatch = (
+    name: string,
+    dedupe: string,
+  ): { operationId: string; turnId: string } => {
+    const operationId = `operation-${name}`;
+    const turnId = `turn-${name}`;
+    state.createDispatchIntent({
+      body: `body-${name}`,
+      createdAtMs: 1,
+      dedupeKey: dedupe,
+      operationId,
+      threadId: `thread-${name}`,
+    });
+    state.markDispatchAccepted(operationId, turnId, 2);
+    return { operationId, turnId };
+  };
+  const completeWithFinal = (
+    name: string,
+    completedAtMs: number,
+  ): { clientId: string; operationId: string; turnId: string } => {
+    const dispatch = createAcceptedDispatch(name, `dedupe-${name}`);
+    const clientId = `codex-ilink:${dispatch.turnId}:final`;
+    state.completeDispatchWithOutbox({
+      completedAtMs,
+      operationId: dispatch.operationId,
+      outbox: [
+        {
+          body: `reply-${name}`,
+          clientId,
+          contextToken: `context-${name}`,
+          createdAtMs: completedAtMs,
+          targetUserId: controller.userId,
+        },
+      ],
+      turnId: dispatch.turnId,
+    });
+    return { clientId, ...dispatch };
+  };
+
+  try {
+    state.bindController(controller);
+    state.acceptInboundBatch({
+      accountId: controller.accountId,
+      controllerUserId: controller.userId,
+      messages: [
+        {
+          body: "expired terminal",
+          contextToken: "ctx-expired",
+          messageId: "expired-terminal",
+          receivedAtMs: cutoffMs,
+        },
+      ],
+      nextCursor: "cursor-retention-expired",
+      updatedAtMs: cutoffMs,
+    });
+    state.acceptInboundBatch({
+      accountId: controller.accountId,
+      controllerUserId: controller.userId,
+      messages: [
+        {
+          body: "recent terminal",
+          contextToken: "ctx-recent",
+          messageId: "recent-terminal",
+          receivedAtMs: cutoffMs + 1,
+        },
+      ],
+      nextCursor: "cursor-retention-recent",
+      updatedAtMs: cutoffMs + 1,
+    });
+    state.acceptInboundBatch({
+      accountId: controller.accountId,
+      controllerUserId: controller.userId,
+      messages: [
+        {
+          body: "still active",
+          contextToken: "ctx-body",
+          messageId: "active-body",
+          receivedAtMs: 1,
+        },
+        {
+          body: "queued",
+          contextToken: "ctx-queued",
+          messageId: "queued-active",
+          receivedAtMs: 1,
+        },
+        {
+          body: "dispatching",
+          contextToken: "ctx-dispatch",
+          messageId: "dispatch-active",
+          receivedAtMs: 1,
+        },
+        {
+          body: "awaiting final delivery",
+          contextToken: "ctx-final",
+          messageId: "completed-pending-final",
+          receivedAtMs: 1,
+        },
+      ],
+      nextCursor: "cursor-retention",
+      updatedAtMs: nowMs,
+    });
+    for (const messageId of [
+      "expired-terminal",
+      "recent-terminal",
+      "queued-active",
+      "dispatch-active",
+      "completed-pending-final",
+    ]) {
+      assert.equal(
+        state.clearInboundBody(
+          controller.accountId,
+          controller.userId,
+          messageId,
+        ),
+        true,
+      );
+    }
+    state.enqueueQueuedTurn({
+      body: "queued body",
+      createdAtMs: 1,
+      dedupeKey: dedupeKey("queued-active"),
+      threadId: "thread-queued-active",
+    });
+    state.createDispatchIntent({
+      body: "active dispatch body",
+      createdAtMs: 1,
+      dedupeKey: dedupeKey("dispatch-active"),
+      operationId: "operation-active",
+      threadId: "thread-dispatch-active",
+    });
+
+    const expired = createAcceptedDispatch("expired", "dedupe-expired");
+    state.markDispatchCompleted(
+      expired.operationId,
+      expired.turnId,
+      cutoffMs,
+    );
+    const recent = createAcceptedDispatch("recent", "dedupe-recent");
+    state.markDispatchCompleted(
+      recent.operationId,
+      recent.turnId,
+      cutoffMs + 1,
+    );
+    const pendingFinalDispatch = createAcceptedDispatch(
+      "pending-final",
+      dedupeKey("completed-pending-final"),
+    );
+    const pendingFinalClientId =
+      `codex-ilink:${pendingFinalDispatch.turnId}:final`;
+    state.completeDispatchWithOutbox({
+      completedAtMs: cutoffMs,
+      operationId: pendingFinalDispatch.operationId,
+      outbox: [
+        {
+          body: "pending final reply",
+          clientId: pendingFinalClientId,
+          contextToken: "ctx-pending-final",
+          createdAtMs: cutoffMs,
+          targetUserId: controller.userId,
+        },
+      ],
+      turnId: pendingFinalDispatch.turnId,
+    });
+    const recentFinal = completeWithFinal("recent-final", cutoffMs);
+    state.confirmOutbox(recentFinal.clientId, cutoffMs + 1);
+    const expiredFinal = completeWithFinal("expired-final", cutoffMs);
+    state.confirmOutbox(expiredFinal.clientId, cutoffMs);
+    state.putNotificationRoute({
+      deliveredAtMs: nowMs - 1,
+      eventId: "route-expired",
+      expiresAtMs: nowMs,
+      threadId: "thread-route-expired",
+    });
+    state.putNotificationRoute({
+      deliveredAtMs: nowMs,
+      eventId: "route-live",
+      expiresAtMs: nowMs + 1,
+      threadId: "thread-route-live",
+    });
+
+    assert.deepEqual(state.pruneExpiredTransportState(nowMs), {
+      completedDispatchIntents: 2,
+      confirmedOutbox: 1,
+      expiredNotificationRoutes: 1,
+      terminalInboundMessages: 1,
+    });
+    assert.deepEqual(
+      state.listInboundMessages().map(({ messageId }) => messageId),
+      [
+        "recent-terminal",
+        "active-body",
+        "queued-active",
+        "dispatch-active",
+        "completed-pending-final",
+      ],
+    );
+    assert.equal(state.getDispatchIntent(expired.operationId), null);
+    assert.equal(state.getDispatchIntent(expiredFinal.operationId), null);
+    assert.notEqual(state.getDispatchIntent(recent.operationId), null);
+    assert.notEqual(
+      state.getDispatchIntent(pendingFinalDispatch.operationId),
+      null,
+    );
+    assert.notEqual(state.getDispatchIntent(recentFinal.operationId), null);
+    assert.equal(state.getOutbox(expiredFinal.clientId), null);
+    assert.equal(state.getOutbox(pendingFinalClientId)?.status, "pending");
+    assert.equal(state.getOutbox(recentFinal.clientId)?.status, "confirmed");
+    assert.deepEqual(state.listLiveNotificationRoutes(nowMs), [
+      {
+        deliveredAtMs: nowMs,
+        eventId: "route-live",
+        expiresAtMs: nowMs + 1,
+        threadId: "thread-route-live",
+      },
+    ]);
+
+    state.confirmOutbox(pendingFinalClientId, nowMs);
+    const futureNowMs = nowMs + 31 * dayMs;
+    assert.deepEqual(state.pruneExpiredTransportState(futureNowMs), {
+      completedDispatchIntents: 3,
+      confirmedOutbox: 2,
+      expiredNotificationRoutes: 1,
+      terminalInboundMessages: 2,
+    });
+    assert.deepEqual(
+      state.listInboundMessages().map(({ messageId }) => messageId),
+      ["active-body", "queued-active", "dispatch-active"],
+    );
+    assert.deepEqual(state.pruneExpiredTransportState(futureNowMs), {
+      completedDispatchIntents: 0,
+      confirmedOutbox: 0,
+      expiredNotificationRoutes: 0,
+      terminalInboundMessages: 0,
+    });
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("controller identity and database configuration survive reopening", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-"));
   const path = join(directory, "state.db");
@@ -284,7 +706,7 @@ test("controller identity and database configuration survive reopening", () => {
     const first = new SqliteState(path);
     assert.deepEqual(first.storageDiagnostics(), {
       journalMode: "wal",
-      schemaVersion: 12,
+      schemaVersion: 13,
       synchronous: "full",
     });
     assert.deepEqual(
@@ -524,6 +946,119 @@ test("inbound messages and the polling cursor commit together with deduplication
     assert.equal(
       state.listInboundMessages().find(({ messageId }) => messageId === "1001")?.body,
       null,
+    );
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("inbound dedupe lookup returns only matching candidate ids for the controller", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-dedupe-lookup-"));
+  const state = new SqliteState(join(directory, "state.db"));
+
+  try {
+    state.bindController({
+      accountId: "bot-account",
+      boundAtMs: 1,
+      userId: "wechat-user",
+    });
+    state.acceptInboundBatch({
+      accountId: "bot-account",
+      controllerUserId: "wechat-user",
+      messages: [
+        {
+          body: "first request",
+          contextToken: "context-1",
+          messageId: "1001",
+          receivedAtMs: 10,
+        },
+        {
+          body: "second request",
+          contextToken: "context-2",
+          messageId: "1002",
+          receivedAtMs: 11,
+        },
+      ],
+      nextCursor: "cursor-1",
+      updatedAtMs: 12,
+    });
+
+    assert.deepEqual(
+      state.findExistingInboundMessageIds({
+        accountId: "bot-account",
+        candidateMessageIds: ["1002", "missing", "1002"],
+        controllerUserId: "wechat-user",
+      }),
+      new Set(["1002"]),
+    );
+    assert.deepEqual(
+      state.findExistingInboundMessageIds({
+        accountId: "other-account",
+        candidateMessageIds: ["1001", "1002"],
+        controllerUserId: "wechat-user",
+      }),
+      new Set(),
+    );
+    assert.deepEqual(
+      state.findExistingInboundMessageIds({
+        accountId: "bot-account",
+        candidateMessageIds: ["1001", "1002"],
+        controllerUserId: "other-user",
+      }),
+      new Set(),
+    );
+    assert.deepEqual(
+      state.findExistingInboundMessageIds({
+        accountId: "bot-account",
+        candidateMessageIds: [],
+        controllerUserId: "wechat-user",
+      }),
+      new Set(),
+    );
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("inbound dedupe lookup chunks oversized candidate batches", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-dedupe-chunks-"));
+  const state = new SqliteState(join(directory, "state.db"));
+
+  try {
+    state.bindController({
+      accountId: "bot-account",
+      boundAtMs: 1,
+      userId: "wechat-user",
+    });
+    state.acceptInboundBatch({
+      accountId: "bot-account",
+      controllerUserId: "wechat-user",
+      messages: [
+        {
+          body: "existing request",
+          contextToken: "context-existing",
+          messageId: "existing",
+          receivedAtMs: 10,
+        },
+      ],
+      nextCursor: "cursor-1",
+      updatedAtMs: 11,
+    });
+    const candidateMessageIds = Array.from(
+      { length: 33_000 },
+      (_, index) => `missing-${String(index)}`,
+    );
+    candidateMessageIds.push("existing");
+
+    assert.deepEqual(
+      state.findExistingInboundMessageIds({
+        accountId: "bot-account",
+        candidateMessageIds,
+        controllerUserId: "wechat-user",
+      }),
+      new Set(["existing"]),
     );
   } finally {
     state.close();
@@ -1367,7 +1902,7 @@ test("schema v6 deletes legacy plain-text scheduler payloads", () => {
     database.close();
 
     state = new SqliteState(path);
-    assert.equal(state.storageDiagnostics().schemaVersion, 12);
+    assert.equal(state.storageDiagnostics().schemaVersion, 13);
     assert.deepEqual(state.listQueuedTurns(), []);
     assert.equal(state.getDispatchIntent("legacy-operation"), null);
     assert.equal(state.countActiveDispatches(), 0);
@@ -1658,6 +2193,7 @@ function applyMigrations(
     "user-timing-settings",
     "thread-permission-settings",
     "outbound-attachment-provenance",
+    "transport-retention-indexes",
   ];
   const migrations = join(process.cwd(), "src", "bridge", "migrations");
   for (let version = firstVersion; version <= lastVersion; version += 1) {

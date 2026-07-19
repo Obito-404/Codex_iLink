@@ -357,16 +357,13 @@ export class BridgeEngine {
     const parsed = input.messages.map((message) =>
       parseControllerMessage(message, this.#session.controllerUserId),
     );
-    const knownMessageIds = new Set(
-      this.#state
-        .listInboundMessages()
-        .filter(
-          (message) =>
-            message.accountId === this.#session.botId &&
-            message.controllerUserId === this.#session.controllerUserId,
-        )
-        .map(({ messageId }) => messageId),
-    );
+    const knownMessageIds = this.#state.findExistingInboundMessageIds({
+      accountId: this.#session.botId,
+      candidateMessageIds: parsed.flatMap((message) =>
+        message.kind === "ignored" ? [] : [message.messageId],
+      ),
+      controllerUserId: this.#session.controllerUserId,
+    });
     const prepared = new Map<
       string,
       {

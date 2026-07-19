@@ -45,12 +45,45 @@ const countServerResponsesPath =
   countServerResponsesIndex === -1
     ? null
     : process.argv[countServerResponsesIndex + 1];
+const recordServerResponsesIndex = process.argv.indexOf(
+  "--record-server-responses",
+);
+const recordServerResponsesPath =
+  recordServerResponsesIndex === -1
+    ? null
+    : process.argv[recordServerResponsesIndex + 1];
+const delayControlRouterIndex = process.argv.indexOf(
+  "--delay-control-router-ms",
+);
+const delayControlRouterMs =
+  delayControlRouterIndex === -1
+    ? 0
+    : Number(process.argv[delayControlRouterIndex + 1]);
+const delayControlRouterCountIndex = process.argv.indexOf(
+  "--delay-control-router-count",
+);
+const delayControlRouterCount =
+  delayControlRouterCountIndex === -1
+    ? Number.POSITIVE_INFINITY
+    : Number(process.argv[delayControlRouterCountIndex + 1]);
+const controlRouterResultToolIndex = process.argv.indexOf(
+  "--control-router-result-tool",
+);
+const controlRouterResultTool =
+  controlRouterResultToolIndex === -1
+    ? "route_ilink_control"
+    : process.argv[controlRouterResultToolIndex + 1];
+const uniqueControlRouterThreads = process.argv.includes(
+  "--unique-control-router-threads",
+);
 const recordStartIndex = process.argv.indexOf("--record-start");
 if (recordStartIndex !== -1) {
   appendFileSync(process.argv[recordStartIndex + 1], `${process.pid}\n`);
 }
 
 let initializeCount = 0;
+let nextControlRouterThreadId = 1;
+let controlRouterTurnCount = 0;
 let experimentalApi = false;
 const activePermissionProfiles = new Map();
 const activeApprovalPolicies = new Map();
@@ -91,6 +124,12 @@ lines.on("line", (line) => {
 
   if (message.method === undefined && message.result) {
     if (countServerResponsesPath) incrementFile(countServerResponsesPath);
+    if (recordServerResponsesPath) {
+      appendFileSync(
+        recordServerResponsesPath,
+        `${JSON.stringify(message.result)}\n`,
+      );
+    }
     process.stdout.write(
       `${JSON.stringify({
         method: "fixture/serverRequestResponse",
@@ -368,7 +407,11 @@ lines.on("line", (line) => {
       fixtureParams: message.params,
       thread: {
         cwd: message.params.cwd,
-        id: isControlRouter ? "thread-control-router" : "thread-new",
+        id: isControlRouter
+          ? uniqueControlRouterThreads
+            ? `thread-control-router-${nextControlRouterThreadId++}`
+            : "thread-control-router"
+          : "thread-new",
       },
     });
     return;
@@ -385,7 +428,7 @@ lines.on("line", (line) => {
       rejectUnexpectedParams(message);
       return;
     }
-    if (message.params.threadId === "thread-control-router") {
+    if (message.params.threadId.startsWith("thread-control-router")) {
       const text = message.params.input[0]?.text;
       const control = text?.includes("返回")
         ? {
@@ -393,33 +436,53 @@ lines.on("line", (line) => {
             kind: "controlSequence",
           }
         : { kind: "help" };
-      process.stdout.write(
-        `${JSON.stringify({
-          id: "control-router-tool-request",
-          method: "item/tool/call",
-          params: {
-            arguments: control,
-            callId: "control-router-call",
-            namespace: null,
-            threadId: message.params.threadId,
-            tool: "route_ilink_control",
-            turnId: "turn-control-router",
-          },
-        })}\n`,
-      );
-      respond(message.id, {
-        fixtureParams: message.params,
-        turn: { id: "turn-control-router" },
-      });
-      process.stdout.write(
-        `${JSON.stringify({
-          method: "turn/completed",
-          params: {
-            threadId: message.params.threadId,
-            turn: { id: "turn-control-router", status: "completed" },
-          },
-        })}\n`,
-      );
+      const emitControlToolCall = () => {
+        process.stdout.write(
+          `${JSON.stringify({
+            id: "control-router-tool-request",
+            method: "item/tool/call",
+            params: {
+              arguments: control,
+              callId: "control-router-call",
+              namespace: null,
+              threadId: message.params.threadId,
+              tool: controlRouterResultTool,
+              turnId: "turn-control-router",
+            },
+          })}\n`,
+        );
+      };
+      const emitControlCompleted = () => {
+        process.stdout.write(
+          `${JSON.stringify({
+            method: "turn/completed",
+            params: {
+              threadId: message.params.threadId,
+              turn: { id: "turn-control-router", status: "completed" },
+            },
+          })}\n`,
+        );
+      };
+      if (
+        delayControlRouterMs > 0 &&
+        controlRouterTurnCount++ < delayControlRouterCount
+      ) {
+        respond(message.id, {
+          fixtureParams: message.params,
+          turn: { id: "turn-control-router" },
+        });
+        setTimeout(() => {
+          emitControlToolCall();
+          emitControlCompleted();
+        }, delayControlRouterMs);
+      } else {
+        emitControlToolCall();
+        respond(message.id, {
+          fixtureParams: message.params,
+          turn: { id: "turn-control-router" },
+        });
+        emitControlCompleted();
+      }
       return;
     }
     if (process.argv.includes("--request-then-hang-turn-start")) {

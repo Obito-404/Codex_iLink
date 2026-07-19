@@ -97,6 +97,7 @@ export type BridgeDaemonOptions = {
 };
 
 const DEFAULT_EVENT_QUIESCE_TIMEOUT_MS = 10_000;
+const TRANSPORT_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1_000;
 
 export class BridgeDaemon {
   readonly #options: BridgeDaemonOptions;
@@ -104,6 +105,7 @@ export class BridgeDaemon {
   readonly #codexEventTasks = new Set<Promise<unknown>>();
   #desktopNotifier: DesktopNotifier | undefined;
   #outbox: OutboxWorker | undefined;
+  #nextTransportMaintenanceAtMs = 0;
   #started = false;
   #unsubscribe: (() => void) | undefined;
 
@@ -117,6 +119,8 @@ export class BridgeDaemon {
     const outboundDirectory = outboundMediaDirectory(
       this.#options.inboxDirectory,
     );
+    const startupNowMs = this.#options.now();
+    this.#maintainTransportState(startupNowMs);
 
     try {
       const retainedPathKeys = new Set(
@@ -224,7 +228,7 @@ export class BridgeDaemon {
     });
     this.#options.state.enableArbitration(this.#options.bridgeInstanceId);
     this.#options.state.pruneExpiredDesktopObservationTombstones(
-      this.#options.now(),
+      startupNowMs,
     );
     this.#started = true;
     await this.#notifyILinkLifecycle("notifyStart");
@@ -244,8 +248,10 @@ export class BridgeDaemon {
     if (!this.#started || !this.#bridge) {
       throw new Error("Bridge daemon is not started");
     }
+    const pollNowMs = this.#options.now();
+    this.#maintainTransportState(pollNowMs);
     this.#options.state.pruneExpiredDesktopObservationTombstones(
-      this.#options.now(),
+      pollNowMs,
     );
     await this.#options.hookReceiver.drainSpool();
     await this.#bridge.reconcilePendingWork();
@@ -605,6 +611,18 @@ export class BridgeDaemon {
           ).length,
       ),
     );
+  }
+
+  #maintainTransportState(nowMs: number): void {
+    if (nowMs < this.#nextTransportMaintenanceAtMs) return;
+    this.#nextTransportMaintenanceAtMs =
+      nowMs + TRANSPORT_MAINTENANCE_INTERVAL_MS;
+    try {
+      this.#options.state.pruneExpiredTransportState(nowMs);
+    } catch {
+      // Retention is retried on the next bounded maintenance interval and
+      // cannot block durable transport recovery.
+    }
   }
 }
 

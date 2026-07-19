@@ -21,7 +21,10 @@ import type {
 
 export { CodexOutcomeUnknownError };
 
-export type CodexRuntimeOptions = AppServerConnectionOptions;
+export type CodexRuntimeOptions = AppServerConnectionOptions & {
+  controlRouterTombstoneTtlMs?: number;
+  controlRouterTimeoutMs?: number;
+};
 export type { ThreadPermissionSettings } from "./protocol.ts";
 
 const ILINK_DEVELOPER_INSTRUCTIONS =
@@ -47,6 +50,10 @@ const ILINK_DYNAMIC_TOOLS = [
 
 const CONTROL_ROUTER_INSTRUCTIONS =
   "仅将明确的 iLink 控制请求调用 route_ilink_control；连续操作用 controlSequence。否则 kind=message。不得回答。";
+
+const DEFAULT_CONTROL_ROUTER_TIMEOUT_MS = 15_000;
+const DEFAULT_CONTROL_ROUTER_TOMBSTONE_TTL_MS = 15_000;
+const MAX_CONTROL_ROUTER_OWNERS = 128;
 
 const CONTROL_ATOMIC_KINDS = [
   "approve",
@@ -126,6 +133,11 @@ type ControlRouter = {
   timeout: NodeJS.Timeout;
 };
 
+type ExpiredControlRouter = {
+  connection: AppServerConnection;
+  timeout: NodeJS.Timeout;
+};
+
 export class CodexRuntime {
   #connection: AppServerConnection;
   #detachConnectionEvents: (() => void) | undefined;
@@ -136,6 +148,9 @@ export class CodexRuntime {
   >();
   readonly #loadedThreadIds = new Set<string>();
   readonly #controlRouters = new Map<string, ControlRouter>();
+  readonly #controlRouterTombstoneTtlMs: number;
+  readonly #controlRouterTimeoutMs: number;
+  readonly #expiredControlRouters = new Map<string, ExpiredControlRouter>();
   readonly #options: CodexRuntimeOptions;
   readonly #serverRequestOwners = new Map<
     number | string,
@@ -144,6 +159,7 @@ export class CodexRuntime {
   #closed = false;
   #nextServerRequestToken = 1;
   #nextControlRouterId = 1;
+  #pendingControlRouterStarts = 0;
   #reconnectRequired: AppServerConnection | undefined;
   #reconnectPromise: Promise<AppServerConnection> | undefined;
 
@@ -152,6 +168,11 @@ export class CodexRuntime {
     connection: AppServerConnection,
   ) {
     this.#options = options;
+    this.#controlRouterTombstoneTtlMs =
+      options.controlRouterTombstoneTtlMs ??
+      DEFAULT_CONTROL_ROUTER_TOMBSTONE_TTL_MS;
+    this.#controlRouterTimeoutMs =
+      options.controlRouterTimeoutMs ?? DEFAULT_CONTROL_ROUTER_TIMEOUT_MS;
     this.#connection = connection;
     this.#attachConnectionEvents(connection);
   }
@@ -206,14 +227,34 @@ export class CodexRuntime {
     cwd: string;
     text: string;
   }): Promise<unknown> {
-    const started = (await this.#requestOnceWithUnknownOutcome("thread/start", {
-      cwd: input.cwd,
-      developerInstructions: CONTROL_ROUTER_INSTRUCTIONS,
-      dynamicTools: CONTROL_ROUTER_TOOLS,
-      ephemeral: true,
-    })) as ThreadStartResult;
+    if (
+      this.#pendingControlRouterStarts +
+        this.#controlRouters.size +
+        this.#expiredControlRouters.size >=
+      MAX_CONTROL_ROUTER_OWNERS
+    ) {
+      return null;
+    }
+    this.#pendingControlRouterStarts += 1;
+    let started: ThreadStartResult;
+    try {
+      started = (await this.#requestOnceWithUnknownOutcome("thread/start", {
+        cwd: input.cwd,
+        developerInstructions: CONTROL_ROUTER_INSTRUCTIONS,
+        dynamicTools: CONTROL_ROUTER_TOOLS,
+        ephemeral: true,
+      })) as ThreadStartResult;
+    } finally {
+      this.#pendingControlRouterStarts -= 1;
+    }
     const threadId = started.thread.id;
     const connection = this.#connection;
+    if (
+      this.#controlRouters.has(threadId) ||
+      this.#expiredControlRouters.has(threadId)
+    ) {
+      return null;
+    }
 
     return new Promise<unknown>((resolve) => {
       const router: ControlRouter = {
@@ -221,8 +262,8 @@ export class CodexRuntime {
         resolve,
         settled: false,
         timeout: setTimeout(() => {
-          this.#settleControlRouter(threadId, null, false);
-        }, 15_000),
+          this.#expireControlRouter(threadId);
+        }, this.#controlRouterTimeoutMs),
       };
       router.timeout.unref();
       this.#controlRouters.set(threadId, router);
@@ -230,7 +271,7 @@ export class CodexRuntime {
         clientUserMessageId: `codex-ilink:control-router:${String(this.#nextControlRouterId++)}`,
         input: [{ text: input.text, text_elements: [], type: "text" }],
         threadId,
-      }).catch(() => this.#settleControlRouter(threadId, null, true));
+      }).catch(() => this.#expireControlRouter(threadId));
     });
   }
 
@@ -581,13 +622,27 @@ export class CodexRuntime {
     const threadId = stringValue(event.params.threadId);
     if (!threadId) return false;
     const router = this.#controlRouters.get(threadId);
-    if (!router || router.connection !== connection) return false;
+    if (!router || router.connection !== connection) {
+      const expiredRouter = this.#expiredControlRouters.get(threadId);
+      if (expiredRouter?.connection === connection) {
+        if (isControlRouterToolCall(event)) {
+          this.#rejectExpiredControlRouterRequest(connection, event);
+        } else if (event.id !== undefined) {
+          this.#rejectUnsupportedControlRouterRequest(connection, event);
+        }
+        if (event.method === "turn/completed") {
+          this.#deleteExpiredControlRouter(threadId);
+        }
+        return true;
+      }
+      if (isControlRouterToolCall(event)) {
+        this.#rejectExpiredControlRouterRequest(connection, event);
+        return true;
+      }
+      return false;
+    }
 
-    if (
-      event.method === "item/tool/call" &&
-      event.params.tool === "route_ilink_control" &&
-      event.id !== undefined
-    ) {
+    if (isControlRouterToolCall(event) && event.id !== undefined) {
       const argumentsValue = event.params.arguments;
       connection.respondToServerRequest(event.id, {
         contentItems: [
@@ -601,6 +656,9 @@ export class CodexRuntime {
     if (event.method === "turn/completed") {
       this.#settleControlRouter(threadId, null, true);
       return true;
+    }
+    if (event.id !== undefined) {
+      this.#rejectUnsupportedControlRouterRequest(connection, event);
     }
     return true;
   }
@@ -621,10 +679,72 @@ export class CodexRuntime {
     this.#controlRouters.delete(threadId);
   }
 
+  #expireControlRouter(threadId: string): void {
+    const router = this.#controlRouters.get(threadId);
+    if (!router) return;
+    this.#settleControlRouter(threadId, null, true);
+    this.#deleteExpiredControlRouter(threadId);
+    const timeout = setTimeout(() => {
+      this.#deleteExpiredControlRouter(threadId, timeout);
+    }, this.#controlRouterTombstoneTtlMs);
+    timeout.unref();
+    this.#expiredControlRouters.set(threadId, {
+      connection: router.connection,
+      timeout,
+    });
+  }
+
+  #deleteExpiredControlRouter(
+    threadId: string,
+    expectedTimeout?: NodeJS.Timeout,
+  ): void {
+    const expiredRouter = this.#expiredControlRouters.get(threadId);
+    if (
+      !expiredRouter ||
+      (expectedTimeout !== undefined &&
+        expiredRouter.timeout !== expectedTimeout)
+    ) {
+      return;
+    }
+    clearTimeout(expiredRouter.timeout);
+    this.#expiredControlRouters.delete(threadId);
+  }
+
+  #rejectExpiredControlRouterRequest(
+    connection: AppServerConnection,
+    event: AppServerEvent,
+  ): void {
+    if (event.id === undefined) return;
+    connection.respondToServerRequest(event.id, {
+      contentItems: [
+        { text: "控制意图已过期，结果已忽略。", type: "inputText" },
+      ],
+      success: true,
+    });
+  }
+
+  #rejectUnsupportedControlRouterRequest(
+    connection: AppServerConnection,
+    event: AppServerEvent,
+  ): void {
+    if (event.id === undefined) return;
+    connection.respondToServerRequest(event.id, {
+      contentItems: [
+        { text: "控制路由不支持此请求。", type: "inputText" },
+      ],
+      success: false,
+    });
+  }
+
   #invalidateControlRouters(connection: AppServerConnection): void {
     for (const [threadId, router] of this.#controlRouters) {
       if (router.connection !== connection) continue;
       this.#settleControlRouter(threadId, null, true);
+    }
+    for (const [threadId, expiredRouter] of this.#expiredControlRouters) {
+      if (expiredRouter.connection === connection) {
+        this.#deleteExpiredControlRouter(threadId);
+      }
     }
   }
 
@@ -721,4 +841,11 @@ function permissionSettingsMatch(
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function isControlRouterToolCall(event: AppServerEvent): boolean {
+  return (
+    event.method === "item/tool/call" &&
+    event.params.tool === "route_ilink_control"
+  );
 }

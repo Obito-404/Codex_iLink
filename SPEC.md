@@ -209,12 +209,11 @@ flowchart LR
 
 ## 11. 状态库与数据留存
 
-状态库存放在 `%LOCALAPPDATA%\Codex_iLink`，使用 SQLite WAL 和版本化 Migration。最小逻辑表：
+状态库存放在 `%LOCALAPPDATA%\Codex_iLink`，使用 SQLite WAL 和版本化 Migration。项目、会话目录从 Codex 公开状态派生，单次审批只属于当前运行时，不创建 `projects`、`sessions` 或 `approvals` 表。主要持久表：
 
 - `controller`：唯一微信控制者与绑定状态
-- `ilink_state`：DPAPI 加密的 Token 与 `context_token`，以及长轮询游标
-- `projects`：从公开会话数据派生的项目
-- `sessions`：`thread_id`、项目、标题和最后状态
+- `ilink_state`：`context_token` 与长轮询游标
+- `ilink_session`：账号端点及 DPAPI 加密的 Token
 - `bindings`：当前会话绑定及滑动过期时间
 - `inbound_messages`：去重、处理状态及待路由的版本化输入 payload
 - `queued_turns`：待处理的版本化输入 payload 和顺序
@@ -222,13 +221,12 @@ flowchart LR
 - `outbound_attachment_intents`：`send_file` 已登记、等待随当前成功终态进入 Outbox 的短期附件意图；v12 以 `snapshot_provenance` 区分旧路径与本版本可信快照
 - `outbox`：未送达回复和通知
 - `notification_routes`：已送达主动通知与短期来源会话映射
-- `approvals`：Bridge 单次审批
 - `thread_permission_profiles`：控制者明确选择的会话级 Profile、审批策略和审批人；迁移前记录的新增字段保持 `NULL`
 - `list_snapshots`：列表或页面生成后固定 10 分钟的编号映射；直接编号命令在无有效快照时先静默生成当前映射
 
 版本化输入 payload 沿 `inbound_messages → queued_turns → dispatch_intents` 传递，只保存文本、附件种类、显示名和本地绝对路径；SQLite 不保存媒体二进制、CDN URL、AES 密钥或完整 Transcript。媒体二进制存放在 `%LOCALAPPDATA%\Codex_iLink\media\inbound\<sha256(dedupeKey)>`，至少保留到对应回合终态；提交状态未知时保留到公开接口对账完成，启动时只清理未被入站、队列或未完成 Dispatch Intent 引用的孤儿目录。
 
-`inbound_messages` 的输入在恢复责任已原子转移到 `queued_turns` 或 `dispatch_intents`，或失败回复已持久化后清除；Dispatch Intent 的输入在 App Server 明确接受且不再需要提交恢复后清除。`outbound_attachment_intents` 在成功终态与最终回复原子转入 Outbox，在失败或中断终态与 Dispatch 完成状态原子清理；v12 迁移出的 legacy 路径仅保留不可外发、不可清理的规范化保护 key，防止后续孤儿扫描误删旧版原文件。出站正文在 iLink 明确确认发送后清除。中断或状态未知的 Dispatch Intent 在持久化诊断通知并完成必要对账后删除输入，由用户从原微信消息决定是否手动重发。Outbox 的每次重试复用同一 `client_id`。消息 ID、目标、状态和时间等去重元数据保留 30 天。SQLite 状态迁移使用事务和唯一约束，状态库不复制 Codex 完整历史。
+`inbound_messages` 的输入在恢复责任已原子转移到 `queued_turns` 或 `dispatch_intents`，或失败回复已持久化后清除；Dispatch Intent 的输入在 App Server 明确接受且不再需要提交恢复后清除。`outbound_attachment_intents` 在成功终态与最终回复原子转入 Outbox，在失败或中断终态与 Dispatch 完成状态原子清理；v12 迁移出的 legacy 路径仅保留不可外发、不可清理的规范化保护 key，防止后续孤儿扫描误删旧版原文件。出站正文在 iLink 明确确认发送后清除。中断或状态未知的 Dispatch Intent 在持久化诊断通知并完成必要对账后删除输入，由用户从原微信消息决定是否手动重发。Outbox 的每次重试复用同一 `client_id`。消息 ID、目标、状态和时间等去重元数据保留 30 天；入站去重从 Bridge 本地接受时间起算，不依赖可能缺失或过旧的远端消息时间。SQLite 状态迁移使用事务和唯一约束，状态库不复制 Codex 完整历史。
 
 ## 12. IPC、日志与错误
 

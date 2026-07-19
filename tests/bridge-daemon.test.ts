@@ -225,7 +225,7 @@ test("daemon creates one persistent main thread and polls iLink", async () => {
   }
 });
 
-test("daemon startup prunes media while protecting durable active dedupe keys", async () => {
+test("daemon periodically prunes expired transport state and orphaned media", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-media-prune-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -241,6 +241,8 @@ test("daemon startup prunes media while protecting durable active dedupe keys", 
     path: orphanSource,
     workspaceRoot,
   });
+  const dayMs = 24 * 60 * 60 * 1_000;
+  let nowMs = 31 * dayMs;
   let protectedKeys: string[] = [];
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
   state.setMainThreadId("thread-main");
@@ -251,6 +253,14 @@ test("daemon startup prunes media while protecting durable active dedupe keys", 
     dedupeKey: "bot-a/controller-a/media-message",
     threadId: "thread-media",
   });
+  state.enqueueOutbox({
+    body: "expired before startup",
+    clientId: "codex-ilink:expired-before-startup",
+    contextToken: "ctx-expired-startup",
+    createdAtMs: 1,
+    targetUserId: "controller-a",
+  });
+  state.confirmOutbox("codex-ilink:expired-before-startup", 1);
 
   const daemon = new BridgeDaemon({
     bridgeInstanceId: "bridge-instance",
@@ -285,7 +295,7 @@ test("daemon startup prunes media while protecting durable active dedupe keys", 
       },
     },
     newId: () => "unused",
-    now: () => 2,
+    now: () => nowMs,
     session,
     state,
   });
@@ -294,6 +304,19 @@ test("daemon startup prunes media while protecting durable active dedupe keys", 
     await daemon.start();
     assert.deepEqual(protectedKeys, ["bot-a/controller-a/media-message"]);
     assert.equal(existsSync(orphanSnapshot.path), false);
+    assert.equal(state.getOutbox("codex-ilink:expired-before-startup"), null);
+
+    state.enqueueOutbox({
+      body: "expired during runtime",
+      clientId: "codex-ilink:expired-during-runtime",
+      contextToken: "ctx-expired-runtime",
+      createdAtMs: 1,
+      targetUserId: "controller-a",
+    });
+    state.confirmOutbox("codex-ilink:expired-during-runtime", 1);
+    nowMs += 60 * 60 * 1_000;
+    await daemon.pollOnce();
+    assert.equal(state.getOutbox("codex-ilink:expired-during-runtime"), null);
     await daemon.stop();
   } finally {
     leases.close();

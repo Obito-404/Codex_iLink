@@ -325,7 +325,10 @@ test("media survives FIFO queuing without a second CDN download", async () => {
     assert.deepEqual(
       await bridge.ingestBatch({
         cursor: "cursor-media-queue",
-        messages: [fileMessage(71, "阅读这个文件")],
+        messages: [
+          fileMessage(71, "阅读这个文件"),
+          fileMessage(71, "阅读这个文件"),
+        ],
       }),
       { accepted: 1, sent: 1 },
     );

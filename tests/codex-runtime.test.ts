@@ -36,6 +36,175 @@ test("control intent classification uses an isolated ephemeral tool turn", async
   }
 });
 
+test("a timed out control classification ignores a late tool result", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-control-timeout-"));
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const responsesPath = join(directory, "server-responses.jsonl");
+  const runtime = await CodexRuntime.create({
+    bridgeInstanceId: "bridge-instance-control-router-timeout",
+    command: [
+      process.execPath,
+      fakeRuntime,
+      "--delay-control-router-ms",
+      "150",
+      "--record-server-responses",
+      responsesPath,
+    ],
+    controlRouterTimeoutMs: 50,
+    requestTimeoutMs: 2_000,
+  });
+  const events: unknown[] = [];
+  runtime.onEvent((event) => events.push(event));
+
+  try {
+    assert.equal(
+      await runtime.classifyControlIntent({
+        cwd: "D:\\Codex-iLink\\Inbox",
+        text: "帮助",
+      }),
+      null,
+    );
+    await waitFor(() =>
+      existsSync(responsesPath) && readFileSync(responsesPath, "utf8").length > 0,
+    );
+
+    const responses = readFileSync(responsesPath, "utf8")
+      .trim()
+      .split(/\r?\n/u)
+      .map((line) => JSON.parse(line) as unknown);
+    assert.deepEqual(responses, [
+      {
+        contentItems: [
+          { text: "控制意图已过期，结果已忽略。", type: "inputText" },
+        ],
+        success: true,
+      },
+    ]);
+    assert.equal(
+      events.some(
+        (event) =>
+          typeof event === "object" &&
+          event !== null &&
+          (event as { params?: { threadId?: unknown } }).params?.threadId ===
+            "thread-control-router",
+      ),
+      false,
+    );
+  } finally {
+    runtime.close();
+  }
+});
+
+test("expired control router capacity recovers after the tombstone TTL", async () => {
+  const runtime = await CodexRuntime.create({
+    bridgeInstanceId: "bridge-instance-control-router-capacity",
+    command: [
+      process.execPath,
+      fakeRuntime,
+      "--delay-control-router-ms",
+      "10000",
+      "--delay-control-router-count",
+      "128",
+      "--unique-control-router-threads",
+    ],
+    controlRouterTimeoutMs: 20,
+    controlRouterTombstoneTtlMs: 2_000,
+    requestTimeoutMs: 2_000,
+  });
+
+  try {
+    const timedOut = await Promise.all(
+      Array.from({ length: 128 }, (_, index) =>
+        runtime.classifyControlIntent({
+          cwd: "D:\\Codex-iLink\\Inbox",
+          text: `帮助 ${index}`,
+        }),
+      ),
+    );
+    assert.deepEqual(timedOut, Array.from({ length: 128 }, () => null));
+
+    assert.equal(
+      await runtime.classifyControlIntent({
+        cwd: "D:\\Codex-iLink\\Inbox",
+        text: "容量已满",
+      }),
+      null,
+    );
+
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_100));
+
+    assert.deepEqual(
+      await runtime.classifyControlIntent({
+        cwd: "D:\\Codex-iLink\\Inbox",
+        text: "容量恢复",
+      }),
+      { kind: "help" },
+    );
+  } finally {
+    runtime.close();
+  }
+});
+
+test("an isolated control router answers an unexpected server request", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-control-unexpected-"));
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const responsesPath = join(directory, "server-responses.jsonl");
+  const runtime = await CodexRuntime.create({
+    bridgeInstanceId: "bridge-instance-control-router-unexpected",
+    command: [
+      process.execPath,
+      fakeRuntime,
+      "--control-router-result-tool",
+      "unexpected_control_tool",
+      "--record-server-responses",
+      responsesPath,
+    ],
+    controlRouterTimeoutMs: 500,
+    requestTimeoutMs: 2_000,
+  });
+  const events: unknown[] = [];
+  runtime.onEvent((event) => events.push(event));
+
+  try {
+    assert.equal(
+      await runtime.classifyControlIntent({
+        cwd: "D:\\Codex-iLink\\Inbox",
+        text: "帮助",
+      }),
+      null,
+    );
+    await waitFor(() =>
+      existsSync(responsesPath) && readFileSync(responsesPath, "utf8").length > 0,
+    );
+    assert.deepEqual(
+      readFileSync(responsesPath, "utf8")
+        .trim()
+        .split(/\r?\n/u)
+        .map((line) => JSON.parse(line) as unknown),
+      [
+        {
+          contentItems: [
+            { text: "控制路由不支持此请求。", type: "inputText" },
+          ],
+          success: false,
+        },
+      ],
+    );
+    assert.equal(
+      events.some(
+        (event) =>
+          typeof event === "object" &&
+          event !== null &&
+          (event as { params?: { threadId?: unknown } }).params?.threadId ===
+            "thread-control-router",
+      ),
+      false,
+    );
+  } finally {
+    runtime.close();
+  }
+});
+
 test("model catalog and session model settings use native App Server methods", async () => {
   const runtime = await CodexRuntime.create({
     bridgeInstanceId: "bridge-instance-model-settings",
@@ -1305,3 +1474,12 @@ test("stderr output cannot backpressure the persistent App Server", async () => 
     runtime.close();
   }
 });
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  }
+  assert.fail("timed out waiting for fixture output");
+}

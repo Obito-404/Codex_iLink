@@ -11,6 +11,7 @@ import {
 } from "../src/codex/codex-runtime.ts";
 
 const fakeRuntime = resolve("tests/fixtures/fake-codex-runtime.mjs");
+const NON_TIMING_TEST_REQUEST_TIMEOUT_MS = 5_000;
 
 test("control intent classification uses an isolated ephemeral tool turn", async () => {
   const runtime = await CodexRuntime.create({
@@ -244,7 +245,7 @@ test("turn interruption and thread compaction use the native App Server methods"
   const runtime = await CodexRuntime.create({
     bridgeInstanceId: "bridge-instance-controls",
     command: [process.execPath, fakeRuntime],
-    requestTimeoutMs: 1_000,
+    requestTimeoutMs: NON_TIMING_TEST_REQUEST_TIMEOUT_MS,
   });
 
   try {
@@ -273,7 +274,7 @@ test("context compaction EOF is unknown and is never retried", async (t) => {
       "thread/compact/start",
       countPath,
     ],
-    requestTimeoutMs: 1_000,
+    requestTimeoutMs: NON_TIMING_TEST_REQUEST_TIMEOUT_MS,
   });
 
   try {
@@ -330,7 +331,7 @@ test("a safe request reconnects once after App Server EOF", async (t) => {
       "thread/list",
       join(directory, "eof.marker"),
     ],
-    requestTimeoutMs: 1_000,
+    requestTimeoutMs: NON_TIMING_TEST_REQUEST_TIMEOUT_MS,
   });
 
   try {
@@ -517,7 +518,7 @@ for (const operation of reconnectableOperations) {
         operation.appServerMethod,
         join(directory, "eof.marker"),
       ],
-      requestTimeoutMs: 1_000,
+      requestTimeoutMs: NON_TIMING_TEST_REQUEST_TIMEOUT_MS,
     });
 
     try {
@@ -537,7 +538,7 @@ for (const outcome of [
   {
     args: ["--eof-method-always", "thread/start"],
     name: "EOF",
-    timeoutMs: 1_000,
+    timeoutMs: NON_TIMING_TEST_REQUEST_TIMEOUT_MS,
   },
 ] as const) {
   test(`thread/start ${outcome.name} is unknown and is not retried`, async (t) => {
@@ -585,7 +586,7 @@ test("event subscriptions continue on the replacement App Server", async () => {
       "--eof-turn-start",
       "--event-before-list",
     ],
-    requestTimeoutMs: 1_000,
+    requestTimeoutMs: NON_TIMING_TEST_REQUEST_TIMEOUT_MS,
   });
   const events: unknown[] = [];
   runtime.onEvent((event) => {
@@ -627,7 +628,7 @@ test("concurrent safe requests share one reconnect", async (t) => {
       "--record-start",
       startsPath,
     ],
-    requestTimeoutMs: 1_000,
+    requestTimeoutMs: NON_TIMING_TEST_REQUEST_TIMEOUT_MS,
   });
 
   try {
@@ -706,7 +707,7 @@ test("one safe call rebuilds the App Server at most once", async (t) => {
       "--record-start",
       startsPath,
     ],
-    requestTimeoutMs: 1_000,
+    requestTimeoutMs: NON_TIMING_TEST_REQUEST_TIMEOUT_MS,
   });
 
   try {
@@ -1338,7 +1339,7 @@ test("stdout EOF during turn/start is an unknown submission outcome", async () =
   const runtime = await CodexRuntime.create({
     bridgeInstanceId: "bridge-instance-eof",
     command: [process.execPath, fakeRuntime, "--eof-turn-start"],
-    requestTimeoutMs: 1_000,
+    requestTimeoutMs: NON_TIMING_TEST_REQUEST_TIMEOUT_MS,
   });
 
   try {

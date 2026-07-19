@@ -323,6 +323,39 @@ test("rejects a junction media root before storing outside it", async (t) => {
   assert.deepEqual(readdirSync(target), []);
 });
 
+test("rejects a media root beneath a junction ancestor", async (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "codex-ilink-media-parent-link-"));
+  const target = mkdtempSync(join(tmpdir(), "codex-ilink-media-parent-target-"));
+  const linkedParent = join(parent, "linked-parent");
+  const root = join(linkedParent, "inbound");
+  symlinkSync(target, linkedParent, "junction");
+  t.after(() => {
+    try {
+      unlinkSync(linkedParent);
+    } catch {}
+    rmSync(parent, { force: true, recursive: true });
+    rmSync(target, { force: true, recursive: true });
+  });
+  const store = new InboundMediaStore({
+    fetch: async () => new Response("image"),
+    rootDirectory: root,
+  });
+  const candidate = inboundMediaCandidateFromItem({
+    image_item: {
+      media: { full_url: "https://novac2c.cdn.weixin.qq.com/c2c/image" },
+    },
+    type: 2,
+  });
+  assert.ok(candidate);
+
+  await assert.rejects(
+    store.resolve({ candidate, dedupeKey: "junction-ancestor" }),
+    assertMediaError("UNSAFE_STORAGE"),
+  );
+  assert.deepEqual(readdirSync(target), ["inbound"]);
+  assert.deepEqual(readdirSync(join(target, "inbound")), []);
+});
+
 test("prune refuses to cross a junction media root", async (t) => {
   const parent = mkdtempSync(join(tmpdir(), "codex-ilink-prune-root-parent-"));
   const target = mkdtempSync(join(tmpdir(), "codex-ilink-prune-root-target-"));

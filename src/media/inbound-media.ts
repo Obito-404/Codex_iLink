@@ -752,8 +752,33 @@ async function trustedStorageRoot(root: string): Promise<string | null> {
   } catch {
     throw storageError();
   }
-  if (!sameStoragePath(realPath, root)) throw storageError();
-  return realPath;
+  // Windows may expose the same directory through an 8.3 alias. Reject linked
+  // components explicitly, then verify that the canonical target stayed stable.
+  await assertNoSymbolicLinkComponents(root);
+  let verifiedRealPath: string;
+  try {
+    verifiedRealPath = await realpath(root);
+  } catch {
+    throw storageError();
+  }
+  if (!sameStoragePath(verifiedRealPath, realPath)) throw storageError();
+  return verifiedRealPath;
+}
+
+async function assertNoSymbolicLinkComponents(path: string): Promise<void> {
+  let current = resolvePath(path);
+  while (true) {
+    let metadata;
+    try {
+      metadata = await lstat(current);
+    } catch {
+      throw storageError();
+    }
+    if (metadata.isSymbolicLink()) throw storageError();
+    const parent = dirname(current);
+    if (sameStoragePath(parent, current)) return;
+    current = parent;
+  }
 }
 
 function positiveSafeInteger(value: number, name: string): number {

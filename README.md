@@ -1,6 +1,18 @@
 # Codex iLink
 
-把微信变成 Windows 本机 Codex 的远程入口。微信与 Codex Desktop 使用同一份任务历史和实际权限设置，可以查看项目、进入任务、继续对话、查看当前任务的实际权限、切换模型，以及收发图片和文件。
+把微信变成 Windows 本机 Codex 的远程入口。你可以在电脑上让 Codex 开始修改项目，然后锁屏、关掉显示器或离开电脑；只要电脑仍开机联网，Codex 就能继续运行，你可以在微信里查看进度、接收完成结果、继续对话，或处理真正需要你决定的审批。
+
+微信和 Codex Desktop 操作的是同一份任务，不会另外复制一套聊天记录。你在微信里继续任务后，回到电脑仍能在 Codex Desktop 看到完整上下文。
+
+## 它能做什么
+
+- 在微信查看本机 Codex 的项目和任务，并继续同一个任务。
+- 项目运行时临时阻止电脑自动睡眠；可以正常锁屏或关闭显示器。
+- 人不在电脑旁时，把任务完成结果主动发到微信。
+- 从微信继续提问、停止任务、切换模型，以及收发图片和文件。
+- 只有 Codex 真正交给用户决定的审批才发微信；回复 `ok` 或 `no` 就会批准或拒绝这一次操作。
+
+Codex iLink 不是云电脑：电脑关机、断网、退出当前 Windows 用户或 Bridge 未运行时，本机项目无法继续执行。
 
 > 当前为开发预览版，仅支持 Windows 10/11 x64。Codex 持久化任务及其权限设置是唯一事实源；Bridge 只负责连接、路由和 Codex 原生审批的安全转发，不复制对话，也不保存或恢复一套 iLink 权限。
 
@@ -87,7 +99,7 @@ ilink start    # 启动 Bridge
 ilink startup status   # 查看当前用户登录启动状态
 ilink startup enable   # 启用当前用户登录启动
 ilink startup disable  # 禁用当前用户登录启动
-ilink config   # 查看超时配置
+ilink config   # 查看新任务默认权限与超时配置
 ```
 
 Bridge 在当前 Windows 用户会话中后台运行，日志位于：
@@ -133,11 +145,19 @@ npm 预览版把 `@latest` 替换为 `@next`。
 
 `clear` 会用空白 Codex 会话替换当前上下文，并把原会话归档；在微信主会话执行时会替换内部主会话，但仍停留在微信主会话。`exit` 会返回微信主会话并取消当前项目选择。`new` 只使用此时明确选择的项目；没有选择项目时创建无项目会话。
 
-`perm` 每次都从 Codex 读取当前任务的实际 Profile、审批策略、审批人和 Sandbox。已有任务的权限只能在 Codex Desktop 中修改；同一任务在 Desktop 修改后，下一次 `perm` 会显示新值。旧版 `perm<n>` 输入也只会返回当前权限，不再切换或提升权限。`ok/no` 只回应仍在线的单次 Codex 审批请求，包括审批人为 `user` 的 Desktop Hook 请求；`auto_review` 不会触发微信审批。
+`perm` 每次都从 Codex 读取当前任务的实际 Profile、审批策略、审批人和 Sandbox。已有任务的权限只能在 Codex Desktop 中修改；同一任务在 Desktop 修改后，下一次 `perm` 会显示新值。旧版 `perm<n>` 输入也只会返回当前权限，不会切换或提升权限。
+
+审批规则可以简单理解为：
+
+- `auto_review`：由 Codex 自己判断，iLink 不会再发一条重复的微信审批。
+- `user`：Codex 确实在等待用户决定时，iLink 才把审批发到微信；回复 `ok` 或 `no` 会真正批准或拒绝这一次操作。
+- Bridge 断开、审批信息不完整或微信没有可回复的会话时，iLink 不会伪造审批，而是交回 Codex Desktop 处理。
 
 ## 全局默认配置
 
-新建任务默认使用 `workspace + on-request + auto_review`。这些设置只用于 iLink 之后创建的微信主会话、`new` 和 `clear`；恢复已有任务时不会覆盖其权限：
+新建任务默认使用 `workspace + on-request + auto_review`：Codex 可以修改当前项目，需要额外权限时再发起请求，并优先由 Codex 自动审查。这样通常不需要每次新建任务后再手动改掉“只读”。
+
+这些设置只用于 iLink 之后创建的微信主会话、`new` 和 `clear`；进入或恢复已有任务时不会覆盖它原来的权限：
 
 ```powershell
 ilink config set default-permission workspace  # read-only / workspace / full-access
@@ -151,6 +171,12 @@ ilink config reset
 默认会话绑定保持 30 分钟；未锁屏时连续 5 分钟没有键鼠输入会判定为离开。锁屏会立即判定为离开，不受 `away-timeout` 影响。
 
 ## 常见问题
+
+### 人离开电脑后，项目还能继续运行吗？
+
+可以。任务运行期间，Codex iLink 会临时阻止 Windows 自动进入睡眠；电脑可以锁屏或关闭显示器。只要电脑保持开机、联网，当前 Windows 用户会话和 Bridge 仍在运行，Codex 就能继续工作，并在你离开时把完成结果发到微信。
+
+电脑关机、休眠、断网或退出当前 Windows 用户后，本机任务无法继续；Codex iLink 不会把项目上传到云端代跑。
 
 ### `ilink` 命令不存在
 

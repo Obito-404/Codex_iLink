@@ -70,7 +70,7 @@ flowchart LR
 - 所有微信回合由同一个常驻 App Server 执行。Bridge 不覆盖 Codex 的功能开关或插件配置，也不拼装自定义 Sandbox；仅在 `thread/start` 时提交 iLink 全局的新任务默认 Profile、审批策略和审批者。工具是否可用和最终权限判定仍由 Codex 完成。
 - 进入既有会话时按 `thread_id` 调用 `thread/resume`；不得携带 `permissions`、`approvalPolicy`、`approvalsReviewer` 或 Sandbox 覆盖值。会话恢复始终继承 Codex 当前持久化设置。
 - 仅在控制者显式发送 `model<n>`、`model:<id>`、`effort<n>` 或 `effort:<level>` 时，通过 Codex 列表接口校验当前账号实际可用的选项，再用 `thread/settings/update` 修改当前共享会话的模型或 reasoning effort；不修改权限、项目默认值或全局默认值。
-- Codex 是唯一权限策略引擎和事实源。`perm` 对当前绑定的 `thread_id` 执行无权限覆盖的 `thread/resume`，只显示 Codex 返回的实际 Profile、审批策略、审批人和 Sandbox；Bridge 不调用 `permissionProfile/list`，也不向 `thread/settings/update` 提交任何权限字段。
+- Codex 是唯一权限策略引擎和事实源。`perm` 对当前绑定的 `thread_id` 执行无权限覆盖的 `thread/resume`，只把 Codex 返回的实际审批人精简显示为“权限”；微信不重复展示 Profile、审批策略和 Sandbox。Bridge 不调用 `permissionProfile/list`，也不向 `thread/settings/update` 提交任何权限字段。
 - 已有任务权限只能在 Codex Desktop 中修改；同一任务的新设置在下一次 `perm` 或恢复时由 Bridge 重新读取。Bridge 不保存或回灌任务权限快照；权限查询失败只使该命令明确失败，不得让普通消息进入无限队列。
 - iLink 全局新任务默认值存于 `bridge_settings`，初始为 `:workspace + on-request + auto_review`，可用 `ilink config set default-permission|default-approval|default-reviewer` 修改。微信主会话首次创建、`/new` 和 `/clear` 读取创建当时的值；既有任务恢复不使用这些值。
 - 微信主会话和无项目 `/new` 使用专用空白 Inbox 工作目录；微信产品上标记为“无项目”，但底层仍有合法 `cwd`，Desktop 可能按该物理路径分组显示。
@@ -135,9 +135,9 @@ flowchart LR
 | `stop` | 中断当前会话中由 Bridge 发起且已取得 Turn ID 的活动回合 |
 | `exit` | 结束当前会话绑定，返回微信主会话 |
 | `st` | 显示当前项目与会话、实际权限组合、所有已知活动任务、队列、通知回复窗口、待审批送达/提醒状态、绑定剩余时间和连接健康 |
-| `perm` | 只读显示 Codex 当前任务的实际权限 Profile、审批策略、审批人和 Sandbox；权限在 Desktop 修改 |
-| `model`、`model<n>`、`model:<id>` | 查看或修改当前共享会话模型 |
-| `effort`、`effort<n>`、`effort:<level>` | 查看或修改当前共享会话 reasoning effort |
+| `perm` | 只读显示 Codex 当前任务的实际审批人，格式为“权限：…”；权限在 Desktop 修改 |
+| `model`、`model<n>` | 用短名称查看或修改当前共享会话模型 |
+| `effort`、`effort<n>` | 用短名称查看或修改当前共享会话 reasoning effort |
 | `ok<code>` | 批准 Bridge 发起的单次审批 |
 | `no<code>` | 拒绝 Bridge 发起的单次审批 |
 | `help` | 显示唯一命令表 |

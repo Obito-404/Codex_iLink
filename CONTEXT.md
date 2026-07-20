@@ -69,7 +69,7 @@ _Avoid_: 插话、并发回合、改变当前回合
 _Avoid_: 微信权限、远程权限覆盖
 
 **权限只读查询**:
-`perm` 对当前绑定任务执行无覆盖恢复，显示 Codex 回读的 Profile、审批策略、审批者和 Sandbox。已有任务的权限只能在 Codex Desktop 中修改；同一项目的不同任务可以拥有不同权限，Bridge 不提供远程编辑入口。
+`perm` 对当前绑定任务执行无覆盖恢复，只把 Codex 回读的审批者精简显示为“权限”；Profile、审批策略和 Sandbox 不在微信重复展示。已有任务的权限只能在 Codex Desktop 中修改；同一项目的不同任务可以拥有不同权限，Bridge 不提供远程编辑入口。
 _Avoid_: `permissionProfile/list`、权限编号选择、Bridge 提交权限字段、拼装自定义 Sandbox、跨任务权限继承
 
 **新任务权限默认值**:

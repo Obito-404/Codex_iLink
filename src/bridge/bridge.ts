@@ -1691,16 +1691,13 @@ export class BridgeEngine {
 
   #formatThreadPreview(preview: ThreadPreview | null, threadId: string): string {
     if (!preview) return `已进入会话：${threadId}`;
-    const permission = preview.permissionProfileId
-      ? permissionProfileDisplayName(preview.permissionProfileId)
-      : (preview.permissionMode ?? "未知");
     return [
       `已进入会话：${preview.title ?? preview.id}`,
       `状态：${preview.status ?? "未知"}`,
-      `模型：${preview.model ?? "未知"}`,
-      `权限：${permission}`,
-      `审批：${preview.approvalPolicy ?? "未知"}`,
-      `Sandbox：${preview.sandboxType ?? "未知"}`,
+      `模型：${preview.model ? compactModelName(preview.model, " ") : "未知"}`,
+      `强度：${preview.reasoningEffort ?? "未知"}`,
+      `权限：${preview.approvalsReviewer ?? "未知"}`,
+      "",
       `最近提问：${preview.latestUserText ?? "（无）"}`,
       `最近回复：${preview.finalAgentText ?? "（无）"}`,
     ].join("\n");
@@ -1733,19 +1730,12 @@ export class BridgeEngine {
       threadId,
       updatedAtMs: nowMs,
     });
-    const activePermission = activePermissionProfileId(started);
     return [
       mode === "clear"
         ? "已清除当前上下文并进入空白会话。"
         : `已新建并进入会话：${threadId}`,
       `项目：${projectDisplayName(projectPath)}`,
-      `权限：${
-        activePermission
-          ? permissionProfileDisplayName(activePermission)
-          : "未知"
-      }`,
-      `审批：${approvalPolicyText(started)}`,
-      `Sandbox：${sandboxTypeText(started)}`,
+      `权限：${approvalsReviewerText(started)}`,
       `${String(this.#bindingIdleTimeoutMinutes())} 分钟无活动后自动退出。`,
     ].join("\n");
   }
@@ -2019,17 +2009,7 @@ export class BridgeEngine {
     const binding = this.#state.getBinding(this.#now());
     const threadId = binding?.threadId ?? this.#mainThreadId;
     const current = await this.#resumeThreadForControl(threadId);
-    const activeId = activePermissionProfileId(current);
-    return [
-      "Codex 当前权限：" +
-        (activeId ? permissionProfileDisplayName(activeId) : "未知"),
-      "审批：" +
-        approvalPolicyText(current) +
-        "；审批人：" +
-        approvalsReviewerText(current),
-      "Sandbox：" + sandboxTypeText(current),
-      "当前任务权限只能在 Codex Desktop 中修改；新任务默认值可用 ilink config 设置。",
-    ].join("\n");
+    return `权限：${approvalsReviewerText(current)}`;
   }
 
   async #replaceMainSessionReply(previousThreadId: string): Promise<string> {
@@ -2110,9 +2090,8 @@ export class BridgeEngine {
         model: selected.model,
       });
       return [
-        `已切换当前任务模型：${formatModel(selected)}`,
-        `推理强度：${stringField(changed, "reasoningEffort") ?? "未知"}`,
-        "此设置属于当前共享会话，Desktop 同一任务也会生效。",
+        `模型：${formatModel(selected)}`,
+        `强度：${stringField(changed, "reasoningEffort") ?? "未知"}`,
       ].join("\n");
     }
 
@@ -2121,20 +2100,11 @@ export class BridgeEngine {
     );
     const activeModel = activeIndex >= 0 ? models[activeIndex] : undefined;
     return [
-      `当前模型：${
-        activeModel
-          ? `${String(activeIndex + 1)}. ${formatModel(activeModel)}`
-          : (currentModel ?? "未知")
-      }`,
-      `推理强度：${currentEffort ?? "未知"}`,
-      "",
+      `模型：${activeModel ? formatModel(activeModel) : currentModel ? compactModelName(currentModel, "-") : "未知"}`,
       ...models.map(
-        (model, index) =>
-          `${String(index + 1)}. ${formatModel(model)} · ${model.supportedReasoningEfforts
-            .map((option) => option.reasoningEffort)
-            .join("/")}`,
+        (model, index) => `${String(index + 1)}. ${formatModel(model)}`,
       ),
-      "使用 model<n> 或 model:<id> 切换当前任务模型。",
+      "回复 model<n> 切换。",
     ].join("\n");
   }
 
@@ -2182,23 +2152,18 @@ export class BridgeEngine {
         effort: selected.reasoningEffort,
       });
       return [
-        `已切换当前任务推理强度：${selected.reasoningEffort}`,
         `模型：${formatModel(model)}`,
-        "此设置属于当前共享会话，Desktop 同一任务也会生效。",
+        `强度：${selected.reasoningEffort}`,
       ].join("\n");
     }
 
     return [
-      `当前模型：${formatModel(model)}`,
-      `当前推理强度：${stringField(current, "reasoningEffort") ?? "未知"}`,
-      "",
+      `模型：${formatModel(model)}`,
+      `强度：${stringField(current, "reasoningEffort") ?? "未知"}`,
       ...options.map(
-        (option, index) =>
-          `${String(index + 1)}. ${option.reasoningEffort}${
-            option.description ? ` — ${option.description}` : ""
-          }`,
+        (option, index) => `${String(index + 1)}. ${option.reasoningEffort}`,
       ),
-      "使用 effort<n> 或 effort:<level> 切换当前任务推理强度。",
+      "回复 effort<n> 切换。",
     ].join("\n");
   }
 
@@ -2328,20 +2293,13 @@ export class BridgeEngine {
     return [
       `项目：${projectDisplayName(projectPath)}`,
       `会话：${session}`,
-      `权限：${
-        permissionMetadata && activePermissionProfileId(permissionMetadata)
-          ? permissionProfileDisplayName(
-              activePermissionProfileId(permissionMetadata) as string,
-            )
-          : "未知"
-      }`,
-      `审批：${
-        permissionMetadata ? approvalPolicyText(permissionMetadata) : "未知"
-      }；审批人：${
-        permissionMetadata ? approvalsReviewerText(permissionMetadata) : "未知"
-      }；Sandbox：${
-        permissionMetadata ? sandboxTypeText(permissionMetadata) : "未知"
-      }`,
+      `模型：${formatModelAndEffort(
+        permissionMetadata ? stringField(permissionMetadata, "model") : undefined,
+        permissionMetadata
+          ? stringField(permissionMetadata, "reasoningEffort")
+          : undefined,
+      )}`,
+      `权限：${permissionMetadata ? approvalsReviewerText(permissionMetadata) : "未知"}`,
       ...(!hasPendingWork ? ["状态：空闲"] : []),
       ...(knownActiveTasks.length > 0
         ? [
@@ -3463,7 +3421,27 @@ function isModelCatalogEntry(value: unknown): value is ModelCatalogEntry {
 }
 
 function formatModel(model: ModelCatalogEntry): string {
-  return `${model.displayName} (${model.id})`;
+  return compactModelName(model.displayName, "-");
+}
+
+function formatModelAndEffort(
+  model: string | undefined,
+  effort: string | undefined,
+): string {
+  const name = model ? compactModelName(model, " ") : "未知";
+  return effort ? `${name}-${effort}` : name;
+}
+
+function compactModelName(value: string, separator: " " | "-"): string {
+  const withoutPrefix = value.trim().replace(/^gpt[-\s]+/iu, "");
+  const match = /^(\d+(?:\.\d+)*)(?:[-_\s]+(.+))?$/u.exec(withoutPrefix);
+  if (!match) return value;
+  const family = match[2]
+    ?.split(/[-_\s]+/u)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(separator);
+  return family ? `${match[1]}${separator}${family}` : (match[1] as string);
 }
 
 function findModelByReference(
@@ -3508,21 +3486,6 @@ function formatAmbiguousApprovals(
   ].join("\n");
 }
 
-function activePermissionProfileId(
-  metadata: Record<string, unknown>,
-): string | undefined {
-  return stringField(objectField(metadata, "activePermissionProfile"), "id");
-}
-
-function approvalPolicyText(metadata: Record<string, unknown>): string {
-  const policy = metadata.approvalPolicy;
-  return typeof policy === "string" && policy.length > 0
-    ? policy
-    : asObject(policy)?.granular
-      ? "granular"
-      : "未知";
-}
-
 function queuedFailureClientId(
   dedupeKey: string,
   reason: "invalid-input" | "missing-thread" | "resume-failed",
@@ -3543,28 +3506,6 @@ function approvalsReviewerValue(
 
 function approvalsReviewerText(metadata: Record<string, unknown>): string {
   return approvalsReviewerValue(metadata) ?? "未知";
-}
-
-function sandboxTypeText(metadata: Record<string, unknown>): string {
-  return (
-    stringField(objectField(metadata, "sandbox"), "type") ??
-    stringField(objectField(metadata, "sandboxPolicy"), "type") ??
-    "未知"
-  );
-}
-
-function permissionProfileDisplayName(id: string): string {
-  return `${permissionProfileLabel(id)} (${id})`;
-}
-
-function permissionProfileLabel(id: string): string {
-  return id === ":read-only"
-    ? "只读"
-    : id === ":workspace"
-      ? "工作区（推荐）"
-      : id === ":danger-full-access"
-        ? "完全访问"
-        : "自定义";
 }
 
 function projectDisplayName(projectPath: string | null): string {

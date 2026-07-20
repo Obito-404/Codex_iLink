@@ -135,8 +135,8 @@ npm 预览版把 `@latest` 替换为 `@next`。
 | 停止/退出 | `stop`、`exit` | `stop` |
 | 状态 | `st` | `st` |
 | 权限 | `perm`（只读） | `perm` |
-| 模型 | `model`、`model<n>`、`model:<id>` | `model2` |
-| 推理强度 | `effort`、`effort:<level>` | `effort:high` |
+| 模型 | `model`、`model<n>` | `model2` |
+| 强度 | `effort`、`effort<n>` | `effort2` |
 | 审批 | `ok[code]`、`no[code]` | `okA7C9E2` |
 | 帮助 | `help` | `help` |
 
@@ -144,7 +144,7 @@ npm 预览版把 `@latest` 替换为 `@next`。
 
 `clear` 会用空白 Codex 会话替换当前上下文，并把原会话归档；在微信主会话执行时会替换内部主会话，但仍停留在微信主会话。`exit` 会返回微信主会话并取消当前项目选择。`new` 只使用此时明确选择的项目；没有选择项目时创建无项目会话。
 
-`perm` 每次都从 Codex 读取当前任务的实际 Profile、审批策略、审批人和 Sandbox。已有任务的权限只能在 Codex Desktop 中修改；同一任务在 Desktop 修改后，下一次 `perm` 会显示新值。旧版 `perm<n>` 输入也只会返回当前权限，不会切换或提升权限。
+`perm` 每次都从 Codex 读取当前任务的实际审批人，并精简显示为 `权限：auto_review` 这类结果。已有任务的权限只能在 Codex Desktop 中修改；旧版 `perm<n>` 输入也只会查询，不会切换或提升权限。
 
 审批规则可以简单理解为：
 

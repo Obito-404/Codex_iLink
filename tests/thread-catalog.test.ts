@@ -204,10 +204,11 @@ test("the no-project page accepts missing 0.144 fields and treats Inbox as unlis
 });
 
 test("a /s n preview exposes only recent user and final agent text, capped at 800", () => {
-  const preview = buildThreadPreview({
-    model: "gpt-5.6-sol",
-    permissionMode: "workspace-write",
-    thread: {
+  const preview = buildThreadPreview(
+    {
+      model: "gpt-5.6-sol",
+      permissionMode: "workspace-write",
+      thread: {
       id: "thread-preview",
       name: `${"T".repeat(800)}extra-title`,
       status: { type: "active" },
@@ -251,17 +252,24 @@ test("a /s n preview exposes only recent user and final agent text, capped at 80
           ],
         },
       ],
+      },
     },
-  });
+    {
+      approvalsReviewer: "auto_review",
+      reasoningEffort: "xhigh",
+    },
+  );
 
   assert.deepEqual(preview, {
     approvalPolicy: null,
+    approvalsReviewer: "auto_review",
     finalAgentText: "答".repeat(800),
     id: "thread-preview",
     latestUserText: "latest question\nsecond text block",
     model: "gpt-5.6-sol",
     permissionMode: "workspace-write",
     permissionProfileId: null,
+    reasoningEffort: "xhigh",
     sandboxType: null,
     status: "active",
     title: "T".repeat(800),
@@ -290,12 +298,14 @@ test("a thread preview never treats an unphased agent message as final", () => {
     }),
     {
       approvalPolicy: null,
+      approvalsReviewer: null,
       finalAgentText: null,
       id: "thread-legacy",
       latestUserText: "legacy question",
       model: null,
       permissionMode: null,
       permissionProfileId: null,
+      reasoningEffort: null,
       sandboxType: null,
       status: null,
       title: "fallback title",

@@ -15,7 +15,7 @@ Bridge 曾把 Profile、审批策略和审批人保存到 SQLite，并在 `threa
 1. Codex 持久化任务的当前权限设置是唯一事实源和策略引擎。
 2. 新任务只传必要的 `cwd` 与 iLink 运行指令，权限采用 Codex 当时的默认值。
 3. 既有任务恢复不得传 `permissions`、`approvalPolicy`、`approvalsReviewer` 或 Sandbox 覆盖值。
-4. `perm` 对当前绑定任务执行无权限覆盖的实时查询，只显示 Codex 当前 Profile、审批策略、审批人和 Sandbox。权限只能在 Codex Desktop 中修改；iLink 不列出编号式可选 Profile，也不提交任何权限更新。
+4. `perm` 对当前绑定任务执行无权限覆盖的实时查询，只把 Codex 当前审批人精简显示为“权限”；Profile、审批策略和 Sandbox 不在微信重复展示。权限只能在 Codex Desktop 中修改；iLink 不列出编号式可选 Profile，也不提交任何权限更新。
 5. SQLite 不保存权限选择、审批策略、审批人或 Sandbox。schema v14 删除旧 `thread_permission_profiles`，旧行不再生效。
 6. iLink 只保存实时审批请求到短码的临时内存映射，以及通知的投递、提醒和失效 Outbox；不持久化可重放的批准决定。
 7. Bridge 或 App Server 重启会使旧审批回调和短码失效，不把旧决定用于新请求。

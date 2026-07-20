@@ -27,12 +27,14 @@ export type ThreadCatalogPage = {
 
 export type ThreadPreview = {
   approvalPolicy: string | null;
+  approvalsReviewer: string | null;
   finalAgentText: string | null;
   id: string;
   latestUserText: string | null;
   model: string | null;
   permissionMode: string | null;
   permissionProfileId: string | null;
+  reasoningEffort: string | null;
   sandboxType: string | null;
   status: string | null;
   title: string | null;
@@ -251,6 +253,9 @@ export function buildThreadPreview(
         : isRecord(rawApprovalPolicy) && isRecord(rawApprovalPolicy.granular)
           ? "granular"
           : null,
+    approvalsReviewer: truncatePreviewText(
+      stringField(metadata, "approvalsReviewer"),
+    ),
     finalAgentText: truncatePreviewText(finalAgentText),
     id,
     latestUserText: truncatePreviewText(latestUserText),
@@ -267,6 +272,11 @@ export function buildThreadPreview(
     ),
     permissionProfileId: truncatePreviewText(
       stringField(activePermissionProfile, "id"),
+    ),
+    reasoningEffort: truncatePreviewText(
+      stringField(metadata, "reasoningEffort") ??
+        stringField(rawThreadRead, "reasoningEffort") ??
+        stringField(thread, "reasoningEffort"),
     ),
     sandboxType: truncatePreviewText(stringField(sandbox, "type")),
     status: truncatePreviewText(threadStatus(thread)),

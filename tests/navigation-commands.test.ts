@@ -232,7 +232,9 @@ test("s pages the selected project's sessions and s<n> binds the displayed sessi
     codex.resumes.set("thread-01", {
       activePermissionProfile: { id: ":workspace" },
       approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
       model: "gpt-project",
+      reasoningEffort: "xhigh",
       sandbox: { type: "workspaceWrite" },
       thread: { id: "thread-01" },
     });
@@ -258,10 +260,10 @@ test("s pages the selected project's sessions and s<n> binds the displayed sessi
     assert.deepEqual(state.listLiveNotificationRoutes(50_001), []);
     assert.match(sent[2]?.text ?? "", /已进入会话：Task 1/u);
     assert.match(sent[2]?.text ?? "", /模型：gpt-project/u);
-    assert.match(sent[2]?.text ?? "", /权限：工作区（推荐） \(:workspace\)/u);
-    assert.match(sent[2]?.text ?? "", /审批：on-request/u);
-    assert.match(sent[2]?.text ?? "", /Sandbox：workspaceWrite/u);
-    assert.match(sent[2]?.text ?? "", /最近提问：上次问题/u);
+    assert.match(sent[2]?.text ?? "", /强度：xhigh/u);
+    assert.match(sent[2]?.text ?? "", /权限：auto_review/u);
+    assert.match(sent[2]?.text ?? "", /权限：auto_review\n\n最近提问：上次问题/u);
+    assert.doesNotMatch(sent[2]?.text ?? "", /推荐|审批：|Sandbox：/u);
     assert.match(sent[2]?.text ?? "", /最近回复：上次答案/u);
     assert.match(sent[2]?.text ?? "", /60 分钟无活动后自动退出/u);
   });
@@ -344,9 +346,8 @@ test("new creates in the selected project, binds immediately, and exit returns t
     });
     assert.deepEqual(state.listLiveNotificationRoutes(10_001), []);
     assert.match(sent[0]?.text ?? "", /已新建并进入会话：thread-new-project/u);
-    assert.match(sent[0]?.text ?? "", /权限：工作区（推荐） \(:workspace\)/u);
-    assert.match(sent[0]?.text ?? "", /审批：on-request/u);
-    assert.match(sent[0]?.text ?? "", /Sandbox：workspaceWrite/u);
+    assert.match(sent[0]?.text ?? "", /权限：auto_review/u);
+    assert.doesNotMatch(sent[0]?.text ?? "", /推荐|审批：|Sandbox：/u);
     assert.match(sent[0]?.text ?? "", /30 分钟无活动后自动退出/u);
 
     await ingest(bridge, 32, "new task question");
@@ -872,14 +873,9 @@ test("perm reads the current Codex task permissions without a write path", async
 
     assert.equal(
       sent[0]?.text,
-      [
-        "Codex 当前权限：工作区（推荐） (:workspace)",
-        "审批：on-request；审批人：user",
-        "Sandbox：workspaceWrite",
-        "当前任务权限只能在 Codex Desktop 中修改；新任务默认值可用 ilink config 设置。",
-      ].join(String.fromCharCode(10)),
+      "权限：user",
     );
-    assert.doesNotMatch(sent[0]?.text ?? "", /perm<n>|只读/u);
+    assert.doesNotMatch(sent[0]?.text ?? "", /perm<n>|只读|推荐|审批|Sandbox/u);
 
     codex.resumes.set("wechat-main", {
       activePermissionProfile: { id: ":danger-full-access" },
@@ -894,12 +890,7 @@ test("perm reads the current Codex task permissions without a write path", async
 
     assert.equal(
       sent[1]?.text,
-      [
-        "Codex 当前权限：完全访问 (:danger-full-access)",
-        "审批：never；审批人：auto_review",
-        "Sandbox：dangerFullAccess",
-        "当前任务权限只能在 Codex Desktop 中修改；新任务默认值可用 ilink config 设置。",
-      ].join(String.fromCharCode(10)),
+      "权限：auto_review",
     );
     assert.deepEqual(
       codex.calls.filter((call) => call === "resume:wechat-main"),
@@ -921,15 +912,7 @@ test("perm reports future Codex permission metadata without inference", async ()
 
     await ingest(bridge, 47, "perm");
 
-    assert.equal(
-      sent[0]?.text,
-      [
-        "Codex 当前权限：自定义 (custom-team-profile)",
-        "审批：future-policy；审批人：future_reviewer",
-        "Sandbox：futureSandbox",
-        "当前任务权限只能在 Codex Desktop 中修改；新任务默认值可用 ilink config 设置。",
-      ].join(String.fromCharCode(10)),
-    );
+    assert.equal(sent[0]?.text, "权限：future_reviewer");
   });
 });
 
@@ -974,12 +957,10 @@ test("model and effort commands update only the current shared Codex session", a
     assert.equal(
       sent[0]?.text,
       [
-        "当前模型：1. GPT-5.6 Sol (gpt-5.6-sol)",
-        "推理强度：medium",
-        "",
-        "1. GPT-5.6 Sol (gpt-5.6-sol) · medium/high/xhigh",
-        "2. GPT-5.6 Terra (gpt-5.6-terra) · low/medium/high",
-        "使用 model<n> 或 model:<id> 切换当前任务模型。",
+        "模型：5.6-Sol",
+        "1. 5.6-Sol",
+        "2. 5.6-Terra",
+        "回复 model<n> 切换。",
       ].join("\n"),
     );
 
@@ -987,9 +968,8 @@ test("model and effort commands update only the current shared Codex session", a
     assert.equal(
       sent[1]?.text,
       [
-        "已切换当前任务模型：GPT-5.6 Terra (gpt-5.6-terra)",
-        "推理强度：medium",
-        "此设置属于当前共享会话，Desktop 同一任务也会生效。",
+        "模型：5.6-Terra",
+        "强度：medium",
       ].join("\n"),
     );
 
@@ -999,13 +979,12 @@ test("model and effort commands update only the current shared Codex session", a
     assert.equal(
       sent[4]?.text,
       [
-        "当前模型：GPT-5.6 Sol (gpt-5.6-sol)",
-        "当前推理强度：medium",
-        "",
-        "1. medium — Balanced",
-        "2. high — Deep",
-        "3. xhigh — Extra deep",
-        "使用 effort<n> 或 effort:<level> 切换当前任务推理强度。",
+        "模型：5.6-Sol",
+        "强度：medium",
+        "1. medium",
+        "2. high",
+        "3. xhigh",
+        "回复 effort<n> 切换。",
       ].join("\n"),
     );
 
@@ -1014,9 +993,8 @@ test("model and effort commands update only the current shared Codex session", a
     assert.equal(
       sent[6]?.text,
       [
-        "已切换当前任务推理强度：xhigh",
-        "模型：GPT-5.6 Sol (gpt-5.6-sol)",
-        "此设置属于当前共享会话，Desktop 同一任务也会生效。",
+        "模型：5.6-Sol",
+        "强度：xhigh",
       ].join("\n"),
     );
     assert.deepEqual(codex.modelSettingSelections, [
@@ -1213,17 +1191,21 @@ test("st reports current routing, every known active task, queues, and health", 
       threadId: "thread-lease-only",
       turnId: "lease-only-turn",
     });
+    codex.resumes.set("thread-current", {
+      approvalsReviewer: "auto_review",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "xhigh",
+      thread: { id: "thread-current" },
+    });
 
     await ingest(bridge, 50, "st");
 
     const reply = sent[0]?.text ?? "";
     assert.match(reply, /项目：Selected/u);
     assert.match(reply, /会话：排查审批卡住问题（剩余 30 分钟）/u);
-    assert.match(reply, /权限：工作区（推荐） \(:workspace\)/u);
-    assert.match(
-      reply,
-      /审批：on-request；审批人：user；Sandbox：workspaceWrite/u,
-    );
+    assert.match(reply, /模型：5\.6 Sol-xhigh/u);
+    assert.match(reply, /权限：auto_review/u);
+    assert.doesNotMatch(reply, /推荐|审批：|Sandbox：/u);
     assert.equal(
       state.getBinding(100_001)?.expiresAtMs,
       100_000 + 30 * 60 * 1_000,
@@ -1265,6 +1247,12 @@ test("st hides zero-value diagnostics while keeping permission details", async (
         updatedAt: 1,
       },
     ];
+    codex.resumes.set("thread-current", {
+      approvalsReviewer: "auto_review",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "xhigh",
+      thread: { id: "thread-current" },
+    });
 
     await ingest(bridge, 61, "st");
 
@@ -1273,8 +1261,8 @@ test("st hides zero-value diagnostics while keeping permission details", async (
       [
         "项目：Selected",
         "会话：简洁状态（剩余 30 分钟）",
-        "权限：工作区（推荐） (:workspace)",
-        "审批：on-request；审批人：user；Sandbox：workspaceWrite",
+        "模型：5.6 Sol-xhigh",
+        "权限：auto_review",
         "状态：空闲",
         "连接：正常",
       ].join("\n"),
@@ -1455,6 +1443,10 @@ class FakeNavigationCodex implements CodexTurnStarter {
     return {
       activePermissionProfile: { id: ":workspace" },
       approvalPolicy: "on-request",
+      approvalsReviewer:
+        typeof permissions?.approvalsReviewer === "string"
+          ? permissions.approvalsReviewer
+          : "auto_review",
       sandbox: { type: "workspaceWrite" },
       thread: { cwd, id: this.nextStartedThreadId },
     };

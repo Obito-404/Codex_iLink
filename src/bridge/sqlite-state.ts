@@ -311,6 +311,58 @@ export class SqliteState {
     return controller;
   }
 
+  replaceILinkBinding(input: {
+    controller: Controller;
+    session: ILinkSession;
+  }): Controller {
+    return this.#transaction(() => {
+      const current = this.getController();
+      if (
+        current?.accountId === input.controller.accountId &&
+        current.userId === input.controller.userId
+      ) {
+        this.saveILinkSession(input.session);
+        return current;
+      }
+
+      if (current) {
+        const observations = this.#database
+          .prepare(
+            `SELECT thread_id, turn_id
+             FROM desktop_turn_observations`,
+          )
+          .all() as Array<{ thread_id: string; turn_id: string }>;
+        for (const observation of observations) {
+          this.recordDesktopTurnStopTombstone({
+            stoppedAtMs: input.controller.boundAtMs,
+            threadId: observation.thread_id,
+            turnId: observation.turn_id,
+          });
+        }
+
+        this.#database.exec(`
+          DELETE FROM pending_desktop_notifications;
+          DELETE FROM desktop_turn_observations;
+          DELETE FROM outbound_attachment_intents;
+          DELETE FROM dispatch_intents;
+          DELETE FROM queued_turns;
+          DELETE FROM inbound_messages;
+          DELETE FROM ilink_state;
+          DELETE FROM outbox;
+          DELETE FROM notification_routes;
+          DELETE FROM bindings;
+          DELETE FROM list_snapshots;
+          DELETE FROM ilink_session;
+          DELETE FROM controller;
+        `);
+      }
+
+      const controller = this.bindController(input.controller);
+      this.saveILinkSession(input.session);
+      return controller;
+    });
+  }
+
   getController(): Controller | null {
     const row = this.#database
       .prepare(

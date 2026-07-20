@@ -21,12 +21,17 @@ export class LoginFlowError extends Error {
 
 export type LoginFlowDependencies = {
   ilink: Pick<ILinkClient, "createQr" | "pollQr">;
+  localTokenList?: readonly string[];
   now: () => number;
   protectToken: (token: string) => string;
+  replaceExistingBinding?: boolean;
   signal?: AbortSignal;
   showQr: (qrUrl: string) => Promise<void> | void;
   sleep: (milliseconds: number) => Promise<void>;
-  state: Pick<SqliteState, "bindController" | "saveILinkSession">;
+  state: Pick<
+    SqliteState,
+    "bindController" | "replaceILinkBinding" | "saveILinkSession"
+  >;
 };
 
 export type LoginFlowResult = {
@@ -39,7 +44,7 @@ export async function runLoginFlow(
   dependencies: LoginFlowDependencies,
 ): Promise<LoginFlowResult> {
   const challenge = await dependencies.ilink.createQr({
-    localTokenList: [],
+    localTokenList: dependencies.localTokenList ?? [],
     ...(dependencies.signal ? { signal: dependencies.signal } : {}),
   });
   await dependencies.showQr(challenge.qrcodeUrl);
@@ -63,17 +68,23 @@ export async function runLoginFlow(
     }
     if (result.kind === "confirmed") {
       const protectedToken = dependencies.protectToken(result.session.botToken);
-      dependencies.state.bindController({
+      const controller = {
         accountId: result.session.botId,
         boundAtMs: dependencies.now(),
         userId: result.session.controllerUserId,
-      });
-      dependencies.state.saveILinkSession({
+      };
+      const session = {
         baseUrl: result.session.baseUrl,
         botId: result.session.botId,
         controllerUserId: result.session.controllerUserId,
         protectedToken,
-      });
+      };
+      if (dependencies.replaceExistingBinding) {
+        dependencies.state.replaceILinkBinding({ controller, session });
+      } else {
+        dependencies.state.bindController(controller);
+        dependencies.state.saveILinkSession(session);
+      }
       return {
         baseUrl: result.session.baseUrl,
         botId: result.session.botId,

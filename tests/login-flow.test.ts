@@ -63,6 +63,9 @@ test("login displays one QR and persists only the protected token for its contro
         bindCalls.push(controller);
         return controller;
       },
+      replaceILinkBinding: () => {
+        throw new Error("ordinary login must not replace an existing binding");
+      },
       saveILinkSession: (session) => {
         saveCalls.push(session);
       },
@@ -95,6 +98,68 @@ test("login displays one QR and persists only the protected token for its contro
     },
   ]);
   assert.doesNotMatch(JSON.stringify(saveCalls), new RegExp(rawToken, "u"));
+});
+
+test("forced login requests the old bot and atomically adopts the confirmed binding", async () => {
+  const createInputs: Array<{ localTokenList: readonly string[] }> = [];
+  const replacements: unknown[] = [];
+  await runLoginFlow({
+    ilink: {
+      createQr: async (input) => {
+        createInputs.push(input);
+        return {
+          qrcode: "reauth-qrcode",
+          qrcodeUrl: "https://qr.example.test/reauth",
+        };
+      },
+      pollQr: async () => ({
+        kind: "confirmed",
+        session: {
+          baseUrl: "https://api.weixin.qq.com",
+          botId: "bot-1",
+          botToken: "new-token",
+          controllerUserId: "controller-1",
+        },
+      }),
+    },
+    localTokenList: ["previous-local-token"],
+    now: () => 2,
+    protectToken: () => "protected-new-token",
+    replaceExistingBinding: true,
+    showQr: () => undefined,
+    sleep: async () => undefined,
+    state: {
+      bindController: () => {
+        throw new Error("forced login must replace atomically");
+      },
+      replaceILinkBinding: (input) => {
+        replacements.push(input);
+        return input.controller;
+      },
+      saveILinkSession: () => {
+        throw new Error("forced login must not save separately");
+      },
+    },
+  });
+
+  assert.deepEqual(createInputs, [
+    { localTokenList: ["previous-local-token"] },
+  ]);
+  assert.deepEqual(replacements, [
+    {
+      controller: {
+        accountId: "bot-1",
+        boundAtMs: 2,
+        userId: "controller-1",
+      },
+      session: {
+        baseUrl: "https://api.weixin.qq.com",
+        botId: "bot-1",
+        controllerUserId: "controller-1",
+        protectedToken: "protected-new-token",
+      },
+    },
+  ]);
 });
 
 test("terminal QR states fail with stable errors that do not leak the challenge", async () => {
@@ -137,6 +202,9 @@ test("terminal QR states fail with stable errors that do not leak the challenge"
         state: {
           bindController: () => {
             throw new Error("terminal state must not bind");
+          },
+          replaceILinkBinding: () => {
+            throw new Error("terminal state must not replace a binding");
           },
           saveILinkSession: () => {
             throw new Error("terminal state must not save a session");

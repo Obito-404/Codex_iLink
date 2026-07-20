@@ -94,7 +94,7 @@ flowchart LR
 ## 4. 身份与授权
 
 - 一个安装实例只绑定一个微信用户 ID。
-- 首次扫码确认返回的微信用户 ID 成为唯一控制者；不提供在线换绑、远程换绑或多用户模式。
+- 首次扫码确认返回的微信用户 ID 成为唯一控制者；不提供 Bridge 运行时换绑、远程换绑或多用户模式。本机停止 Bridge 后显式执行 `login --force` 并扫码，视为新的本机授权。
 - 只接受该控制者发来的单聊文本和受支持入站媒体，其他发送者和群消息静默丢弃且不下载媒体，不进入命令、队列或 Codex，也不泄露项目与会话信息；所有主动发送也只面向该控制者。
 - 更换设备时重新部署并扫码。
 - iLink Token 使用 Windows DPAPI 的 CurrentUser 范围加密，数据目录使用当前用户 ACL。
@@ -233,7 +233,7 @@ flowchart LR
 - Pipe 使用当前用户 ACL；Bridge 数据目录同样收紧 ACL。
 - Hook Spool 只保存与 Pipe 相同的脱敏元数据，活跃队列限制为 7 天或 5MB；写入端和 Bridge 读取端都删除过期事件，并在启动和运行时 single-flight 清理。消费失败的事件移入同目录下的 `dead-letter`，最多保留 7 天和 128 个文件。已精确 Stop 的 observation 另保留 7 天最小 `(thread_id, turn_id)` tombstone，拒绝迟到或重复 Prompt 复活活动状态。
 - 默认没有外部遥测。
-- iLink 返回 `ret=-14` 或 `errcode=-14` 时视为登录失效，Bridge 按账号暂停请求一小时，不做 30 秒无限重试；用户可用 `ilink login --force` 重新扫码并在重启 Bridge 后立即恢复。
+- iLink 返回 `ret=-14` 或 `errcode=-14` 时视为登录失效，Bridge 按账号暂停请求一小时，不做 30 秒无限重试；用户可用 `ilink login --force` 重新扫码。重登会先尝试用旧本地 Token 恢复原 Bot；若微信仍返回新 Bot，则在扫码成功后原子换绑，并清除旧账号的待发消息、路由和短期上下文，保留项目选择、微信主会话与用户默认设置。扫码失败时旧凭证和数据不变。
 - 日志不记录消息正文、Token、二维码、完整 Transcript、媒体 CDN URL/AES 密钥或审批敏感参数。
 - 日志保留 7 天，总大小不超过 20MB。
 - 需要人工判定或稳定定位的 Bridge 错误采用短码，例如 `E_SESSION_BUSY`、`E_BRIDGE_AUTH`；可确定的 Codex 上游失败使用直接的脱敏中文文案。完整脱敏堆栈只写本地日志。

@@ -2489,6 +2489,323 @@ test("iLink session persists only the caller-protected token for the controller"
   }
 });
 
+test("re-authenticating the same iLink identity updates only its session", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-reauth-"));
+  const state = new SqliteState(join(directory, "state.db"));
+
+  try {
+    state.bindController({
+      accountId: "bot-same",
+      boundAtMs: 100,
+      userId: "controller-same",
+    });
+    state.saveILinkSession({
+      baseUrl: "https://old.example.test",
+      botId: "bot-same",
+      controllerUserId: "controller-same",
+      protectedToken: "protected-old-token",
+    });
+    state.acceptInboundBatch({
+      accountId: "bot-same",
+      controllerUserId: "controller-same",
+      messages: [
+        {
+          body: "must survive same-identity re-authentication",
+          contextToken: "context-old",
+          messageId: "message-old",
+          receivedAtMs: 101,
+        },
+      ],
+      nextCursor: "cursor-old",
+      updatedAtMs: 102,
+    });
+    state.enqueueOutbox({
+      body: "pending reply",
+      clientId: "outbox-old",
+      contextToken: "context-old",
+      createdAtMs: 103,
+      targetUserId: "controller-same",
+    });
+
+    assert.deepEqual(
+      state.replaceILinkBinding({
+        controller: {
+          accountId: "bot-same",
+          boundAtMs: 200,
+          userId: "controller-same",
+        },
+        session: {
+          baseUrl: "https://new.example.test",
+          botId: "bot-same",
+          controllerUserId: "controller-same",
+          protectedToken: "protected-new-token",
+        },
+      }),
+      {
+        accountId: "bot-same",
+        boundAtMs: 100,
+        userId: "controller-same",
+      },
+    );
+
+    assert.deepEqual(state.getILinkSession(), {
+      baseUrl: "https://new.example.test",
+      botId: "bot-same",
+      controllerUserId: "controller-same",
+      protectedToken: "protected-new-token",
+    });
+    assert.equal(state.listInboundMessages().length, 1);
+    assert.equal(state.listPendingOutbox().length, 1);
+    assert.equal(state.getILinkState("bot-same")?.cursor, "cursor-old");
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("re-binding a new iLink identity clears old delivery state but preserves user settings", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-rebind-"));
+  const state = new SqliteState(join(directory, "state.db"));
+
+  try {
+    state.bindController({
+      accountId: "bot-old",
+      boundAtMs: 100,
+      userId: "controller-old",
+    });
+    state.saveILinkSession({
+      baseUrl: "https://old.example.test",
+      botId: "bot-old",
+      controllerUserId: "controller-old",
+      protectedToken: "protected-old-token",
+    });
+    state.setMainThreadId("thread-main");
+    state.setSelectedProjectPath("D:\\Project");
+    state.setSessionTimeoutMinutes(60);
+    state.setAwayTimeoutMinutes(10);
+    state.setDefaultPermissionProfile(":danger-full-access");
+    state.setDefaultApprovalPolicy("never");
+    state.setDefaultApprovalsReviewer("user");
+    state.acceptInboundBatch({
+      accountId: "bot-old",
+      controllerUserId: "controller-old",
+      messages: [
+        {
+          body: "old inbound",
+          contextToken: "context-old",
+          messageId: "message-old",
+          receivedAtMs: 101,
+        },
+      ],
+      nextCursor: "cursor-old",
+      updatedAtMs: 102,
+    });
+    state.setBinding({
+      expiresAtMs: 10_000,
+      projectPath: "D:\\Project",
+      threadId: "thread-old",
+      updatedAtMs: 103,
+    });
+    state.putNotificationRoute({
+      deliveredAtMs: 104,
+      eventId: "event-old",
+      expiresAtMs: 10_000,
+      threadId: "thread-old",
+    });
+    state.replaceProjectSnapshot({
+      createdAtMs: 105,
+      expiresAtMs: 10_000,
+      projects: ["D:\\Project"],
+    });
+    state.replaceSessionSnapshot({
+      archived: false,
+      createdAtMs: 106,
+      expiresAtMs: 10_000,
+      hasNext: false,
+      page: 1,
+      projectPath: "D:\\Project",
+      threads: [
+        {
+          archived: false,
+          projectPath: "D:\\Project",
+          threadId: "thread-old",
+        },
+      ],
+    });
+    state.enqueueQueuedTurn({
+      body: "old queued turn",
+      createdAtMs: 107,
+      dedupeKey: "queued-old",
+      threadId: "thread-old",
+    });
+    state.createDispatchIntent({
+      body: "old dispatch",
+      createdAtMs: 108,
+      dedupeKey: "dispatch-old",
+      operationId: "operation-old",
+      threadId: "thread-dispatch-old",
+    });
+    state.markDispatchAccepted("operation-old", "turn-old", 109);
+    state.registerOutboundAttachmentIntent({
+      callId: "call-old",
+      createdAtMs: 110,
+      kind: "file",
+      name: "old.txt",
+      operationId: "operation-old",
+      path: "D:\\Codex_iLink\\old.txt",
+      threadId: "thread-dispatch-old",
+      turnId: "turn-old",
+    });
+    state.enqueueOutbox({
+      body: "old reply",
+      clientId: "outbox-old",
+      contextToken: "context-old",
+      createdAtMs: 111,
+      targetUserId: "controller-old",
+    });
+    state.observeDesktopTurn({
+      createdAtMs: 112,
+      threadId: "thread-desktop-old",
+      turnId: "turn-desktop-old",
+    });
+    state.putPendingDesktopNotification({
+      completedAtMs: 113,
+      cwd: "D:\\Project",
+      status: "completed",
+      threadId: "thread-desktop-old",
+      turnId: "turn-desktop-old",
+    });
+
+    state.replaceILinkBinding({
+      controller: {
+        accountId: "bot-new",
+        boundAtMs: 200,
+        userId: "controller-new",
+      },
+      session: {
+        baseUrl: "https://new.example.test",
+        botId: "bot-new",
+        controllerUserId: "controller-new",
+        protectedToken: "protected-new-token",
+      },
+    });
+
+    assert.deepEqual(state.getController(), {
+      accountId: "bot-new",
+      boundAtMs: 200,
+      userId: "controller-new",
+    });
+    assert.deepEqual(state.getILinkSession(), {
+      baseUrl: "https://new.example.test",
+      botId: "bot-new",
+      controllerUserId: "controller-new",
+      protectedToken: "protected-new-token",
+    });
+    assert.equal(state.getILinkState("bot-old"), null);
+    assert.deepEqual(state.listInboundMessages(), []);
+    assert.equal(state.getBinding(200), null);
+    assert.deepEqual(state.listLiveNotificationRoutes(200), []);
+    assert.equal(state.getProjectSnapshot(200), null);
+    assert.equal(state.getSessionSnapshot(200), null);
+    assert.deepEqual(state.listQueuedTurns(), []);
+    assert.deepEqual(state.listUnresolvedDispatchIntents(), []);
+    assert.deepEqual(state.listOutboundAttachmentIntents("turn-old"), []);
+    assert.deepEqual(state.listPendingOutbox(), []);
+    assert.equal(state.getDesktopTurnObservation("thread-desktop-old"), null);
+    assert.deepEqual(state.listPendingDesktopNotifications(), []);
+    assert.equal(
+      state.observeDesktopTurn({
+        createdAtMs: 201,
+        threadId: "thread-desktop-old",
+        turnId: "turn-desktop-old",
+      }),
+      false,
+    );
+    assert.deepEqual(state.getBridgeSettings(), {
+      awayTimeoutMinutes: 10,
+      mainThreadId: "thread-main",
+      selectedProjectPath: "D:\\Project",
+      sessionTimeoutMinutes: 60,
+    });
+    assert.deepEqual(state.getDefaultThreadPermissionSettings(), {
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      permissions: ":danger-full-access",
+    });
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a failed iLink identity replacement rolls back the old binding", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-rebind-rollback-"));
+  const state = new SqliteState(join(directory, "state.db"));
+
+  try {
+    state.bindController({
+      accountId: "bot-old",
+      boundAtMs: 100,
+      userId: "controller-old",
+    });
+    state.saveILinkSession({
+      baseUrl: "https://old.example.test",
+      botId: "bot-old",
+      controllerUserId: "controller-old",
+      protectedToken: "protected-old-token",
+    });
+    state.acceptInboundBatch({
+      accountId: "bot-old",
+      controllerUserId: "controller-old",
+      messages: [
+        {
+          body: "must survive rollback",
+          contextToken: "context-old",
+          messageId: "message-old",
+          receivedAtMs: 101,
+        },
+      ],
+      nextCursor: "cursor-old",
+      updatedAtMs: 102,
+    });
+
+    assert.throws(
+      () =>
+        state.replaceILinkBinding({
+          controller: {
+            accountId: "bot-new",
+            boundAtMs: -1,
+            userId: "controller-new",
+          },
+          session: {
+            baseUrl: "https://new.example.test",
+            botId: "bot-new",
+            controllerUserId: "controller-new",
+            protectedToken: "protected-new-token",
+          },
+        }),
+      /constraint failed/u,
+    );
+
+    assert.deepEqual(state.getController(), {
+      accountId: "bot-old",
+      boundAtMs: 100,
+      userId: "controller-old",
+    });
+    assert.deepEqual(state.getILinkSession(), {
+      baseUrl: "https://old.example.test",
+      botId: "bot-old",
+      controllerUserId: "controller-old",
+      protectedToken: "protected-old-token",
+    });
+    assert.equal(state.listInboundMessages()[0]?.body, "must survive rollback");
+    assert.equal(state.getILinkState("bot-old")?.cursor, "cursor-old");
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("an invalid iLink session can be cleared without changing the controller", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-"));
   const state = new SqliteState(join(directory, "state.db"));

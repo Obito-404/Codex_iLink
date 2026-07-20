@@ -659,8 +659,16 @@ async function loginCommand(
     }
     const result = await runLoginFlow({
       ilink: new ILinkClient(),
+      ...(existing && force
+        ? {
+            localTokenList: [
+              unprotectForCurrentUser(existing.protectedToken),
+            ],
+          }
+        : {}),
       now: Date.now,
       protectToken: protectForCurrentUser,
+      replaceExistingBinding: existing !== null && force,
       showQr: (qrUrl) => {
         io.log(`请用微信扫描二维码：${qrUrl}`);
         openQrInBrowser(qrUrl);

@@ -485,6 +485,7 @@ export class BridgeDaemon {
       if (!this.#started || signal?.aborted) return;
       try {
         await this.#options.codex.ensureThread?.(threadId);
+        if (signal?.aborted) return;
         const read = await this.#options.codex.readThread({
           includeTurns: true,
           threadId,
@@ -502,7 +503,13 @@ export class BridgeDaemon {
         const status = desktopTerminalStatus(turn?.status);
         if (status) {
           if (requireDesktopSource && read.thread.source !== "vscode") return;
-          await this.#notifyDesktopTerminalOnce(event, status, read.thread);
+          await this.#notifyDesktopTerminalOnce(
+            event,
+            status,
+            read.thread,
+            signal,
+          );
+          if (signal?.aborted) return;
           const releasedLease = this.#options.leases.releaseStoppedDesktop({
             threadId,
             turnId,
@@ -548,7 +555,9 @@ export class BridgeDaemon {
     event: HookEvent & { turnId: string },
     status: DesktopTerminalStatus,
     thread: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<void> {
+    if (signal?.aborted) return;
     const notifier = this.#desktopNotifier;
     if (!notifier) return;
     const observePresence = this.#options.presenceObservation;
@@ -558,9 +567,11 @@ export class BridgeDaemon {
       try {
         observation = await observePresence();
       } catch {
+        if (signal?.aborted) return;
         this.#deferDesktopNotification(event, status);
         return;
       }
+      if (signal?.aborted) return;
       const lastInputAtMs = this.#options.now() - observation.idleMilliseconds;
       if (lastInputAtMs > event.capturedAtMs) return;
       if (observation.state === "present") {
@@ -571,9 +582,13 @@ export class BridgeDaemon {
     }
     const result = await notifier.notifyTerminal(event, status, {
       ...(confirmedAway ? { presence: "away" as const } : {}),
+      ...(signal ? { signal } : {}),
       thread,
     });
-    if (result !== "present") void this.#outbox?.drain().catch(() => undefined);
+    if (signal?.aborted) return;
+    if (result !== "present" && result !== "cancelled") {
+      void this.#outbox?.drain().catch(() => undefined);
+    }
   }
 
   #deferDesktopNotification(

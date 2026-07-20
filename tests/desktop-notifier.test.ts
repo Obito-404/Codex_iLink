@@ -112,6 +112,44 @@ test("a present user is not sent a duplicate Desktop notification", async () => 
   });
 });
 
+test("a normal Stop retries after sharing an in-flight cancelled replay", async () => {
+  await withState(async (state) => {
+    seedContext(state);
+    let resolvePresence!: (value: "away") => void;
+    let markPresenceStarted!: () => void;
+    const presenceStarted = new Promise<void>((resolveStarted) => {
+      markPresenceStarted = resolveStarted;
+    });
+    const notifier = new DesktopNotifier({
+      now: () => 22_000,
+      presence: () => {
+        markPresenceStarted();
+        return new Promise((resolve) => {
+          resolvePresence = resolve;
+        });
+      },
+      readThread: async () => ({ thread: { name: "并发完成" } }),
+      session,
+      state,
+    });
+    const abort = new AbortController();
+    const replay = notifier.notifyTerminal(stopEvent, "completed", {
+      signal: abort.signal,
+    });
+    await presenceStarted;
+    const normal = notifier.notifyTerminal(stopEvent, "completed", {
+      presence: "away",
+      thread: { name: "并发完成" },
+    });
+    abort.abort(new Error("spool delivery timed out"));
+    resolvePresence("away");
+
+    assert.equal(await replay, "cancelled");
+    assert.equal(await normal, "queued");
+    assert.equal(state.listPendingOutbox().length, 1);
+  });
+});
+
 test("a long Desktop completion keeps a short question summary and splits the final answer", async () => {
   await withState(async (state) => {
     seedContext(state);

@@ -152,6 +152,7 @@ export class HookReceiver {
                 );
                 mkdirSync(deadLetterDirectory, { recursive: true });
                 renameSync(path, join(deadLetterDirectory, name));
+                this.#pruneDeadLetters();
               }
             } catch {
               unlinkSync(path);

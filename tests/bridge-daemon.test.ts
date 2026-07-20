@@ -883,6 +883,92 @@ test("an unmatched CLI Stop is inspected once and still suppresses a late Prompt
   }
 });
 
+test("an aborted spooled Stop cannot notify or release its Desktop lease later", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-aborted-stop-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  let resolveObservation!: (value: {
+    idleMilliseconds: number;
+    locked: boolean;
+    state: "away";
+  }) => void;
+  let markObservationStarted!: () => void;
+  const observationStarted = new Promise<void>((resolveStarted) => {
+    markObservationStarted = resolveStarted;
+  });
+  let sent = 0;
+  state.setMainThreadId("thread-main");
+  leases.tryAcquire({
+    createdAtMs: 1,
+    instanceId: "desktop",
+    operationId: "desktop-turn",
+    owner: "desktop",
+    threadId: "thread-desktop",
+    turnId: "desktop-turn",
+  });
+
+  const daemon = new BridgeDaemon({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      close() {},
+      onEvent() { return () => undefined; },
+      async readThread() {
+        return {
+          thread: {
+            source: "vscode",
+            turns: [{ id: "desktop-turn", status: "completed" }],
+          },
+        };
+      },
+      async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
+      async setThreadName() { return {}; },
+      async startThread() { assert.fail("main thread already exists"); },
+      async startTurn() { assert.fail("no inbound messages"); },
+    },
+    hookReceiver: {
+      async close() {}, async drainSpool() { return 0; }, async start() {},
+    },
+    ilink: {
+      async getUpdates() { return { cursor: "", kind: "timeout" as const }; },
+      async sendText(input) {
+        sent += 1;
+        return { accepted: true as const, clientId: input.clientId };
+      },
+    },
+    inboxDirectory: join(directory, "Inbox"),
+    leases,
+    newId: () => "unused",
+    now: () => 10_000,
+    presence: async () => "away",
+    presenceObservation: () => {
+      markObservationStarted();
+      return new Promise((resolve) => {
+        resolveObservation = resolve;
+      });
+    },
+    session,
+    state,
+  });
+
+  try {
+    await daemon.start();
+    const abort = new AbortController();
+    const reconciliation = daemon.ingestHookEvent(desktopStopEvent(), abort.signal);
+    await observationStarted;
+    abort.abort(new Error("spool delivery timed out"));
+    resolveObservation({ idleMilliseconds: 20_000, locked: true, state: "away" });
+    await reconciliation;
+    assert.equal(sent, 0);
+    assert.equal(leases.getLease("thread-desktop")?.turnId, "desktop-turn");
+    await daemon.stop();
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("an away Desktop completion from an unselected project is sent without changing navigation", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-global-notify-"));
   const databasePath = join(directory, "state.sqlite");

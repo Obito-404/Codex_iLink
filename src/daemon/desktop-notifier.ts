@@ -32,11 +32,13 @@ export type DesktopNotifierOptions = {
 
 export type DesktopNotificationResult =
   | "already-sent"
+  | "cancelled"
   | "present"
   | "queued";
 
 export type DesktopNotificationContext = {
   presence?: PresenceState;
+  signal?: AbortSignal;
   thread?: Record<string, unknown>;
 };
 
@@ -68,7 +70,13 @@ export class DesktopNotifier {
       status !== "interrupted",
     );
     const current = this.#inFlight.get(clientId);
-    if (current) return current;
+    if (current) {
+      return current.then((result) =>
+        result === "cancelled" && !context.signal?.aborted
+          ? this.notifyTerminal(event, status, context)
+          : result,
+      );
+    }
     const notification = this.#notify(event, status, clientId, context).finally(() => {
       if (this.#inFlight.get(clientId) === notification) {
         this.#inFlight.delete(clientId);
@@ -84,6 +92,7 @@ export class DesktopNotifier {
     clientId: string,
     context: DesktopNotificationContext,
   ): Promise<DesktopNotificationResult> {
+    if (context.signal?.aborted) return "cancelled";
     if (hasDesktopNotification(this.#state, clientId)) return "already-sent";
     let presence = context.presence;
     if (!presence) {
@@ -94,6 +103,7 @@ export class DesktopNotifier {
         return "present";
       }
     }
+    if (context.signal?.aborted) return "cancelled";
     if (presence === "present") return "present";
 
     let thread = context.thread ?? {};
@@ -109,6 +119,7 @@ export class DesktopNotifier {
         // The Hook metadata is sufficient for a safe fallback notification.
       }
     }
+    if (context.signal?.aborted) return "cancelled";
     const text = formatDesktopNotification(event, status, thread);
     const extracted = extractWechatLocalFileReferences(text);
     const safeText = [
@@ -125,6 +136,7 @@ export class DesktopNotifier {
       clientId,
       messages.length,
     );
+    if (context.signal?.aborted) return "cancelled";
     this.#state.enqueueOutboxBatch(
       messages.map((body, index) => ({
         body,

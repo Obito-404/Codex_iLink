@@ -462,6 +462,10 @@ test("dead-letter spool is bounded by age and file count", async () => {
     assert.equal(await receiver.drainSpool(), 0);
     assert.equal(existsSync(expiredPath), false);
     assert.equal(readdirSync(deadLetterDirectory).length, 128);
+
+    runHook({ pipePath: pipePath(), spoolDirectory });
+    assert.equal(await receiver.drainSpool(), 0);
+    assert.equal(readdirSync(deadLetterDirectory).length, 128);
   } finally {
     await receiver.close();
     rmSync(directory, { force: true, recursive: true });

@@ -9,7 +9,7 @@ export type DesktopProject = {
 
 const MAX_DESKTOP_PROJECT_STATE_BYTES = 1024 * 1024;
 
-export function desktopProjectStatePath(
+export function desktopGlobalStatePath(
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
   const configuredHome = environment.CODEX_HOME?.trim();

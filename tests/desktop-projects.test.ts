@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
-  desktopProjectStatePath,
+  desktopGlobalStatePath,
   parseDesktopProjects,
   readDesktopProjects,
 } from "../src/windows/desktop-projects.ts";
@@ -122,7 +122,7 @@ test("Desktop project loading falls back to the fixed backup and ignores stale t
 
 test("Desktop project state follows the configured Codex home", () => {
   assert.equal(
-    desktopProjectStatePath({ CODEX_HOME: "D:\\PortableCodex" }),
+    desktopGlobalStatePath({ CODEX_HOME: "D:\\PortableCodex" }),
     "D:\\PortableCodex\\.codex-global-state.json",
   );
 });

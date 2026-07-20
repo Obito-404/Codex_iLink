@@ -24,7 +24,7 @@ import { ILinkError, type ILinkSession } from "../ilink/protocol.ts";
 import { InboundMediaStore } from "../media/inbound-media.ts";
 import { unprotectForCurrentUser } from "./dpapi.ts";
 import {
-  desktopProjectStatePath,
+  desktopGlobalStatePath,
   readDesktopProjects,
 } from "./desktop-projects.ts";
 import { readDesktopPermissionSelection } from "./desktop-permissions.ts";
@@ -488,11 +488,11 @@ export async function runWindowsHost(
       inboxDirectory: paths.inboxDirectory,
       leases,
       listProjects: () =>
-        readDesktopProjects(desktopProjectStatePath(environment)),
+        readDesktopProjects(desktopGlobalStatePath(environment)),
       media,
       newThreadPermissions: () =>
         readDesktopPermissionSelection(
-          desktopProjectStatePath(environment),
+          desktopGlobalStatePath(environment),
         ).settings,
       newId: randomUUID,
       now: Date.now,

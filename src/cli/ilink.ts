@@ -34,7 +34,7 @@ import {
   desktopPermissionLabel,
   readDesktopPermissionSelection,
 } from "../windows/desktop-permissions.ts";
-import { desktopProjectStatePath } from "../windows/desktop-projects.ts";
+import { desktopGlobalStatePath } from "../windows/desktop-projects.ts";
 import {
   findDesktopCodexExecutable,
   hostControlPipePath,
@@ -590,7 +590,7 @@ async function configCommand(
     }
     const settings = state.getBridgeSettings();
     const permissions = readDesktopPermissionSelection(
-      desktopProjectStatePath(process.env),
+      desktopGlobalStatePath(process.env),
     );
     io.log(`新会话权限：跟随 Codex Desktop（${desktopPermissionLabel(permissions.kind)}）`);
     io.log(`会话绑定超时：${String(settings.sessionTimeoutMinutes)} 分钟`);

@@ -111,6 +111,33 @@ test("doctor reports Codex version as a separate compatibility check", async () 
   );
 });
 
+test("doctor reports an expired WeChat login instead of a healthy Bridge", async () => {
+  const checks = await collectDoctorChecks({}, {
+    currentHostStatus: async () => ({
+      ilinkAuthPausedUntilMs: Date.now() + 60_000,
+      phase: "running",
+      pid: 123,
+      startedAtMs: Date.now() - 60_000,
+    }),
+    findCodexExecutable: () => "D:\\Codex\\codex.exe",
+    inspectStartupTask: () => "enabled",
+    runCodex: () => ({
+      status: 0,
+      stderr: "",
+      stdout: "codex-cli 0.144.2\n",
+    }),
+  });
+
+  assert.deepEqual(
+    checks.find((check) => check.name === "Bridge"),
+    {
+      detail: "微信登录已失效；请执行 ilink stop、ilink login --force、ilink start",
+      level: "error",
+      name: "Bridge",
+    },
+  );
+});
+
 test("doctor reports an installed and enabled Guard without claiming hook trust", async () => {
   const checks = await collectDoctorChecks({}, {
     findCodexExecutable: () => "D:\\Codex\\codex.exe",

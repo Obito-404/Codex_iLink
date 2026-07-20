@@ -233,6 +233,7 @@ flowchart LR
 - Pipe 使用当前用户 ACL；Bridge 数据目录同样收紧 ACL。
 - Hook Spool 只保存与 Pipe 相同的脱敏元数据，活跃队列限制为 7 天或 5MB；写入端和 Bridge 读取端都删除过期事件，并在启动和运行时 single-flight 清理。消费失败的事件移入同目录下的 `dead-letter`，最多保留 7 天和 128 个文件。已精确 Stop 的 observation 另保留 7 天最小 `(thread_id, turn_id)` tombstone，拒绝迟到或重复 Prompt 复活活动状态。
 - 默认没有外部遥测。
+- iLink 返回 `ret=-14` 或 `errcode=-14` 时视为登录失效，Bridge 按账号暂停请求一小时，不做 30 秒无限重试；用户可用 `ilink login --force` 重新扫码并在重启 Bridge 后立即恢复。
 - 日志不记录消息正文、Token、二维码、完整 Transcript、媒体 CDN URL/AES 密钥或审批敏感参数。
 - 日志保留 7 天，总大小不超过 20MB。
 - 需要人工判定或稳定定位的 Bridge 错误采用短码，例如 `E_SESSION_BUSY`、`E_BRIDGE_AUTH`；可确定的 Codex 上游失败使用直接的脱敏中文文案。完整脱敏堆栈只写本地日志。

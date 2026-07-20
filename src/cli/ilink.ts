@@ -53,7 +53,7 @@ export const CLI_HELP = `用法: ilink <command>
 
   config  查看或修改超时配置
   setup   完成插件安装、微信绑定并启动 Bridge
-  login   扫码绑定唯一微信用户
+  login   扫码绑定唯一微信用户；失效时用 login --force
   start   在后台启动微信 Bridge
   startup 管理登录后自动启动
   status  查看 Bridge 状态
@@ -68,7 +68,7 @@ export type CliIo = {
 export type CliCommands = {
   config(args: readonly string[]): Promise<number>;
   doctor(): Promise<number>;
-  login(): Promise<number>;
+  login(args: readonly string[]): Promise<number>;
   setup(): Promise<number>;
   start(): Promise<number>;
   startup(args: readonly string[]): Promise<number>;
@@ -221,6 +221,7 @@ export async function runCli(
   }
   if (
     command !== "config" &&
+    command !== "login" &&
     command !== "startup" &&
     command !== "__hook" &&
     argv.length !== 1
@@ -230,7 +231,7 @@ export async function runCli(
   }
   try {
     if (command === "config") return await commands.config(argv.slice(1));
-    if (command === "login") return await commands.login();
+    if (command === "login") return await commands.login(argv.slice(1));
     if (command === "setup") return await commands.setup();
     if (command === "start") return await commands.start();
     if (command === "startup") return await commands.startup(argv.slice(1));
@@ -254,6 +255,7 @@ export type DoctorCheck = {
 };
 
 export type DoctorDependencies = {
+  currentHostStatus?: typeof currentHostStatus;
   findCodexExecutable?: typeof findDesktopCodexExecutable;
   inspectStartupTask?: typeof inspectWindowsStartupTask;
   runCodex?: CodexVersionCommandRunner;
@@ -406,12 +408,17 @@ export async function collectDoctorChecks(
   }
 
   try {
-    const status = await currentHostStatus(environment);
+    const status = await (
+      dependencies.currentHostStatus ?? currentHostStatus
+    )(environment);
+    const authExpired = isILinkAuthenticationExpired(status);
     checks.push({
-      detail: status
-        ? `${status.phase}, PID ${status.pid}`
+      detail: authExpired
+        ? "微信登录已失效；请执行 ilink stop、ilink login --force、ilink start"
+        : status
+          ? `${status.phase}, PID ${status.pid}`
         : "未运行（可执行 ilink start）",
-      level: status ? "ok" : "warn",
+      level: authExpired ? "error" : status ? "ok" : "warn",
       name: "Bridge",
     });
   } catch (error) {
@@ -444,7 +451,7 @@ function productionCommands(io: CliIo): CliCommands {
   return {
     config: (args) => configCommand(io, args),
     doctor: () => doctorCommand(io),
-    login: () => loginCommand(io),
+    login: (args) => loginCommand(io, args),
     setup: () => setupCommand(io),
     start: () => startCommand(io),
     startup: (args) => startupCommand(io, args),
@@ -620,9 +627,17 @@ async function configCommand(
   }
 }
 
-async function loginCommand(io: CliIo): Promise<number> {
+async function loginCommand(
+  io: CliIo,
+  args: readonly string[] = [],
+): Promise<number> {
   assertWindows();
   requireLocalAppData();
+  const force = args.length === 1 && args[0] === "--force";
+  if (args.length > 0 && !force) {
+    io.error("用法: ilink login [--force]");
+    return 2;
+  }
   if (await currentHostStatus()) {
     io.error("Bridge 正在运行，请先执行 ilink stop。");
     return 1;
@@ -636,8 +651,10 @@ async function loginCommand(io: CliIo): Promise<number> {
   process.once("SIGTERM", cancel);
   try {
     const existing = state.getILinkSession();
-    if (existing) {
-      io.log(`已绑定微信用户 ${existing.controllerUserId}，无需重复扫码。`);
+    if (existing && !force) {
+      io.log(
+        `已绑定微信用户 ${existing.controllerUserId}，无需重复扫码；若登录已失效，请执行 ilink login --force。`,
+      );
       return 0;
     }
     const result = await runLoginFlow({
@@ -780,6 +797,12 @@ async function statusCommand(io: CliIo): Promise<number> {
   io.log(
     `Bridge ${phaseLabel(status.phase)}，PID ${status.pid}，启动于 ${new Date(status.startedAtMs).toLocaleString()}`,
   );
+  if (isILinkAuthenticationExpired(status)) {
+    io.error(
+      "微信登录已失效。请执行：ilink stop → ilink login --force → ilink start",
+    );
+    return 1;
+  }
   return 0;
 }
 
@@ -953,6 +976,13 @@ function phaseLabel(phase: HostStatus["phase"]): string {
   if (phase === "running") return "运行中";
   if (phase === "starting") return "启动中";
   return "停止中";
+}
+
+function isILinkAuthenticationExpired(status: HostStatus | null): boolean {
+  return (
+    status?.ilinkAuthPausedUntilMs !== undefined &&
+    status.ilinkAuthPausedUntilMs > Date.now()
+  );
 }
 
 function isMissingControlPipe(error: unknown): boolean {

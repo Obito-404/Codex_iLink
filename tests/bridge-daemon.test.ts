@@ -19,7 +19,7 @@ import { SqliteState } from "../src/bridge/sqlite-state.ts";
 import { serializeDurableTurnInput } from "../src/bridge/turn-input.ts";
 import { SqliteTurnLeaseStore } from "../src/coordination/turn-lease.ts";
 import { HookReceiver } from "../src/hooks/hook-receiver.ts";
-import type { ILinkSession } from "../src/ilink/protocol.ts";
+import { ILinkError, type ILinkSession } from "../src/ilink/protocol.ts";
 import { stageOutboundMedia } from "../src/media/outbound-media.ts";
 import { PowerRequestController } from "../src/windows/power-request.ts";
 
@@ -792,6 +792,70 @@ test("daemon reconciles a spooled Desktop Stop during startup", async () => {
         }),
     );
     assert.equal(ensured, true);
+    await daemon.stop();
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("expired authentication in a startup Outbox keeps the Bridge running for cooldown", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-startup-auth-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  let sends = 0;
+  state.setMainThreadId("thread-main");
+  state.enqueueOutbox({
+    body: "等待重新登录后发送",
+    clientId: "startup-auth-expired",
+    contextToken: "ctx",
+    createdAtMs: 1,
+    targetUserId: "controller-a",
+  });
+  const daemon = new BridgeDaemon({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      close() {},
+      onEvent() { return () => undefined; },
+      async readThread() { return { thread: { turns: [] } }; },
+      async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
+      async setThreadName() { return {}; },
+      async startThread() { assert.fail("main thread already exists"); },
+      async startTurn() { assert.fail("no inbound messages"); },
+    },
+    hookReceiver: {
+      async close() {}, async drainSpool() { return 0; }, async start() {},
+    },
+    ilink: {
+      async getUpdates() { assert.fail("Outbox should fail before polling"); },
+      async sendText() {
+        sends += 1;
+        throw new ILinkError({
+          kind: "auth-expired",
+          message: "sendText paused after expired authentication",
+        });
+      },
+    },
+    inboxDirectory: join(directory, "Inbox"),
+    leases,
+    newId: () => "unused",
+    now: () => 2,
+    session,
+    state,
+  });
+
+  try {
+    await daemon.start();
+    assert.equal(sends, 2, "both bounded startup drains may observe the pause");
+    await assert.rejects(
+      daemon.pollOnce(),
+      (error: unknown) =>
+        error instanceof ILinkError && error.kind === "auth-expired",
+    );
+    assert.equal(sends, 3);
+    assert.equal(state.getOutbox("startup-auth-expired")?.status, "pending");
     await daemon.stop();
   } finally {
     leases.close();

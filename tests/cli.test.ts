@@ -24,8 +24,8 @@ function fixtureCommands(calls: string[]): CliCommands {
       calls.push("doctor");
       return 10;
     },
-    login: async () => {
-      calls.push("login");
+    login: async (args) => {
+      calls.push(["login", ...args].join(" "));
       return 11;
     },
     setup: async () => {
@@ -341,6 +341,18 @@ test("ilink config set persists timing settings across CLI processes", (t) => {
   assert.equal(current.status, 0, current.stderr);
   assert.match(current.stdout, /会话绑定超时：60 分钟/u);
   assert.match(current.stdout, /离开判定时间：10 分钟/u);
+});
+
+test("CLI forwards forced WeChat reauthentication", async () => {
+  const calls: string[] = [];
+  assert.equal(
+    await runCli(["login", "--force"], {
+      commands: fixtureCommands(calls),
+      io: { error: () => undefined, log: () => undefined },
+    }),
+    11,
+  );
+  assert.deepEqual(calls, ["login --force"]);
 });
 
 test("ilink config set persists defaults for newly created tasks", (t) => {

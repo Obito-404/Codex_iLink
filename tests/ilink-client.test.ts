@@ -560,6 +560,61 @@ test("getUpdates classifies -14 in ret or errcode as expired authentication", as
   }
 });
 
+test("one -14 pauses every authenticated API for the same bot", async () => {
+  let nowMs = 1_000;
+  let fetchCalls = 0;
+  const pauses: Array<{ botId: string; pausedUntilMs: number }> = [];
+  const client = new ILinkClient({
+    authExpiredCooldownMs: 1_000,
+    fetch: async () => {
+      fetchCalls += 1;
+      return fetchCalls === 1
+        ? Response.json({ errmsg: "stale token", ret: -14 })
+        : Response.json({ get_updates_buf: "cursor-new", msgs: [], ret: 0 });
+    },
+    now: () => nowMs,
+    onAuthExpired: (pause) => pauses.push(pause),
+  });
+  const session = {
+    baseUrl: "https://api.weixin.qq.com/",
+    botId: "bot-1",
+    botToken: "stale-token",
+    controllerUserId: "controller-1",
+  };
+
+  await assert.rejects(
+    client.sendText({
+      clientId: "auth-expired-send",
+      contextToken: "context",
+      session,
+      text: "不会发送",
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      (error as Error & { kind?: string }).kind === "auth-expired",
+  );
+  assert.deepEqual(pauses, [{ botId: "bot-1", pausedUntilMs: 2_000 }]);
+  assert.equal(client.authPausedUntil(session), 2_000);
+
+  await assert.rejects(
+    client.getUpdates({ cursor: "cursor-old", session }),
+    /paused after expired authentication/u,
+  );
+  await assert.rejects(
+    client.notifyStart({ session }),
+    /paused after expired authentication/u,
+  );
+  assert.equal(fetchCalls, 1, "paused APIs must not reach fetch");
+
+  nowMs = 2_000;
+  assert.deepEqual(
+    await client.getUpdates({ cursor: "cursor-old", session }),
+    { cursor: "cursor-new", kind: "updates", messages: [] },
+  );
+  assert.equal(fetchCalls, 2);
+  assert.equal(client.authPausedUntil(session), null);
+});
+
 test("getUpdates treats its client timeout as an empty poll and keeps the cursor", async () => {
   const fetchImpl: typeof fetch = async (_input, init) => {
     if (!init?.signal) throw new Error("getUpdates did not install a timeout signal");

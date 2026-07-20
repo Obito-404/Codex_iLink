@@ -28,6 +28,7 @@ import {
   runHostLifecycle,
   runSerialPollingLoop,
 } from "../src/windows/host.ts";
+import { ILinkError } from "../src/ilink/protocol.ts";
 
 test("a locked Windows session is away even after recent input", async () => {
   const presence = await getPresence(async () => ({
@@ -368,6 +369,7 @@ test("the control pipe is both a status endpoint and a crash-safe singleton", as
   const pipePath = `\\\\.\\pipe\\codex-ilink-test-${randomUUID()}`;
   let stopRequests = 0;
   const status = {
+    ilinkAuthPausedUntilMs: 1_721_003_600_000,
     phase: "running" as const,
     pid: process.pid,
     startedAtMs: 1_721_000_000_000,
@@ -496,6 +498,31 @@ test("aborting during polling backoff exits without another request", async () =
   await loop;
 
   assert.equal(calls, 1);
+});
+
+test("expired iLink authentication uses the official one-hour cooldown", async () => {
+  const abort = new AbortController();
+  const delays: number[] = [];
+  let calls = 0;
+  await runSerialPollingLoop({
+    poll: async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new ILinkError({
+          kind: "auth-expired",
+          message: "getUpdates ret=-14",
+        });
+      }
+      abort.abort();
+    },
+    signal: abort.signal,
+    sleep: async (delayMs) => {
+      delays.push(delayMs);
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(delays, [60 * 60 * 1_000]);
 });
 
 test("host lifecycle closes every owned resource in a deterministic order", async () => {

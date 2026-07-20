@@ -29,7 +29,13 @@ import {
 export type ILinkFetch = typeof fetch;
 
 export type ILinkClientOptions = {
+  authExpiredCooldownMs?: number;
   fetch?: ILinkFetch;
+  now?: () => number;
+  onAuthExpired?: (input: {
+    botId: string;
+    pausedUntilMs: number;
+  }) => void;
 };
 
 type SendTextInput = {
@@ -106,13 +112,27 @@ export class ILinkClientIdCollisionError extends Error {
 }
 
 export class ILinkClient {
+  readonly #authExpiredCooldownMs: number;
+  readonly #authPausedUntilMs = new Map<string, number>();
   readonly #fetch: ILinkFetch;
+  readonly #now: () => number;
+  readonly #onAuthExpired: ILinkClientOptions["onAuthExpired"];
   readonly #sendMediaFlights = new Map<string, SendMediaFlight>();
   readonly #sendTextFlights = new Map<string, SendTextFlight>();
   readonly #typingTickets = new Map<string, Promise<string | null>>();
 
   constructor(options: ILinkClientOptions = {}) {
+    this.#authExpiredCooldownMs =
+      options.authExpiredCooldownMs ?? 60 * 60 * 1_000;
+    if (
+      !Number.isSafeInteger(this.#authExpiredCooldownMs) ||
+      this.#authExpiredCooldownMs < 0
+    ) {
+      throw new Error("E_ILINK_AUTH_EXPIRED_COOLDOWN");
+    }
     this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#now = options.now ?? Date.now;
+    this.#onAuthExpired = options.onAuthExpired;
   }
 
   async createQr(input: {
@@ -231,6 +251,7 @@ export class ILinkClient {
     signal?: AbortSignal;
     timeoutMs?: number;
   }): Promise<GetUpdatesResult> {
+    this.#assertSessionActive("getUpdates", input.session);
     const requestSignal = createRequestSignal(input.signal, input.timeoutMs ?? 35_000);
     let response: Response;
     try {
@@ -270,7 +291,7 @@ export class ILinkClient {
       msgs?: WireWeixinMessage[];
       ret?: number;
     };
-    assertApiSuccess("getUpdates", body);
+    this.#assertApiSuccess("getUpdates", body, input.session);
     return {
       cursor: body.get_updates_buf || input.cursor,
       kind: "updates",
@@ -295,6 +316,7 @@ export class ILinkClient {
     endpoint: "notifystart" | "notifystop",
     input: LifecycleInput,
   ): Promise<void> {
+    this.#assertSessionActive(operation, input.session);
     const requestSignal = createRequestSignal(input.signal, input.timeoutMs ?? 10_000);
     let response: Response;
     try {
@@ -312,12 +334,14 @@ export class ILinkClient {
     }
     assertHttpSuccess(operation, response);
     const body = await readResponseObject(operation, response);
-    assertApiSuccess(operation, body);
+    this.#assertApiSuccess(operation, body, input.session);
   }
 
   async sendTyping(input: SendTypingInput): Promise<boolean> {
+    this.#assertSessionActive("sendTyping", input.session);
     const ticket = await this.#typingTicket(input);
     if (!ticket) return false;
+    this.#assertSessionActive("sendTyping", input.session);
 
     const requestSignal = createRequestSignal(input.signal, input.timeoutMs ?? 10_000);
     let response: Response;
@@ -351,7 +375,7 @@ export class ILinkClient {
     assertHttpSuccess("sendTyping", response);
     const body = await readResponseObject("sendTyping", response);
     try {
-      assertApiSuccess("sendTyping", body);
+      this.#assertApiSuccess("sendTyping", body, input.session);
     } catch (error) {
       this.#typingTickets.delete(typingTicketKey(input.session));
       throw error;
@@ -381,6 +405,7 @@ export class ILinkClient {
   }
 
   async #fetchTypingTicket(input: SendTypingInput): Promise<string | null> {
+    this.#assertSessionActive("getConfig", input.session);
     const requestSignal = createRequestSignal(input.signal, input.timeoutMs ?? 10_000);
     let response: Response;
     try {
@@ -411,13 +436,14 @@ export class ILinkClient {
     }
     assertHttpSuccess("getConfig", response);
     const body = await readResponseObject("getConfig", response);
-    assertApiSuccess("getConfig", body);
+    this.#assertApiSuccess("getConfig", body, input.session);
     return typeof body.typing_ticket === "string" && body.typing_ticket.length > 0
       ? body.typing_ticket
       : null;
   }
 
   async prepareMedia(input: PrepareMediaInput): Promise<PreparedOutboundMedia> {
+    this.#assertSessionActive("prepareMedia", input.session);
     if (input.signal?.aborted) {
       throw new ILinkError({
         kind: "cancelled",
@@ -441,6 +467,7 @@ export class ILinkClient {
     );
     let uploadInfo: Record<string, unknown>;
     try {
+      this.#assertSessionActive("prepareMedia", input.session);
       const response = await this.#fetch(
         endpointUrl(input.session.baseUrl, "ilink/bot/getuploadurl"),
         {
@@ -462,9 +489,10 @@ export class ILinkClient {
       );
       assertHttpSuccess("prepareMedia", response);
       uploadInfo = await readResponseObject("prepareMedia", response);
-      assertApiSuccess(
+      this.#assertApiSuccess(
         "prepareMedia",
         uploadInfo as { errcode?: number; errmsg?: string; ret?: number },
+        input.session,
       );
     } finally {
       uploadRequest.cleanup();
@@ -612,6 +640,7 @@ export class ILinkClient {
     signal?: AbortSignal;
     timeoutMs?: number;
   }): Promise<SendMessageResult> {
+    this.#assertSessionActive(input.operation, input.session);
     const requestSignal = createRequestSignal(input.signal, input.timeoutMs ?? 15_000);
     let response: Response;
     try {
@@ -647,8 +676,48 @@ export class ILinkClient {
     } catch (error) {
       throw deliveryUnknown(input.clientId, error);
     }
-    assertApiSuccess(input.operation, body);
+    this.#assertApiSuccess(input.operation, body, input.session);
     return { accepted: true, clientId: input.clientId };
+  }
+
+  authPausedUntil(session: Pick<ILinkSession, "botId">): number | null {
+    const pausedUntilMs = this.#authPausedUntilMs.get(session.botId);
+    if (pausedUntilMs === undefined) return null;
+    if (pausedUntilMs <= this.#now()) {
+      this.#authPausedUntilMs.delete(session.botId);
+      return null;
+    }
+    return pausedUntilMs;
+  }
+
+  #assertSessionActive(operation: string, session: ILinkSession): void {
+    const pausedUntilMs = this.authPausedUntil(session);
+    if (pausedUntilMs === null) return;
+    throw new ILinkError({
+      kind: "auth-expired",
+      message: `${operation} paused after expired authentication`,
+    });
+  }
+
+  #assertApiSuccess(
+    operation: string,
+    body: { errcode?: number; errmsg?: string; ret?: number },
+    session: ILinkSession,
+  ): void {
+    try {
+      assertApiSuccess(operation, body);
+    } catch (error) {
+      if (error instanceof ILinkError && error.kind === "auth-expired") {
+        const pausedUntilMs = this.#now() + this.#authExpiredCooldownMs;
+        this.#authPausedUntilMs.set(session.botId, pausedUntilMs);
+        try {
+          this.#onAuthExpired?.({ botId: session.botId, pausedUntilMs });
+        } catch {
+          // Observability must not replace the authentication error.
+        }
+      }
+      throw error;
+    }
   }
 }
 

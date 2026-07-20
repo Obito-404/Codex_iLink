@@ -22,9 +22,10 @@ import {
 } from "../bridge/desktop-notification-identity.ts";
 import type { HookDecision, HookEvent } from "../hooks/hook-receiver.ts";
 import type { DefaultThreadPermissionSettings } from "../domain/user-settings.ts";
-import type {
-  GetUpdatesResult,
-  ILinkSession,
+import {
+  ILinkError,
+  type GetUpdatesResult,
+  type ILinkSession,
 } from "../ilink/protocol.ts";
 import type {
   PresenceObservation,
@@ -242,13 +243,25 @@ export class BridgeDaemon {
     await this.#notifyILinkLifecycle("notifyStart");
     await this.#options.hookReceiver.start();
     await this.#options.hookReceiver.drainSpool();
-    await this.#outbox.drain();
+    await this.#allowStartupAuthPause(() => this.#outbox?.drain());
     await this.#reconcilePendingDesktopNotifications();
-    await this.#outbox.drain();
+    await this.#allowStartupAuthPause(() => this.#outbox?.drain());
     try {
-      await this.#bridge.recoverPendingWork();
+      await this.#allowStartupAuthPause(() => this.#bridge?.recoverPendingWork());
     } finally {
       await this.#syncActiveTaskCount();
+    }
+  }
+
+  async #allowStartupAuthPause(
+    operation: () => Promise<unknown> | undefined,
+  ): Promise<void> {
+    try {
+      await operation();
+    } catch (error) {
+      if (!(error instanceof ILinkError) || error.kind !== "auth-expired") {
+        throw error;
+      }
     }
   }
 

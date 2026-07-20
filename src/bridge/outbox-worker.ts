@@ -4,7 +4,7 @@ import {
   type OutboxItem,
 } from "./sqlite-state.ts";
 import type { ILinkSender } from "./bridge.ts";
-import type { ILinkSession } from "../ilink/protocol.ts";
+import { ILinkError, type ILinkSession } from "../ilink/protocol.ts";
 import { parseDesktopNotificationClientId } from "./desktop-notification-identity.ts";
 import { dispatchOutboxItem } from "./outbox-delivery.ts";
 import { WECHAT_FINAL_MAX_MESSAGES } from "./wechat-output.ts";
@@ -131,6 +131,9 @@ export class OutboxWorker {
           break;
         } catch (error) {
           if (signal?.aborted) throw error;
+          if (error instanceof ILinkError && error.kind === "auth-expired") {
+            throw error;
+          }
           if (attempt < this.#maxAttempts) {
             await this.#sleep(250 * 2 ** (attempt - 1), signal);
           }

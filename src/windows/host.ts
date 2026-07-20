@@ -20,7 +20,7 @@ import { SqliteTurnLeaseStore } from "../coordination/turn-lease.ts";
 import { BridgeDaemon } from "../daemon/bridge-daemon.ts";
 import { HookReceiver } from "../hooks/hook-receiver.ts";
 import { ILinkClient } from "../ilink/ilink-client.ts";
-import type { ILinkSession } from "../ilink/protocol.ts";
+import { ILinkError, type ILinkSession } from "../ilink/protocol.ts";
 import { InboundMediaStore } from "../media/inbound-media.ts";
 import { unprotectForCurrentUser } from "./dpapi.ts";
 import {
@@ -36,10 +36,12 @@ import { runtimePaths, userPipePath } from "./runtime-paths.ts";
 
 const CONTROL_REQUEST_LIMIT_BYTES = 4 * 1024;
 const DEFAULT_POLL_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
+const DEFAULT_AUTH_EXPIRED_RETRY_MS = 60 * 60 * 1_000;
 
 export type HostPhase = "running" | "starting" | "stopping";
 
 export type HostStatus = {
+  ilinkAuthPausedUntilMs?: number;
   phase: HostPhase;
   pid: number;
   startedAtMs: number;
@@ -276,6 +278,7 @@ export function desktopCodexAppServerCommand(
 }
 
 export type SerialPollingLoopOptions = {
+  authExpiredRetryMs?: number;
   backoffMs?: readonly number[];
   onRetry?: (error: unknown, delayMs: number, failureCount: number) => void;
   poll: (signal: AbortSignal) => Promise<unknown>;
@@ -287,8 +290,13 @@ export async function runSerialPollingLoop(
   options: SerialPollingLoopOptions,
 ): Promise<void> {
   const backoffMs = options.backoffMs ?? DEFAULT_POLL_BACKOFF_MS;
+  const authExpiredRetryMs =
+    options.authExpiredRetryMs ?? DEFAULT_AUTH_EXPIRED_RETRY_MS;
   if (backoffMs.length === 0 || backoffMs.some((value) => value < 0)) {
     throw new Error("E_HOST_INVALID_BACKOFF");
+  }
+  if (!Number.isSafeInteger(authExpiredRetryMs) || authExpiredRetryMs < 0) {
+    throw new Error("E_HOST_INVALID_AUTH_EXPIRED_RETRY");
   }
   const sleep = options.sleep ?? abortableDelay;
   let failureCount = 0;
@@ -300,7 +308,10 @@ export async function runSerialPollingLoop(
       if (options.signal.aborted) return;
       failureCount += 1;
       const index = Math.min(failureCount - 1, backoffMs.length - 1);
-      const delayMs = backoffMs[index];
+      const delayMs =
+        error instanceof ILinkError && error.kind === "auth-expired"
+          ? authExpiredRetryMs
+          : backoffMs[index];
       if (delayMs === undefined) throw new Error("E_HOST_INVALID_BACKOFF");
       options.onRetry?.(error, delayMs, failureCount);
       try {
@@ -399,6 +410,7 @@ export async function runWindowsHost(
 
   const startedAtMs = Date.now();
   let phase: HostPhase = "starting";
+  let ilinkAuthPausedUntilMs: number | undefined;
   const localAbort = new AbortController();
   const forwardAbort = (): void => {
     phase = "stopping";
@@ -408,7 +420,14 @@ export async function runWindowsHost(
   else options.signal?.addEventListener("abort", forwardAbort, { once: true });
 
   const control = await HostControlServer.start({
-    onStatus: () => ({ phase, pid: process.pid, startedAtMs }),
+    onStatus: () => ({
+      ...(ilinkAuthPausedUntilMs !== undefined
+        ? { ilinkAuthPausedUntilMs }
+        : {}),
+      phase,
+      pid: process.pid,
+      startedAtMs,
+    }),
     onStop: () => {
       phase = "stopping";
       localAbort.abort(new Error("E_HOST_STOP_REQUESTED"));
@@ -442,7 +461,11 @@ export async function runWindowsHost(
       command: desktopCodexAppServerCommand(environment),
       environment,
     });
-    const ilink = new ILinkClient();
+    const ilink = new ILinkClient({
+      onAuthExpired: ({ pausedUntilMs }) => {
+        ilinkAuthPausedUntilMs = pausedUntilMs;
+      },
+    });
     const media = new InboundMediaStore({
       rootDirectory: paths.mediaDirectory,
     });
@@ -485,6 +508,12 @@ export async function runWindowsHost(
           onRetry:
             options.onRetry ??
             ((error, delayMs, failureCount) => {
+              if (error instanceof ILinkError && error.kind === "auth-expired") {
+                console.error(
+                  `[ilink] 微信登录已失效；已暂停请求 ${String(Math.round(delayMs / 60_000))} 分钟。请执行 ilink stop、ilink login --force、ilink start。`,
+                );
+                return;
+              }
               console.error(
                 `[ilink] poll failed (${failureCount}); retry in ${delayMs}ms:`,
                 safeErrorMessage(error),
@@ -567,7 +596,9 @@ function isHostControlResponse(value: unknown): value is HostControlResponse {
       status.phase === "running" ||
       status.phase === "stopping") &&
     Number.isSafeInteger(status.pid) &&
-    Number.isSafeInteger(status.startedAtMs)
+    Number.isSafeInteger(status.startedAtMs) &&
+    (status.ilinkAuthPausedUntilMs === undefined ||
+      Number.isSafeInteger(status.ilinkAuthPausedUntilMs))
   );
 }
 

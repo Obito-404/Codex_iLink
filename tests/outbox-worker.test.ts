@@ -12,7 +12,7 @@ import test from "node:test";
 
 import { OutboxWorker } from "../src/bridge/outbox-worker.ts";
 import { SqliteState } from "../src/bridge/sqlite-state.ts";
-import type { ILinkSession } from "../src/ilink/protocol.ts";
+import { ILinkError, type ILinkSession } from "../src/ilink/protocol.ts";
 import {
   parseOutboundPayload,
   serializeOutboundPayload,
@@ -198,6 +198,58 @@ test("delivery uncertainty retries the same client id and then defers for this r
       deferred: 1,
       failed: 0,
     });
+  });
+});
+
+test("expired authentication stops an outbox retry cycle immediately", async () => {
+  await withState(async (state) => {
+    state.enqueueOutbox({
+      body: "通知",
+      clientId: "auth-expired-client",
+      contextToken: "ctx",
+      createdAtMs: 1,
+      targetUserId: "controller-a",
+    });
+    let calls = 0;
+    let sleeps = 0;
+    let authenticated = false;
+    const worker = new OutboxWorker({
+      ilink: {
+        async sendText(input) {
+          calls += 1;
+          if (!authenticated) {
+            throw new ILinkError({
+              kind: "auth-expired",
+              message: "sendText paused after expired authentication",
+            });
+          }
+          return { accepted: true, clientId: input.clientId };
+        },
+      },
+      now: () => 2,
+      session,
+      async sleep() {
+        sleeps += 1;
+      },
+      state,
+    });
+
+    await assert.rejects(
+      worker.drain(),
+      (error: unknown) =>
+        error instanceof ILinkError && error.kind === "auth-expired",
+    );
+    assert.equal(calls, 1);
+    assert.equal(sleeps, 0);
+    assert.equal(state.getOutbox("auth-expired-client")?.status, "pending");
+
+    authenticated = true;
+    assert.deepEqual(await worker.drain(), {
+      confirmed: 1,
+      deferred: 0,
+      failed: 0,
+    });
+    assert.equal(calls, 2);
   });
 });
 

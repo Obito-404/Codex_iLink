@@ -668,7 +668,7 @@ async function loginCommand(
         : {}),
       now: Date.now,
       protectToken: protectForCurrentUser,
-      replaceExistingBinding: existing !== null && force,
+      replaceExistingBinding: force,
       showQr: (qrUrl) => {
         io.log(`请用微信扫描二维码：${qrUrl}`);
         openQrInBrowser(qrUrl);

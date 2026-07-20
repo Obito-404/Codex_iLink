@@ -326,23 +326,8 @@ export class SqliteState {
       }
 
       if (current) {
-        const observations = this.#database
-          .prepare(
-            `SELECT thread_id, turn_id
-             FROM desktop_turn_observations`,
-          )
-          .all() as Array<{ thread_id: string; turn_id: string }>;
-        for (const observation of observations) {
-          this.recordDesktopTurnStopTombstone({
-            stoppedAtMs: input.controller.boundAtMs,
-            threadId: observation.thread_id,
-            turnId: observation.turn_id,
-          });
-        }
-
         this.#database.exec(`
           DELETE FROM pending_desktop_notifications;
-          DELETE FROM desktop_turn_observations;
           DELETE FROM outbound_attachment_intents;
           DELETE FROM dispatch_intents;
           DELETE FROM queued_turns;

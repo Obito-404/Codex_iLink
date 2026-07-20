@@ -2711,16 +2711,29 @@ test("re-binding a new iLink identity clears old delivery state but preserves us
     assert.deepEqual(state.listUnresolvedDispatchIntents(), []);
     assert.deepEqual(state.listOutboundAttachmentIntents("turn-old"), []);
     assert.deepEqual(state.listPendingOutbox(), []);
-    assert.equal(state.getDesktopTurnObservation("thread-desktop-old"), null);
+    assert.deepEqual(state.getDesktopTurnObservation("thread-desktop-old"), {
+      createdAtMs: 112,
+      stopSeenAtMs: null,
+      threadId: "thread-desktop-old",
+      turnId: "turn-desktop-old",
+    });
     assert.deepEqual(state.listPendingDesktopNotifications(), []);
     assert.equal(
-      state.observeDesktopTurn({
-        createdAtMs: 201,
+      state.markDesktopTurnObservationStopped({
+        stoppedAtMs: 201,
         threadId: "thread-desktop-old",
         turnId: "turn-desktop-old",
       }),
-      false,
+      true,
     );
+    assert.equal(
+      state.releaseStoppedDesktopTurnObservation({
+        threadId: "thread-desktop-old",
+        turnId: "turn-desktop-old",
+      }),
+      true,
+    );
+    assert.equal(state.getDesktopTurnObservation("thread-desktop-old"), null);
     assert.deepEqual(state.getBridgeSettings(), {
       awayTimeoutMinutes: 10,
       mainThreadId: "thread-main",

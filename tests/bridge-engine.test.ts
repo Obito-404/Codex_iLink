@@ -92,7 +92,7 @@ test("other users are silent while controller media gets one explicit reply", as
   });
 });
 
-test("bare ok with no pending approval is dispatched as ordinary text", async () => {
+test("bare y with no pending approval is dispatched as ordinary text", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-bridge-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -124,14 +124,14 @@ test("bare ok with no pending approval is dispatched as ordinary text", async ()
     assert.deepEqual(
       await bridge.ingestBatch({
         cursor: "cursor-10",
-        messages: [textMessage(10, "ok")],
+        messages: [textMessage(10, "y")],
       }),
       { accepted: 1, sent: 0 },
     );
     assert.deepEqual(calls, [
       {
         clientUserMessageId: "bot-a/controller-a/10",
-        text: "ok",
+        text: "y",
         threadId: "thread-main",
       },
     ]);
@@ -5066,11 +5066,11 @@ test("live Bridge approvals are decided silently from WeChat", async () => {
       }),
       true,
     );
-    assert.match(sent[0]?.text ?? "", /需要批准[\s\S]*pnpm test[\s\S]*回复：ok 或 no/u);
+    assert.match(sent[0]?.text ?? "", /需要批准[\s\S]*pnpm test[\s\S]*回复：y 或 n/u);
 
     await bridge.ingestBatch({
       cursor: "cursor-approved",
-      messages: [textMessage(31, "ok")],
+      messages: [textMessage(31, "y")],
     });
     assert.deepEqual(responses, [{ id: 77, result: { decision: "accept" } }]);
     assert.equal(sent.length, 1);
@@ -5092,7 +5092,7 @@ test("live Bridge approvals are decided silently from WeChat", async () => {
     }
     await bridge.ingestBatch({
       cursor: "cursor-ambiguous-approval",
-      messages: [textMessage(32, "ok")],
+      messages: [textMessage(32, "y")],
     });
     const ambiguous = sent.at(-1)?.text ?? "";
     assert.match(ambiguous, /当前有多个待审批/u);
@@ -5104,7 +5104,7 @@ test("live Bridge approvals are decided silently from WeChat", async () => {
 
     await bridge.ingestBatch({
       cursor: "cursor-coded-approval",
-      messages: [textMessage(33, `ok${testCode}`)],
+      messages: [textMessage(33, `y${testCode}`)],
     });
     assert.deepEqual(responses.at(-1), {
       id: 78,
@@ -5114,7 +5114,7 @@ test("live Bridge approvals are decided silently from WeChat", async () => {
 
     await bridge.ingestBatch({
       cursor: "cursor-denied-approval",
-      messages: [textMessage(34, "no")],
+      messages: [textMessage(34, "n")],
     });
     assert.deepEqual(responses.at(-1), {
       id: 79,

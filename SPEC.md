@@ -51,7 +51,7 @@ flowchart LR
 - 普通生命周期 Hook 只发送 `session_id`、`turn_id`、`cwd`、事件名、模型和权限模式等元数据，不发送完整 Transcript。`PermissionRequest` 额外发送本次请求 ID 和最多 500 字符的命令/文件摘要，仅走在线 Pipe，不写 Spool。
 - Hook 优先通过当前用户专属 Named Pipe 通知 Bridge；Pipe 不可用时把同一份元数据写入有界本地 Spool，Bridge 在启动及每轮运行期轮询中 single-flight 排空。单次消费上限为 5 秒；普通生命周期事件失败后直接移入 `dead-letter`，门禁 `UserPromptSubmit` 因承载仲裁状态最多尝试 3 次，耗尽后再隔离。失败事件不会无限重放阻塞微信轮询，并且一次排空最多处理一个失败事件。`UserPromptSubmit` 不在门禁判定前发送生命周期事件；只有当前微信所选项目或已受管任务的 Prompt 需要 observation、但因 SQLite 瞬时写锁无法直接入库时，门禁 Hook 才写入带受控来源标记的 Spool。其他 Desktop 项目立即 fail-open，不记录活动观察或门禁 Spool；其 Stop 完成事件仍通过独立的 fail-open 生命周期通道进入 Pipe 或 Spool，用于离开通知。未匹配受管任务的 Stop 仅在 `thread/read` 确认来源为 Desktop（当前为 `source=vscode`）后通知，CLI 来源只保留防迟到 Prompt 的 tombstone。Bridge 在 iLink 长轮询返回后及每条已接受微信消息执行前排空，避免同批 `/s <n>` 与正文越过该观察。
 - 除 `PermissionRequest` 外，生命周期通知的 Pipe、Spool 合计等待上限 500ms；两者都失败时放行，不阻塞 Desktop。`UserPromptSubmit` 的共享会话写入仲裁是安全边界，不使用这条 fail-open 路径。
-- `PermissionRequest` 通过 Pipe 保持在线回调：`auto_review` 或元数据不可确认时 stdout 为空并回退 Codex/Desktop；`user` 审批生成不可复用短码，微信 `ok/no` 后输出 `hookSpecificOutput.decision.behavior=allow|deny`。Pipe 离线、无微信上下文或 Hook 断开时不落盘、不复用决定。
+- `PermissionRequest` 通过 Pipe 保持在线回调：`auto_review` 或元数据不可确认时 stdout 为空并回退 Codex/Desktop；`user` 审批生成不可复用短码，微信 `y/n` 后输出 `hookSpecificOutput.decision.behavior=allow|deny`。Pipe 离线、无微信上下文或 Hook 断开时不落盘、不复用决定。
 - Bridge 启动的 App Server 带受控来源标记，Hook 据此区分 Bridge 回合和其他本机 Codex 回合，避免重复通知。
 - 插件通过个人本地 Marketplace 安装，内部 ID 为 `codex-ilink-probe`，显示名为 `Codex iLink Guard`；非托管命令 Hook 按当前定义 hash 由用户在显示内部 ID 的信任页人工审核。首次安装必须确认，定义变化后必须重新确认；安装器和 Bridge 不读取或写入 Codex 的持久信任状态，也不在生产流程中传入 `--dangerously-bypass-hook-trust`。
 
@@ -100,7 +100,7 @@ flowchart LR
 - iLink Token 使用 Windows DPAPI 的 CurrentUser 范围加密，数据目录使用当前用户 ACL。
 - 微信可显式更改当前共享会话的模型和 reasoning effort，但只能查询已有任务权限；权限 Profile 及其策略只在 Codex Desktop 修改。CLI 可配置之后新任务的全局默认值。iLink 不评估风险或替用户自动允许，只路由 Codex 明确交给 `user` 的实时请求并回传本次选择。
 - 微信只能批准仍然在线等待的 Bridge App Server 审批或 Desktop `PermissionRequest` Hook 审批；通知发送失败持续退避重试，等待 60 秒和 5 分钟仍未处理时分别提醒一次，30 分钟未处理自动拒绝。
-- “替我审批”由会话的自动审批者处理；只有实际路由给用户的 Bridge 审批才生成 `/ok`、`/no` 编号。
+- “替我审批”由会话的自动审批者处理；只有实际路由给用户的 Bridge 审批才生成 `y`、`n` 编号。
 - 正常关闭时仍在线的审批会被拒绝；进程崩溃或 Desktop Hook 断开后无法安全回复的请求回退 Codex/Desktop 原生流程。任何情况下都不把旧批准或短码重放到新进程。
 - Desktop `PermissionRequest` 只有在任务实际 `approvalsReviewer=user`、`approvalPolicy!=never`、请求 ID/turn ID 完整且微信回复上下文可用时进入微信；同一 `(method, thread_id, turn_id, item_id)` 只登记一次，不同 item 保持独立短码。`auto_review` 不通知微信。
 
@@ -138,11 +138,11 @@ flowchart LR
 | `perm` | 只读显示 Codex 当前任务的实际审批人，格式为“权限：…”；权限在 Desktop 修改 |
 | `model`、`model<n>` | 用短名称查看或修改当前共享会话模型 |
 | `effort`、`effort<n>` | 用短名称查看或修改当前共享会话 reasoning effort |
-| `ok<code>` | 批准 Bridge 发起的单次审批 |
-| `no<code>` | 拒绝 Bridge 发起的单次审批 |
+| `y<code>` | 批准当前在线的单次审批 |
+| `n<code>` | 拒绝当前在线的单次审批 |
 | `help` | 显示唯一命令表 |
 
-短命令不使用 `/`、空格或隐藏管理命令。Bridge 另提供混合自然语言控制路由：先以本地高置信规则把完整控制语句转换为同一内部 Intent，仅对余下的疑似控制请求启动独立 ephemeral Codex 工具回合，并把结构化结果再次按公开 Intent 白名单校验。单条消息可包含最多 4 个原子控制 Intent；Bridge 按声明顺序执行、首个失败即停止，并只发送一条汇总回复。分类器不进入或改写当前业务会话；返回普通消息、失败或超时都 fail-open 为普通 Codex 输入。`stop` 的本地自然语言形式必须明确指向“当前微信/Codex 回合”，不远程中断 Desktop 发起的回合，也不等同于停止后台 Bridge。
+短命令不使用 `/`、空格或隐藏管理命令，英文字母统一不区分大小写。Bridge 另提供混合自然语言控制路由：先以本地高置信规则把完整控制语句转换为同一内部 Intent，仅对余下的疑似控制请求启动独立 ephemeral Codex 工具回合，并把结构化结果再次按公开 Intent 白名单校验。单条消息可包含最多 4 个原子控制 Intent；Bridge 按声明顺序执行、首个失败即停止，并只发送一条汇总回复。分类器不进入或改写当前业务会话；返回普通消息、失败或超时都 fail-open 为普通 Codex 输入。`stop` 的本地自然语言形式必须明确指向“当前微信/Codex 回合”，不远程中断 Desktop 发起的回合，也不等同于停止后台 Bridge。
 
 ## 7. 路由
 
@@ -290,7 +290,7 @@ flowchart LR
 5. 绑定在 30 分钟无活动后退出，`/exit`、项目切换和 `/new` 不丢弃已排队消息。
 6. 锁屏或 5 分钟空闲后，Desktop 后台任务完成会把最后问题摘要与最终回答推送微信；完成时暂时在场但之后无新输入的通知会延迟到离开后发送，出现新输入则取消。
 7. 活动任务期间系统不睡眠，结束后恢复电源策略。
-8. Bridge App Server 审批可通过 `/ok`、`/no` 处理；初始通知网络失败可重试，60 秒和 5 分钟未响应各提醒一次，30 分钟后自动拒绝，Bridge 关闭后的失效通知可从 Outbox 恢复；Desktop 审批只通知不远程处理。
+8. Bridge App Server 审批和满足在线条件的 Desktop `user` 审批可通过 `y`、`n` 处理；初始通知网络失败可重试，60 秒和 5 分钟未响应各提醒一次，30 分钟后自动拒绝，Bridge 关闭后的失效通知可从 Outbox 恢复；`auto_review` 不重复通知微信。
 9. Bridge/Windows 重启后恢复游标、绑定、文本/附件队列、待复查 Desktop 通知和 Outbox；中断回合不重复执行。
 10. iLink 断网恢复后游标续传；无法主动通知时，下次用户消息补发未读摘要；发送不确定时允许带相同事件标识的重复通知。
 11. Desktop 关闭时 Bridge 仍能处理微信；Desktop 重新打开后看到同一会话历史。

@@ -17,7 +17,7 @@
 3. 微信主会话首次创建、`new` 和 `clear` 调用 `thread/start` 时提交当时的默认值；`thread/resume` 永不提交权限覆盖，因此已有任务不受配置变化影响。
 4. `PermissionRequest` Hook 通过命名管道等待 Bridge。Bridge 无覆盖恢复任务并读取实际 `approvalPolicy` 与 `approvalsReviewer`。
 5. `auto_review`、`approvalPolicy=never`、元数据不完整、Pipe 离线或无微信回复上下文时，不发微信，Hook stdout 为空，由 Codex/Desktop 原生流程继续。
-6. 只有 `approvalsReviewer=user` 的在线请求进入与 App Server 共用的临时短码队列；微信 `ok/no` 返回 `hookSpecificOutput.decision.behavior=allow|deny`。
+6. 只有 `approvalsReviewer=user` 的在线请求进入与 App Server 共用的临时短码队列；微信 `y/n` 返回 `hookSpecificOutput.decision.behavior=allow|deny`。
 7. PermissionRequest 不写 Spool。30 分钟超时或 Bridge 正常关闭时拒绝；Hook 断开或 Bridge 崩溃时 stdout 为空并回退原生流程。旧决定不持久化、不重放。
 8. 审批按 `method + threadId + turnId + itemId` 去重；不同 item 即使文案相同也保留独立短码，摘要同时展示原因和具体命令。
 

@@ -26,5 +26,5 @@ Bridge 曾把 Profile、审批策略和审批人保存到 SQLite，并在 `threa
 - Codex 升级后的 Profile、审批策略和 Sandbox 语义自然随 Codex 改变，iLink 无需复制映射。
 - Desktop、微信和 Bridge 重启后看到的是同一任务的实际权限，不存在 SQLite 快照覆盖。
 - 微信入口不能切换或提升任务权限；权限编辑面只有 Codex Desktop。
-- `ok/no` 仍可安全回应 Bridge 当前在线的单次 Codex 审批，但 iLink 没有独立权限策略。
+- `y/n` 仍可安全回应 Bridge 当前在线的单次 Codex 审批，但 iLink 没有独立权限策略。
 - 恢复错误会明确区分“未执行”和“已排队”，避免用户误以为任务仍在运行。

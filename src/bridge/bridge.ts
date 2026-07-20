@@ -3482,7 +3482,7 @@ function formatAmbiguousApprovals(
   return [
     "当前有多个待审批：",
     ...approvals.map((approval) => `${approval.code}：${approval.summary}`),
-    "回复：ok<code> 或 no<code>。",
+    "回复：y<code> 或 n<code>。",
   ].join("\n");
 }
 

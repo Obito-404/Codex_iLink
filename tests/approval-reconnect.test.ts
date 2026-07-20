@@ -94,14 +94,14 @@ test("an approval remains approvable when only the turn start response times out
       CodexOutcomeUnknownError,
     );
     await Promise.all(eventTasks);
-    assert.match(sent[0] ?? "", /需要批准[\s\S]*pnpm test[\s\S]*回复：ok 或 no/u);
+    assert.match(sent[0] ?? "", /需要批准[\s\S]*pnpm test[\s\S]*回复：y 或 n/u);
 
     sent.length = 0;
     await runtime.listThreads();
     await Promise.all(eventTasks);
     await bridge.ingestBatch({
       cursor: "cursor-after-reconnect",
-      messages: [textMessage(2, "st"), textMessage(3, "ok")],
+      messages: [textMessage(2, "st"), textMessage(3, "y")],
     });
 
     const status = sent.find((text) => text.includes("待审批：")) ?? "";

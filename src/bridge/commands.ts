@@ -47,15 +47,16 @@ export const COMMAND_HELP = [
   "perm — current Codex permissions (read-only)",
   "model | model<n> — 模型",
   "effort | effort<n> — 强度",
-  "ok[code] | no[code] — approval",
+  "y[code] | n[code] — approval",
   "help — commands",
   "也可直接说：查看项目、打开第2个任务、返回主会话",
 ].join("\n");
 
 export function parseInboundText(text: string): InboundIntent {
   const command = text.trim();
+  const foldedCommand = command.toLowerCase();
 
-  switch (command) {
+  switch (foldedCommand) {
     case "p":
       return { kind: "projects" };
     case "s":
@@ -86,22 +87,23 @@ export function parseInboundText(text: string): InboundIntent {
       return { kind: "help" };
   }
 
-  const direct = /^(model|effort):([a-z\d][a-z\d._-]*)$/u.exec(command);
+  const direct = /^(model|effort):([a-z\d][a-z\d._-]*)$/u.exec(foldedCommand);
   if (direct) {
     return direct[1] === "model"
       ? { id: direct[2] as string, kind: "selectModel" }
       : { effort: direct[2] as string, kind: "selectEffort" };
   }
 
-  const approval = /^(ok|no)([a-f][a-f\d]{5})?$/iu.exec(command);
+  const approval = /^(y|n|ok|no)([a-f][a-f\d]{5})?$/u.exec(foldedCommand);
   if (approval) {
     return {
       code: approval[2]?.toUpperCase() ?? null,
-      kind: approval[1]?.toLowerCase() === "ok" ? "approve" : "deny",
+      kind:
+        approval[1] === "y" || approval[1] === "ok" ? "approve" : "deny",
     };
   }
 
-  const indexed = /^(p|s|perm|model|effort)([1-9]\d*)$/u.exec(command);
+  const indexed = /^(p|s|perm|model|effort)([1-9]\d*)$/u.exec(foldedCommand);
   if (indexed) {
     const index = Number(indexed[2]);
     if (!Number.isSafeInteger(index)) return { kind: "unknownCommand", text };
@@ -425,7 +427,7 @@ function isReservedCommandShape(command: string): boolean {
     /^model\s+\S*[\d._-]\S*$/iu.test(command) ||
     /^effort(?::|[+\-.\d])/iu.test(command) ||
     /^effort\s+(?:low|medium|high|xhigh|max|ultra)$/iu.test(command) ||
-    /^(?:p|s)(?:\s|[+\-.\d])/u.test(command) ||
-    /^(?:ok|no)(?:\s|[a-f\d]+$)/iu.test(command)
+    /^(?:p|s)(?:\s|[+\-.\d])/iu.test(command) ||
+    /^(?:y|n|ok|no)(?:\s|(?=[a-f\d]*\d)[a-f\d]+$)/iu.test(command)
   );
 }

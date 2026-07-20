@@ -447,7 +447,7 @@ function approvalNotification(
   existingApprovals: readonly PendingApproval[],
 ): string {
   if (existingApprovals.length === 0) {
-    return `需要批准\n${approval.summary}\n回复：ok 或 no`;
+    return `需要批准\n${approval.summary}\n回复：y 或 n`;
   }
   return [
     "当前有多个待审批：",
@@ -455,7 +455,7 @@ function approvalNotification(
       (existing) => `${existing.code}：${existing.summary}`,
     ),
     `${approval.code}：${approval.summary}`,
-    "回复：ok<code> 或 no<code>",
+    "回复：y<code> 或 n<code>",
   ].join("\n");
 }
 
@@ -467,9 +467,9 @@ function approvalReminder(
     ? [
         "⏳ 仍在等待审批",
         `${approval.code}：${approval.summary}`,
-        `回复：ok${approval.code} 或 no${approval.code}`,
+        `回复：y${approval.code} 或 n${approval.code}`,
       ].join("\n")
-    : ["⏳ 仍在等待审批", approval.summary, "回复：ok 或 no"].join("\n");
+    : ["⏳ 仍在等待审批", approval.summary, "回复：y 或 n"].join("\n");
 }
 
 function approvalClientId(approval: LiveApproval): string {

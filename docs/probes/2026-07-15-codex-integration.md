@@ -80,7 +80,7 @@ Codex `0.144.2` 和 `0.144.4` 的 `PermissionRequest` Hook 技术上支持通过
 
 微信仍可处理 Bridge 自己启动的 App Server 在线审批请求；这与 Desktop `PermissionRequest` Hook 是两条独立链路。
 
-2026-07-20 更新：生产实现已把两条在线回调统一到同一短码队列。Bridge 会先读取 Desktop 任务实际的 `approvalsReviewer`；`auto_review` 不通知微信，`user` 才允许 Hook 保持 Pipe 连接并由微信 `ok/no` 返回 `allow/deny`。PermissionRequest 不进入 Spool，连接断开后旧决定不可重放。
+2026-07-20 更新：生产实现已把两条在线回调统一到同一短码队列。Bridge 会先读取 Desktop 任务实际的 `approvalsReviewer`；`auto_review` 不通知微信，`user` 才允许 Hook 保持 Pipe 连接并由微信 `y/n` 返回 `allow/deny`。PermissionRequest 不进入 Spool，连接断开后旧决定不可重放。
 
 参考：[Codex Hooks](https://learn.chatgpt.com/docs/hooks) 与 [Codex 0.144.2 PermissionRequest 输出 Schema](https://github.com/openai/codex/blob/rust-v0.144.2/codex-rs/hooks/schema/generated/permission-request.command.output.schema.json)。
 

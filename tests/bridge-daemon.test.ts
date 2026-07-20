@@ -1715,7 +1715,7 @@ test("Desktop user approval is actionable in WeChat while auto_review stays sile
             {
               context_token: "ctx-permission",
               from_user_id: "controller-a",
-              item_list: [{ text_item: { text: "ok" }, type: 1 }],
+              item_list: [{ text_item: { text: "y" }, type: 1 }],
               message_id: 2,
             },
           ],

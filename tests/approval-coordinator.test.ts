@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { ApprovalCoordinator } from "../src/bridge/approval-coordinator.ts";
 
-test("one live approval uses bare ok or no and is answered once", async () => {
+test("one live approval uses bare y or n and is answered once", async () => {
   const sent: Array<{ clientId: string; text: string }> = [];
   const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
   const approvals = new ApprovalCoordinator({
@@ -31,7 +31,7 @@ test("one live approval uses bare ok or no and is answered once", async () => {
   );
   const code = approvals.list()[0]?.code;
   assert.match(code ?? "", /^[A-F][A-F\d]{5}$/u);
-  assert.match(sent[0]?.text ?? "", /需要批准[\s\S]*pnpm test[\s\S]*回复：ok 或 no/u);
+  assert.match(sent[0]?.text ?? "", /需要批准[\s\S]*pnpm test[\s\S]*回复：y 或 n/u);
   assert.doesNotMatch(sent[0]?.text ?? "", new RegExp(code ?? "missing", "u"));
   assert.deepEqual(approvals.decide(null, true), { code, kind: "decided" });
   assert.deepEqual(responses, [{ id: 41, result: { decision: "accept" } }]);
@@ -41,7 +41,7 @@ test("one live approval uses bare ok or no and is answered once", async () => {
   });
 });
 
-test("a live Desktop Hook approval uses the same ok/no decision queue", async () => {
+test("a live Desktop Hook approval uses the same y/n decision queue", async () => {
   const decisions: boolean[] = [];
   const approvals = new ApprovalCoordinator({
     async notify() {},
@@ -104,7 +104,7 @@ test("multiple approvals require their immutable short codes", async () => {
   assert.match(first?.code ?? "", /^[A-F][A-F\d]{5}$/u);
   assert.match(second?.code ?? "", /^[A-F][A-F\d]{5}$/u);
   assert.notEqual(first?.code, second?.code);
-  assert.match(sent[0] ?? "", /回复：ok 或 no/u);
+  assert.match(sent[0] ?? "", /回复：y 或 n/u);
   assert.match(sent[1] ?? "", /当前有多个待审批/u);
   assert.match(
     sent[1] ?? "",
@@ -114,7 +114,7 @@ test("multiple approvals require their immutable short codes", async () => {
     sent[1] ?? "",
     new RegExp(`${second?.code}：Command: pnpm typecheck`, "u"),
   );
-  assert.match(sent[1] ?? "", /回复：ok<code> 或 no<code>/u);
+  assert.match(sent[1] ?? "", /回复：y<code> 或 n<code>/u);
   assert.deepEqual(approvals.decide(null, true), {
     approvals: [first, second],
     kind: "ambiguous",

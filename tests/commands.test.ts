@@ -55,15 +55,58 @@ test("the documented short command table is parsed exactly", () => {
     effort: "xhigh",
     kind: "selectEffort",
   });
-  assert.deepEqual(parseInboundText("ok"), {
+  assert.deepEqual(parseInboundText("y"), {
     code: null,
     kind: "approve",
   });
-  assert.deepEqual(parseInboundText("noa7c9e2"), {
+  assert.deepEqual(parseInboundText("na7c9e2"), {
     code: "A7C9E2",
     kind: "deny",
   });
   assert.deepEqual(parseInboundText("help"), { kind: "help" });
+});
+
+test("ASCII short commands are case-insensitive", () => {
+  for (const [mixedCase, canonical] of [
+    ["P", "p"],
+    ["P2", "p2"],
+    ["S", "s"],
+    ["S+", "s+"],
+    ["SaRc", "sarc"],
+    ["S10", "s10"],
+    ["NeW", "new"],
+    ["ClEaR", "clear"],
+    ["CoMpAcT", "compact"],
+    ["StOp", "stop"],
+    ["ExIt", "exit"],
+    ["ST", "st"],
+    ["St", "st"],
+    ["sT", "st"],
+    ["PeRm", "perm"],
+    ["PeRm3", "perm3"],
+    ["MoDeL", "model"],
+    ["MoDeL2", "model2"],
+    ["MODEL:GPT-5.6-SOL", "model:gpt-5.6-sol"],
+    ["EfFoRt", "effort"],
+    ["EfFoRt4", "effort4"],
+    ["EFFORT:XHIGH", "effort:xhigh"],
+    ["Y", "y"],
+    ["Na7C9e2", "na7c9e2"],
+    ["HeLp", "help"],
+  ] as const) {
+    assert.deepEqual(parseInboundText(mixedCase), parseInboundText(canonical));
+  }
+});
+
+test("legacy ok and no approval aliases remain accepted", () => {
+  assert.deepEqual(parseInboundText("OK"), {
+    code: null,
+    kind: "approve",
+  });
+  assert.deepEqual(parseInboundText("NoA7C9E2"), {
+    code: "A7C9E2",
+    kind: "deny",
+  });
 });
 
 test("explicit Chinese control requests map to the same command intents", () => {
@@ -120,11 +163,11 @@ test("legacy slash commands, spaced forms, aliases and malformed indices are rej
     "p 1",
     "s 1",
     "perm 3",
-    "ok 3",
-    "ok1",
-    "no123456",
-    "okA7C9E",
-    "noA7C9E20",
+    "y 3",
+    "y1",
+    "n123456",
+    "yA7C9E",
+    "nA7C9E20",
     "/stop",
     "/status",
     "/项目",
@@ -169,6 +212,9 @@ test("ordinary text stays ordinary and preserves its content", () => {
     kind: "message",
     text: "notice",
   });
+  for (const text of ["need", "needed", "node"]) {
+    assert.deepEqual(parseInboundText(text), { kind: "message", text }, text);
+  }
   assert.deepEqual(parseInboundText("good morning"), {
     kind: "message",
     text: "good morning",

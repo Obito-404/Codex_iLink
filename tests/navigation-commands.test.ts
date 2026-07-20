@@ -11,7 +11,10 @@ import {
 import { COMMAND_HELP } from "../src/bridge/commands.ts";
 import { SqliteState } from "../src/bridge/sqlite-state.ts";
 import { SqliteTurnLeaseStore } from "../src/coordination/turn-lease.ts";
-import { CodexOutcomeUnknownError } from "../src/codex/protocol.ts";
+import {
+  CodexOutcomeUnknownError,
+  type ThreadPermissionSettings,
+} from "../src/codex/protocol.ts";
 import type {
   ILinkSession,
   SendTextResult,
@@ -393,22 +396,134 @@ test("new without a project uses the reserved Inbox and stays product-level unpr
   });
 });
 
-test("new applies the current global permission defaults", async () => {
-  await withNavigationBridge(async ({ bridge, codex, state }) => {
-    state.setDefaultPermissionProfile(":read-only");
-    state.setDefaultApprovalPolicy("never");
-    state.setDefaultApprovalsReviewer("user");
-
-    await ingest(bridge, 401, "new");
-
-    assert.deepEqual(codex.startedPermissions, [
-      {
+test("new reads the current Desktop permission selection at creation time", async () => {
+  let settings: Required<ThreadPermissionSettings> = {
+    approvalPolicy: "on-request",
+    approvalsReviewer: "auto_review",
+    permissions: ":workspace",
+  };
+  await withNavigationBridge(
+    async ({ bridge, codex }) => {
+      await ingest(bridge, 401, "new");
+      settings = {
         approvalPolicy: "never",
         approvalsReviewer: "user",
-        permissions: ":read-only",
+        permissions: ":danger-full-access",
+      };
+      codex.nextStartedThreadId = "thread-new-full-access";
+      await ingest(bridge, 402, "new");
+
+      assert.deepEqual(codex.startedPermissions, [
+        {
+          approvalPolicy: "on-request",
+          approvalsReviewer: "auto_review",
+          permissions: ":workspace",
+        },
+        {
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          permissions: ":danger-full-access",
+        },
+      ]);
+    },
+    { newThreadPermissions: () => settings },
+  );
+});
+
+test("project and main clear each read the latest Desktop permission selection", async () => {
+  let settings: Required<ThreadPermissionSettings> = {
+    approvalPolicy: "on-request",
+    approvalsReviewer: "user",
+    permissions: ":workspace",
+  };
+  await withNavigationBridge(
+    async ({ bridge, codex, state }) => {
+      state.setSelectedProjectPath("D:\\Selected");
+      state.setBinding({
+        expiresAtMs: 60_000,
+        projectPath: "D:\\Selected",
+        threadId: "thread-project-before-clear",
+        updatedAtMs: 900,
+      });
+      codex.nextStartedThreadId = "thread-project-after-clear";
+      await ingest(bridge, 403, "clear");
+
+      await ingest(bridge, 404, "exit");
+      settings = {
+        approvalPolicy: "never",
+        approvalsReviewer: "user",
+        permissions: ":danger-full-access",
+      };
+      codex.nextStartedThreadId = "thread-main-after-clear";
+      await ingest(bridge, 405, "clear");
+
+      assert.deepEqual(codex.startedPermissions, [
+        {
+          approvalPolicy: "on-request",
+          approvalsReviewer: "user",
+          permissions: ":workspace",
+        },
+        {
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          permissions: ":danger-full-access",
+        },
+      ]);
+    },
+    { newThreadPermissions: () => settings },
+  );
+});
+
+test("an unreadable Desktop permission selection does not create or rebind a task", async () => {
+  await withNavigationBridge(
+    async ({ bridge, codex, sent, state }) => {
+      await ingest(bridge, 406, "new");
+
+      assert.deepEqual(codex.startedCwds, []);
+      assert.equal(state.getBinding(1_001), null);
+      assert.match(
+        sent[0]?.text ?? "",
+        /无法读取 Codex Desktop 当前权限，未创建新会话/u,
+      );
+    },
+    {
+      newThreadPermissions: () => {
+        throw new Error("E_DESKTOP_PERMISSION_MODE_INVALID");
       },
-    ]);
-  });
+    },
+  );
+});
+
+test("an unreadable Desktop permission selection leaves clear on the old task", async () => {
+  await withNavigationBridge(
+    async ({ bridge, clock, codex, sent, state }) => {
+      state.setSelectedProjectPath("D:\\Selected");
+      state.setBinding({
+        expiresAtMs: 60_000,
+        projectPath: "D:\\Selected",
+        threadId: "thread-before-failed-clear",
+        updatedAtMs: 900,
+      });
+
+      await ingest(bridge, 407, "clear");
+
+      assert.deepEqual(codex.startedCwds, []);
+      assert.deepEqual(codex.archivedThreadIds, []);
+      assert.equal(
+        state.getBinding(clock.value)?.threadId,
+        "thread-before-failed-clear",
+      );
+      assert.match(
+        sent[0]?.text ?? "",
+        /无法读取 Codex Desktop 当前权限，未创建新会话/u,
+      );
+    },
+    {
+      newThreadPermissions: () => {
+        throw new Error("E_DESKTOP_PERMISSION_MODE_INVALID");
+      },
+    },
+  );
 });
 
 test("an expired session binding sends one reminder and preserves the session", async () => {
@@ -1463,6 +1578,7 @@ async function withNavigationBridge(
     state: SqliteState;
   }) => Promise<void>,
   options: {
+    newThreadPermissions?: () => ThreadPermissionSettings;
     projects?: readonly { cwd: string; name: string }[];
   } = {},
 ): Promise<void> {
@@ -1493,6 +1609,13 @@ async function withNavigationBridge(
     mainThreadId: "wechat-main",
     newId: () => `navigation-${++id}`,
     now: () => clock.value,
+    newThreadPermissions:
+      options.newThreadPermissions ??
+      (() => ({
+        approvalPolicy: "on-request",
+        approvalsReviewer: "auto_review",
+        permissions: ":workspace",
+      })),
     ...(options.projects
       ? { listProjects: () => options.projects ?? [] }
       : {}),

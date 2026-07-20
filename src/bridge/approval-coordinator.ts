@@ -7,6 +7,11 @@ export type ApprovalDecisionResult =
   | { code: string; kind: "decided" }
   | { code: string | null; kind: "not-found" };
 
+export type ApprovalBatchDecisionResult = {
+  attempted: number;
+  decided: number;
+};
+
 export type PendingApproval = {
   code: string;
   deliveryAttempts: number;
@@ -193,6 +198,18 @@ export class ApprovalCoordinator {
     return responded === false
       ? { code: normalizedCode, kind: "not-found" }
       : { code: normalizedCode, kind: "decided" };
+  }
+
+  decideMany(
+    codes: readonly string[],
+    approved: boolean,
+  ): ApprovalBatchDecisionResult {
+    const uniqueCodes = [...new Set(codes)];
+    let decided = 0;
+    for (const code of uniqueCodes) {
+      if (this.decide(code, approved).kind === "decided") decided += 1;
+    }
+    return { attempted: uniqueCodes.length, decided };
   }
 
   expire(nowMs = this.#now()): number {
@@ -455,7 +472,7 @@ function approvalNotification(
       (existing) => `${existing.code}：${existing.summary}`,
     ),
     `${approval.code}：${approval.summary}`,
-    "回复：y<code> 或 n<code>",
+    "逐条：y<code> / n<code>；批量：ya / na（需确认）",
   ].join("\n");
 }
 

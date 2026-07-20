@@ -48,10 +48,6 @@ test("daemon creates one persistent main thread and polls iLink", async () => {
   let desktopTurnTerminal = false;
   let desktopQueuedStarted = 0;
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
-  state.setDefaultPermissionProfile(":read-only");
-  state.setDefaultApprovalPolicy("never");
-  state.setDefaultApprovalsReviewer("user");
-
   const runtime = {
     close() {},
     onEvent() {
@@ -130,6 +126,11 @@ test("daemon creates one persistent main thread and polls iLink", async () => {
     },
     inboxDirectory: join(directory, "Inbox"),
     leases,
+    newThreadPermissions: () => ({
+      approvalPolicy: "on-request" as const,
+      approvalsReviewer: "auto_review" as const,
+      permissions: ":workspace" as const,
+    }),
     newId: () => "outbox-1",
     now: () => 1_000,
     session,
@@ -142,9 +143,9 @@ test("daemon creates one persistent main thread and polls iLink", async () => {
     assert.equal(spoolDrains, 1);
     assert.equal(starts, 1);
     assert.deepEqual(startedPermissions, {
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      permissions: ":read-only",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+      permissions: ":workspace",
     });
     assert.equal(state.getBridgeSettings().mainThreadId, "thread-main");
     assert.deepEqual(state.getBridgeRuntime(), {

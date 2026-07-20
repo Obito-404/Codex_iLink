@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { win32 } from "node:path";
 
 import {
@@ -72,8 +72,10 @@ import {
   type InboundMediaCandidate,
   type InboundMediaResolution,
 } from "../media/inbound-media.ts";
-import { CodexOutcomeUnknownError } from "../codex/protocol.ts";
-import type { DefaultThreadPermissionSettings } from "../domain/user-settings.ts";
+import {
+  CodexOutcomeUnknownError,
+  type ThreadPermissionSettings,
+} from "../codex/protocol.ts";
 import type { SendTypingInput } from "../ilink/ilink-client.ts";
 
 export type ILinkSender = OutboxILinkSender & {
@@ -88,6 +90,7 @@ export type BridgeEngineOptions = {
   leases?: SqliteTurnLeaseStore;
   mainThreadId?: string;
   newId: () => string;
+  newThreadPermissions?: () => ThreadPermissionSettings;
   now: () => number;
   listProjects?: () =>
     | Promise<readonly ProjectNavigationEntry[]>
@@ -173,7 +176,7 @@ export type CodexTurnStarter = {
   }): Promise<Record<string, unknown>>;
   startThread?(
     cwd: string,
-    permissions?: DefaultThreadPermissionSettings,
+    permissions?: ThreadPermissionSettings,
   ): Promise<Record<string, unknown> & {
     thread: { id: string } & Record<string, unknown>;
   }>;
@@ -215,6 +218,7 @@ type ModelCatalogEntry = {
 
 const MAX_ACTIVE_BRIDGE_TURNS = 3;
 const MAX_REMEMBERED_CODEX_FAILURES = 256;
+const BATCH_APPROVAL_CONFIRMATION_MS = 2 * 60 * 1_000;
 const DEFAULT_SLOW_TURN_NOTICE_AFTER_MS = 2 * 60 * 1_000;
 const TYPING_KEEPALIVE_INTERVAL_MS = 5_000;
 const CODEX_OUTCOME_UNKNOWN_TEXT =
@@ -246,6 +250,7 @@ export class BridgeEngine {
   readonly #media: InboundMediaPort | undefined;
   readonly #listProjects: BridgeEngineOptions["listProjects"];
   readonly #newId: () => string;
+  readonly #newThreadPermissions: BridgeEngineOptions["newThreadPermissions"];
   readonly #now: () => number;
   readonly #session: ILinkSession;
   readonly #shutdown = new AbortController();
@@ -263,6 +268,16 @@ export class BridgeEngine {
     }
   >();
   readonly #typingTurns = new Set<string>();
+  #batchApprovalConfirmation:
+    | {
+        approved: boolean;
+        codes: readonly string[];
+        confirmationCode: string;
+        expiresAtMs: number;
+        preview: string;
+      }
+    | undefined;
+  readonly #usedBatchApprovalConfirmationCodes = new Set<string>();
   #closing = false;
   #ilinkHealthy = true;
   #reconcilePromise: Promise<void> | undefined;
@@ -286,6 +301,7 @@ export class BridgeEngine {
     this.#media = options.media;
     this.#listProjects = options.listProjects;
     this.#newId = options.newId;
+    this.#newThreadPermissions = options.newThreadPermissions;
     this.#now = options.now;
     this.#session = options.session;
     this.#slowTurnNoticeAfterMs =
@@ -405,6 +421,7 @@ export class BridgeEngine {
       const preparedMessage = prepared.get(message.messageId);
       if (!preparedMessage) throw new Error("E_INBOUND_PREPARATION_MISSING");
       if (preparedMessage.failure) {
+        this.#batchApprovalConfirmation = undefined;
         await this.#send(
           message.contextToken,
           inboundFailureText(preparedMessage.failure),
@@ -851,6 +868,7 @@ export class BridgeEngine {
     if (!this.#shutdown.signal.aborted) {
       this.#shutdown.abort(new Error("E_BRIDGE_CLOSING"));
     }
+    this.#batchApprovalConfirmation = undefined;
     this.#approvals?.close();
   }
 
@@ -883,6 +901,7 @@ export class BridgeEngine {
       }
       const failure = parseDurableInboundFailure(inbound.body);
       if (failure) {
+        this.#batchApprovalConfirmation = undefined;
         await this.#send(
           inbound.contextToken,
           inboundFailureText(failure),
@@ -895,6 +914,7 @@ export class BridgeEngine {
       try {
         turnInput = parseDurableTurnInput(inbound.body);
       } catch {
+        this.#batchApprovalConfirmation = undefined;
         await this.#send(
           inbound.contextToken,
           inboundFailureText("invalid-media"),
@@ -1094,6 +1114,9 @@ export class BridgeEngine {
         // remains available when the isolated router is unavailable.
       }
     }
+    const isBatchApproval =
+      intent.kind === "approveAll" || intent.kind === "denyAll";
+    if (!isBatchApproval) this.#batchApprovalConfirmation = undefined;
     if (
       (intent.kind === "approve" || intent.kind === "deny") &&
       intent.code === null &&
@@ -1259,6 +1282,87 @@ export class BridgeEngine {
       } catch (error) {
         return controlFailureReply(error, "命令执行失败，请稍后重试。");
       }
+    }
+
+    if (intent.kind === "approveAll" || intent.kind === "denyAll") {
+      const approved = intent.kind === "approveAll";
+      const nowMs = this.#now();
+      const confirmation = this.#batchApprovalConfirmation;
+      if (intent.confirmationCode !== null) {
+        const matches =
+          confirmation !== undefined &&
+          confirmation.expiresAtMs > nowMs &&
+          confirmation.approved === approved &&
+          confirmation.confirmationCode === intent.confirmationCode;
+        this.#batchApprovalConfirmation = undefined;
+        if (!matches) {
+          return {
+            ok: false,
+            reply: `批量确认码无效或已过期，请重新发送 ${approved ? "ya" : "na"} 查看清单。`,
+          };
+        }
+        const decision = this.#approvals?.decideMany(
+          confirmation.codes,
+          approved,
+        );
+        if (!decision) return { ok: false, reply: "当前没有待审批。" };
+        const action = approved ? "批准" : "拒绝";
+        const missing = decision.attempted - decision.decided;
+        const remaining = this.#approvals?.list().length ?? 0;
+        const remainingText =
+          remaining > 0
+            ? `另有 ${String(remaining)} 个新审批未包含在本次操作中。`
+            : null;
+        if (missing === 0) {
+          return {
+            ok: true,
+            reply: [
+              `已${action}当前 ${String(decision.decided)} 个审批。`,
+              remainingText,
+            ]
+              .filter((line): line is string => line !== null)
+              .join("\n"),
+          };
+        }
+        return {
+          ok: false,
+          reply: [
+            decision.decided === 0
+              ? `当前 ${String(decision.attempted)} 个审批均已失效。`
+              : `已${action} ${String(decision.decided)} 个审批；另 ${String(missing)} 个已失效。`,
+            remainingText,
+          ]
+            .filter((line): line is string => line !== null)
+            .join("\n"),
+        };
+      }
+
+      const pending = this.#approvals?.list() ?? [];
+      if (pending.length === 0) {
+        this.#batchApprovalConfirmation = undefined;
+        return { ok: false, reply: "当前没有待审批。" };
+      }
+      if (
+        confirmation &&
+        confirmation.approved === approved &&
+        confirmation.expiresAtMs > nowMs
+      ) {
+        return { ok: true, reply: confirmation.preview };
+      }
+      const confirmationCode = this.#newBatchApprovalConfirmationCode();
+      const preview = formatBatchApprovalConfirmation(
+        pending,
+        approved,
+        confirmationCode,
+      );
+      this.#batchApprovalConfirmation = {
+        approved,
+        codes: pending.map((approval) => approval.code),
+        confirmationCode,
+        expiresAtMs: nowMs + BATCH_APPROVAL_CONFIRMATION_MS,
+        preview,
+      };
+      return { ok: true, reply: preview };
     }
 
     const decision = this.#approvals?.decide(
@@ -1719,7 +1823,7 @@ export class BridgeEngine {
     const cwd = projectPath ?? this.#inboxDirectory;
     const started = await this.#codex.startThread(
       cwd,
-      this.#state.getDefaultThreadPermissionSettings(),
+      this.#readNewThreadPermissions(),
     );
     const threadId = stringField(started.thread, "id");
     if (!threadId) throw new Error("Codex did not return a thread id");
@@ -2018,7 +2122,7 @@ export class BridgeEngine {
     }
     const started = await this.#codex.startThread(
       this.#inboxDirectory,
-      this.#state.getDefaultThreadPermissionSettings(),
+      this.#readNewThreadPermissions(),
     );
     const threadId = stringField(started.thread, "id");
     if (!threadId) throw new Error("Codex did not return a thread id");
@@ -2341,6 +2445,27 @@ export class BridgeEngine {
 
   #bindingIdleTimeoutMinutes(): number {
     return this.#state.getBridgeSettings().sessionTimeoutMinutes;
+  }
+
+  #newBatchApprovalConfirmationCode(): string {
+    for (;;) {
+      const code = `B${randomBytes(3).toString("hex").slice(0, 5)}`.toUpperCase();
+      if (this.#usedBatchApprovalConfirmationCodes.has(code)) continue;
+      this.#usedBatchApprovalConfirmationCodes.add(code);
+      return code;
+    }
+  }
+
+  #readNewThreadPermissions(): ThreadPermissionSettings {
+    try {
+      const readPermissions = this.#newThreadPermissions;
+      if (!readPermissions) throw new Error("E_DESKTOP_PERMISSION_SOURCE_MISSING");
+      return readPermissions();
+    } catch {
+      throw new ControlCommandRejected(
+        "无法读取 Codex Desktop 当前权限，未创建新会话。请先在 Desktop 选择权限后重试。",
+      );
+    }
   }
 
   #bindingIdleTimeoutMs(): number {
@@ -3482,7 +3607,21 @@ function formatAmbiguousApprovals(
   return [
     "当前有多个待审批：",
     ...approvals.map((approval) => `${approval.code}：${approval.summary}`),
-    "回复：y<code> 或 n<code>。",
+    "逐条：y<code> / n<code>；批量：ya / na（需确认）。",
+  ].join("\n");
+}
+
+function formatBatchApprovalConfirmation(
+  approvals: readonly PendingApproval[],
+  approved: boolean,
+  confirmationCode: string,
+): string {
+  const command = approved ? "ya" : "na";
+  const action = approved ? "批准" : "拒绝";
+  return [
+    `将${action}以下 ${String(approvals.length)} 个审批：`,
+    ...approvals.map((approval) => `${approval.code}：${approval.summary}`),
+    `两分钟内回复 ${command}#${confirmationCode} 确认；之后新增的审批不包含在内。`,
   ].join("\n");
 }
 

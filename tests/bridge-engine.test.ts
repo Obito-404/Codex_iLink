@@ -92,12 +92,13 @@ test("other users are silent while controller media gets one explicit reply", as
   });
 });
 
-test("bare y with no pending approval is dispatched as ordinary text", async () => {
+test("bare y stays ordinary while ya reports no pending approval", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-bridge-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
   const calls: Array<Record<string, unknown>> = [];
+  const sent: string[] = [];
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
 
   const bridge = new BridgeEngine({
@@ -111,7 +112,12 @@ test("bare y with no pending approval is dispatched as ordinary text", async () 
         return { turn: { id: "turn-10" } };
       },
     },
-    ilink: { async sendText() { assert.fail("ordinary dispatch has no immediate reply"); } },
+    ilink: {
+      async sendText(input) {
+        sent.push(input.text);
+        return { accepted: true as const, clientId: input.clientId };
+      },
+    },
     leases,
     mainThreadId: "thread-main",
     newId: () => "dispatch-10",
@@ -135,6 +141,16 @@ test("bare y with no pending approval is dispatched as ordinary text", async () 
         threadId: "thread-main",
       },
     ]);
+    assert.deepEqual(sent, []);
+    assert.deepEqual(
+      await bridge.ingestBatch({
+        cursor: "cursor-11",
+        messages: [textMessage(11, "YA")],
+      }),
+      { accepted: 1, sent: 1 },
+    );
+    assert.deepEqual(sent, ["当前没有待审批。"]);
+    assert.equal(calls.length, 1);
     assert.deepEqual(state.getDispatchIntent("dispatch-10"), {
       body: null,
       completedAtMs: null,
@@ -4383,6 +4399,11 @@ test("a stale in-memory control cannot execute after another Bridge claims it", 
     },
     inboxDirectory: "D:\\Codex_iLink\\inbox",
     newId: () => "stale-control-client",
+    newThreadPermissions: () => ({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      permissions: ":workspace",
+    }),
     now: () => 7_200,
     session,
     state: staleState,
@@ -4405,6 +4426,11 @@ test("a stale in-memory control cannot execute after another Bridge claims it", 
     },
     inboxDirectory: "D:\\Codex_iLink\\inbox",
     newId: () => "claiming-control-client",
+    newThreadPermissions: () => ({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      permissions: ":workspace",
+    }),
     now: () => 7_200,
     session,
     state: claimingState,
@@ -5121,6 +5147,345 @@ test("live Bridge approvals are decided silently from WeChat", async () => {
       result: { decision: "decline" },
     });
     assert.equal(sent.at(-1)?.text, ambiguous);
+
+    for (const [id, itemId] of [
+      [80, "item-batch-a"],
+      [81, "item-batch-b"],
+    ] as const) {
+      await bridge.ingestCodexEvent({
+        id,
+        method: "item/commandExecution/requestApproval",
+        params: {
+          command: `command-${itemId}`,
+          itemId,
+          threadId: `thread-${itemId}`,
+          turnId: `turn-${itemId}`,
+        },
+      });
+    }
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-approve-preview",
+      messages: [textMessage(35, "YA")],
+    });
+    const approvePreview = sent.at(-1)?.text ?? "";
+    assert.match(
+      approvePreview,
+      /将批准以下 2 个审批：[\s\S]*两分钟内回复 ya#(B[A-F\d]{5}) 确认/u,
+    );
+    const approveConfirmationCode =
+      /两分钟内回复 ya#(B[A-F\d]{5}) 确认/u.exec(approvePreview)?.[1];
+    assert.match(approveConfirmationCode ?? "", /^B[A-F\d]{5}$/u);
+    assert.deepEqual(responses.slice(-2), [
+      { id: 78, result: { decision: "accept" } },
+      { id: 79, result: { decision: "decline" } },
+    ]);
+    await bridge.ingestCodexEvent({
+      id: 84,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        command: "command-added-after-preview",
+        itemId: "item-added-after-preview",
+        threadId: "thread-added-after-preview",
+        turnId: "turn-added-after-preview",
+      },
+    });
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-approve-repeat",
+      messages: [textMessage(36, "ya")],
+    });
+    assert.equal(sent.at(-1)?.text, approvePreview);
+    assert.deepEqual(responses.slice(-2), [
+      { id: 78, result: { decision: "accept" } },
+      { id: 79, result: { decision: "decline" } },
+    ]);
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-approved",
+      messages: [
+        textMessage(37, `YA#${approveConfirmationCode?.toLowerCase()}`),
+      ],
+    });
+    assert.deepEqual(responses.slice(-2), [
+      { id: 80, result: { decision: "accept" } },
+      { id: 81, result: { decision: "accept" } },
+    ]);
+    assert.equal(
+      sent.at(-1)?.text,
+      [
+        "已批准当前 2 个审批。",
+        "另有 1 个新审批未包含在本次操作中。",
+      ].join("\n"),
+    );
+
+    for (const [id, itemId] of [
+      [82, "item-batch-deny-a"],
+      [83, "item-batch-deny-b"],
+    ] as const) {
+      await bridge.ingestCodexEvent({
+        id,
+        method: "item/commandExecution/requestApproval",
+        params: {
+          command: `command-${itemId}`,
+          itemId,
+          threadId: `thread-${itemId}`,
+          turnId: `turn-${itemId}`,
+        },
+      });
+    }
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-deny-preview",
+      messages: [textMessage(38, "na")],
+    });
+    const denyPreview = sent.at(-1)?.text ?? "";
+    assert.match(
+      denyPreview,
+      /将拒绝以下 3 个审批：[\s\S]*两分钟内回复 na#(B[A-F\d]{5}) 确认/u,
+    );
+    const denyConfirmationCode =
+      /两分钟内回复 na#(B[A-F\d]{5}) 确认/u.exec(denyPreview)?.[1];
+    assert.match(denyConfirmationCode ?? "", /^B[A-F\d]{5}$/u);
+    assert.deepEqual(responses.slice(-2), [
+      { id: 80, result: { decision: "accept" } },
+      { id: 81, result: { decision: "accept" } },
+    ]);
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-denied",
+      messages: [textMessage(39, `na#${denyConfirmationCode}`)],
+    });
+    assert.deepEqual(responses.slice(-3), [
+      { id: 84, result: { decision: "decline" } },
+      { id: 82, result: { decision: "decline" } },
+      { id: 83, result: { decision: "decline" } },
+    ]);
+    assert.equal(sent.at(-1)?.text, "已拒绝当前 3 个审批。");
+  } finally {
+    bridge.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("batch approval confirmation is bound to one snapshot and cancelled safely", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-batch-confirmation-"));
+  const state = new SqliteState(join(directory, "state.sqlite"));
+  const sent: SendInput[] = [];
+  const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
+  let failNextApprovePreview = false;
+  let nowMs = 10_000;
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  const bridge = new BridgeEngine({
+    codex: {
+      respondToServerRequest(id, result) {
+        responses.push({ id, result });
+      },
+      async startTurn() {
+        assert.fail("batch approval controls must not start a turn");
+      },
+    },
+    ilink: {
+      async sendText(input) {
+        sent.push(input);
+        if (failNextApprovePreview && input.text.startsWith("将批准以下")) {
+          failNextApprovePreview = false;
+          throw new Error("preview delivery delayed");
+        }
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    newId: () => "unused-batch-client",
+    now: () => nowMs,
+    session,
+    state,
+  });
+  const addApproval = async (id: number, suffix: string) => {
+    assert.equal(
+      await bridge.ingestCodexEvent({
+        id,
+        method: "item/commandExecution/requestApproval",
+        params: {
+          command: `command-${suffix}`,
+          itemId: `item-${suffix}`,
+          threadId: `thread-${suffix}`,
+          turnId: `turn-${suffix}`,
+        },
+      }),
+      true,
+    );
+  };
+  const confirmationCode = (command: "ya" | "na", text: string) => {
+    const code = new RegExp(`${command}#(B[A-F\\d]{5})`, "u").exec(text)?.[1];
+    assert.match(code ?? "", /^B[A-F\d]{5}$/u);
+    return code!;
+  };
+
+  try {
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-context",
+      messages: [textMessage(100, "help")],
+    });
+    sent.length = 0;
+    await addApproval(200, "switch-a");
+    await addApproval(201, "switch-b");
+
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-switch-approve",
+      messages: [textMessage(101, "ya")],
+    });
+    const oldApproveCode = confirmationCode("ya", sent.at(-1)?.text ?? "");
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-switch-deny",
+      messages: [textMessage(102, "NA")],
+    });
+    const switchedDenyCode = confirmationCode("na", sent.at(-1)?.text ?? "");
+    assert.notEqual(switchedDenyCode, oldApproveCode);
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-stale-action",
+      messages: [textMessage(103, `ya#${oldApproveCode}`)],
+    });
+    assert.equal(
+      sent.at(-1)?.text,
+      "批量确认码无效或已过期，请重新发送 ya 查看清单。",
+    );
+    assert.equal(responses.length, 0);
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-switched-confirmed",
+      messages: [textMessage(104, `na#${switchedDenyCode}`)],
+    });
+    assert.equal(
+      sent.at(-1)?.text,
+      "批量确认码无效或已过期，请重新发送 na 查看清单。",
+    );
+    assert.equal(responses.length, 0);
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-switched-preview-retry",
+      messages: [textMessage(118, "na")],
+    });
+    const retriedDenyCode = confirmationCode("na", sent.at(-1)?.text ?? "");
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-switched-retry-confirmed",
+      messages: [textMessage(119, `na#${retriedDenyCode}`)],
+    });
+    assert.deepEqual(responses.splice(0), [
+      { id: 200, result: { decision: "decline" } },
+      { id: 201, result: { decision: "decline" } },
+    ]);
+
+    await addApproval(202, "expiry-a");
+    await addApproval(203, "expiry-b");
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-expiry-preview",
+      messages: [textMessage(105, "ya")],
+    });
+    const expiredCode = confirmationCode("ya", sent.at(-1)?.text ?? "");
+    nowMs += 2 * 60 * 1_000 + 1;
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-expired-confirmation",
+      messages: [textMessage(106, `ya#${expiredCode}`)],
+    });
+    assert.equal(
+      sent.at(-1)?.text,
+      "批量确认码无效或已过期，请重新发送 ya 查看清单。",
+    );
+    assert.equal(responses.length, 0);
+
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-cancel-preview",
+      messages: [textMessage(107, "ya")],
+    });
+    const cancelledByCommandCode = confirmationCode(
+      "ya",
+      sent.at(-1)?.text ?? "",
+    );
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-cancel-help",
+      messages: [textMessage(108, "help")],
+    });
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-cancelled-command-confirmation",
+      messages: [textMessage(109, `ya#${cancelledByCommandCode}`)],
+    });
+    assert.equal(
+      sent.at(-1)?.text,
+      "批量确认码无效或已过期，请重新发送 ya 查看清单。",
+    );
+    assert.equal(responses.length, 0);
+
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-media-preview",
+      messages: [textMessage(110, "ya")],
+    });
+    const cancelledByMediaCode = confirmationCode(
+      "ya",
+      sent.at(-1)?.text ?? "",
+    );
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-media-failure",
+      messages: [rawVoiceMessage(111)],
+    });
+    assert.match(sent.at(-1)?.text ?? "", /这条语音没有微信转写文本/u);
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-media-cancelled-confirmation",
+      messages: [textMessage(112, `ya#${cancelledByMediaCode}`)],
+    });
+    assert.equal(
+      sent.at(-1)?.text,
+      "批量确认码无效或已过期，请重新发送 ya 查看清单。",
+    );
+    assert.equal(responses.length, 0);
+
+    failNextApprovePreview = true;
+    await assert.rejects(
+      bridge.ingestBatch({
+        cursor: "cursor-batch-delayed-preview",
+        messages: [textMessage(113, "ya")],
+      }),
+      /preview delivery delayed/u,
+    );
+    const delayedApprovePreview = sent.at(-1)?.text ?? "";
+    const delayedApproveCode = confirmationCode("ya", delayedApprovePreview);
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-repeat-delayed-preview",
+      messages: [textMessage(114, "ya")],
+    });
+    assert.equal(sent.at(-1)?.text, delayedApprovePreview);
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-after-delayed-preview",
+      messages: [textMessage(115, "na")],
+    });
+    const currentDenyCode = confirmationCode("na", sent.at(-1)?.text ?? "");
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-delayed-stale-confirmation",
+      messages: [textMessage(116, `ya#${delayedApproveCode}`)],
+    });
+    assert.equal(
+      sent.at(-1)?.text,
+      "批量确认码无效或已过期，请重新发送 ya 查看清单。",
+    );
+    assert.equal(responses.length, 0);
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-current-confirmation",
+      messages: [textMessage(117, `na#${currentDenyCode}`)],
+    });
+    assert.equal(
+      sent.at(-1)?.text,
+      "批量确认码无效或已过期，请重新发送 na 查看清单。",
+    );
+    assert.equal(responses.length, 0);
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-current-preview-retry",
+      messages: [textMessage(120, "na")],
+    });
+    const retriedCurrentDenyCode = confirmationCode(
+      "na",
+      sent.at(-1)?.text ?? "",
+    );
+    await bridge.ingestBatch({
+      cursor: "cursor-batch-current-retry-confirmation",
+      messages: [textMessage(121, `na#${retriedCurrentDenyCode}`)],
+    });
+    assert.deepEqual(responses, [
+      { id: 202, result: { decision: "decline" } },
+      { id: 203, result: { decision: "decline" } },
+    ]);
   } finally {
     bridge.close();
     state.close();

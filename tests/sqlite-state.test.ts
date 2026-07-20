@@ -2489,6 +2489,62 @@ test("iLink session persists only the caller-protected token for the controller"
   }
 });
 
+test("schema v15 keeps legacy permission defaults inert", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-permissions-v15-"));
+  const path = join(directory, "state.db");
+  const database = new DatabaseSync(path);
+  let reopened: SqliteState | null = null;
+
+  try {
+    applyMigrations(database, 1, 15);
+    database.exec("PRAGMA user_version = 15");
+    database
+      .prepare(
+        `UPDATE bridge_settings
+         SET default_permission_profile = ':danger-full-access',
+             default_approval_policy = 'never',
+             default_approvals_reviewer = 'user'
+         WHERE singleton = 1`,
+      )
+      .run();
+    database.close();
+
+    reopened = new SqliteState(path);
+    assert.equal(reopened.storageDiagnostics().schemaVersion, 15);
+    reopened.resetUserTimingSettings(1_000);
+    reopened.close();
+    reopened = null;
+
+    const inspected = new DatabaseSync(path);
+    try {
+      assert.deepEqual(
+        {
+          ...inspected
+            .prepare(
+              `SELECT default_permission_profile, default_approval_policy,
+                      default_approvals_reviewer
+               FROM bridge_settings WHERE singleton = 1`,
+            )
+            .get(),
+        },
+        {
+          default_approval_policy: "never",
+          default_approvals_reviewer: "user",
+          default_permission_profile: ":danger-full-access",
+        },
+      );
+    } finally {
+      inspected.close();
+    }
+  } finally {
+    reopened?.close();
+    try {
+      database.close();
+    } catch {}
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("re-authenticating the same iLink identity updates only its session", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-reauth-"));
   const state = new SqliteState(join(directory, "state.db"));
@@ -2583,9 +2639,6 @@ test("re-binding a new iLink identity clears old delivery state but preserves us
     state.setSelectedProjectPath("D:\\Project");
     state.setSessionTimeoutMinutes(60);
     state.setAwayTimeoutMinutes(10);
-    state.setDefaultPermissionProfile(":danger-full-access");
-    state.setDefaultApprovalPolicy("never");
-    state.setDefaultApprovalsReviewer("user");
     state.acceptInboundBatch({
       accountId: "bot-old",
       controllerUserId: "controller-old",
@@ -2739,11 +2792,6 @@ test("re-binding a new iLink identity clears old delivery state but preserves us
       mainThreadId: "thread-main",
       selectedProjectPath: "D:\\Project",
       sessionTimeoutMinutes: 60,
-    });
-    assert.deepEqual(state.getDefaultThreadPermissionSettings(), {
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      permissions: ":danger-full-access",
     });
   } finally {
     state.close();
@@ -3021,6 +3069,7 @@ function applyMigrations(
     "outbound-attachment-provenance",
     "transport-retention-indexes",
     "drop-thread-permission-profiles",
+    "default-thread-permissions",
   ];
   const migrations = join(process.cwd(), "src", "bridge", "migrations");
   for (let version = firstVersion; version <= lastVersion; version += 1) {

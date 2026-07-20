@@ -56,9 +56,11 @@ const MAX_CONTROL_ROUTER_OWNERS = 128;
 
 const CONTROL_ATOMIC_KINDS = [
   "approve",
+  "approveAll",
   "clearSession",
   "compactSession",
   "deny",
+  "denyAll",
   "efforts",
   "enterSession",
   "exitSession",
@@ -77,6 +79,7 @@ const CONTROL_ATOMIC_KINDS = [
 
 const CONTROL_INTENT_FIELDS = {
   code: { type: "string" },
+  confirmationCode: { type: "string" },
   effort: { type: "string" },
   id: { type: "string" },
   index: { minimum: 1, type: "integer" },
@@ -96,7 +99,7 @@ const CONTROL_ATOMIC_INTENT_SCHEMA = {
 const CONTROL_ROUTER_TOOLS = [
   {
     description:
-      "将微信文本映射为 iLink 控制意图。项目 projects/selectProject；任务 sessions/enterSession/newSession/clearSession/compactSession；stopTurn/exitSession/status；权限查询或修改请求一律映射为 permissions（仅只读回复）；模型 models/selectModel；推理 efforts/selectEffort；审批 approve/deny；帮助 help。普通工作请求必须用 message。",
+      "将微信文本映射为 iLink 控制意图。项目 projects/selectProject；任务 sessions/enterSession/newSession/clearSession/compactSession；stopTurn/exitSession/status；权限查询或修改请求一律映射为 permissions（仅只读回复）；模型 models/selectModel；推理 efforts/selectEffort；审批 approve/deny，当前全部审批 approveAll/denyAll；帮助 help。普通工作请求必须用 message。",
     inputSchema: {
       additionalProperties: false,
       properties: {

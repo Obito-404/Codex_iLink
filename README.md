@@ -98,7 +98,7 @@ ilink start    # 启动 Bridge
 ilink startup status   # 查看当前用户登录启动状态
 ilink startup enable   # 启用当前用户登录启动
 ilink startup disable  # 禁用当前用户登录启动
-ilink config   # 查看新任务默认权限与超时配置
+ilink config   # 查看 Codex Desktop 当前新会话权限与超时配置
 ```
 
 Bridge 在当前 Windows 用户会话中后台运行，日志位于：
@@ -137,7 +137,7 @@ npm 预览版把 `@latest` 替换为 `@next`。
 | 权限 | `perm`（只读） | `perm` |
 | 模型 | `model`、`model<n>` | `model2` |
 | 强度 | `effort`、`effort<n>` | `effort2` |
-| 审批 | `y[code]`、`n[code]` | `yA7C9E2` |
+| 审批 | `y[code]`、`n[code]`、`ya`、`na` | `yA7C9E2`、`ya` |
 | 帮助 | `help` | `help` |
 
 短命令不带 `/`，命令和编号之间不加空格；英文字母不区分大小写，例如 `s`、`S`、`st`、`St` 都可以。
@@ -150,6 +150,7 @@ npm 预览版把 `@latest` 替换为 `@next`。
 
 - `auto_review`：由 Codex 自己判断，iLink 不会再发一条重复的微信审批。
 - `user`：Codex 确实在等待用户决定时，iLink 才把审批发到微信；回复 `y` 或 `n` 会真正批准或拒绝这一次操作。
+- 多个待审批可以用 `y<code>`、`n<code>` 逐条处理。发送 `ya` 或 `na` 会先列出本次清单和确认码；两分钟内按提示回复（如 `ya#B12345`）才会批量处理。只处理这份清单，不影响之后新增的请求。
 - Bridge 断开、审批信息不完整或微信没有可回复的会话时，iLink 不会伪造审批，而是交回 Codex Desktop 处理。
 
 ## 图片和文件
@@ -160,22 +161,26 @@ npm 预览版把 `@latest` 替换为 `@next`。
 
 文件和视频能否被 Codex 读取，仍取决于文件格式和当前任务权限。为了避免误发本机文件，iLink 只发送当前任务目录里的真实文件，不会把普通文字中的路径或链接自动当成附件。旧任务如果提示无法发送附件，请用 `new` 新建 iLink 任务后再试。
 
-## 全局默认配置
+## 新会话权限与超时配置
 
-新建任务默认使用 `workspace + on-request + auto_review`：Codex 可以修改当前项目，需要额外权限时再发起请求，并优先由 Codex 自动审查。这样通常不需要每次新建任务后再手动改掉“只读”。
+iLink 不保存独立的新会话权限。微信主会话首次创建，以及每次执行 `new` 或 `clear` 时，都会即时读取 Codex Desktop 当前权限选择：
 
-这些设置只用于 iLink 之后创建的微信主会话、`new` 和 `clear`；进入或恢复已有任务时不会覆盖它原来的权限：
+| Codex Desktop 选择 | `permissions` | `approvalPolicy` | `approvalsReviewer` |
+| --- | --- | --- | --- |
+| 请求批准 | `:workspace` | `on-request` | `user` |
+| 替我审批 | `:workspace` | `on-request` | `auto_review` |
+| 完全访问权限 | `:danger-full-access` | `never` | `user` |
+
+Desktop 权限切换只影响之后创建的新任务；已有任务继续使用自身已持久化的权限，iLink 恢复时不会覆盖。`ilink config` 只显示 Desktop 当前选择，权限只能在 Desktop 权限菜单修改。Desktop 状态不可读或模式未知时，iLink 不创建任务，也不更换当前绑定。
 
 ```powershell
-ilink config set default-permission workspace  # read-only / workspace / full-access
-ilink config set default-approval on-request   # on-request / never
-ilink config set default-reviewer auto_review  # auto_review / user
+ilink config
 ilink config set session-timeout 60m
 ilink config set away-timeout 10m
 ilink config reset
 ```
 
-默认会话绑定保持 30 分钟；未锁屏时连续 5 分钟没有键鼠输入会判定为离开。锁屏会立即判定为离开，不受 `away-timeout` 影响。
+`config reset` 只恢复两个超时，不修改 Desktop 权限。默认会话绑定保持 30 分钟；未锁屏时连续 5 分钟没有键鼠输入会判定为离开。锁屏会立即判定为离开，不受 `away-timeout` 影响。
 
 ## 常见问题
 
@@ -223,7 +228,7 @@ ilink login --force
 ilink start
 ```
 
-失效登录会按账号暂停请求一小时，避免每 30 秒无效重试；重新扫码成功后立即恢复。若微信分配了新 Bot，iLink 会自动换绑并清掉旧账号的待发消息，项目选择、微信主会话和默认权限不会丢。
+失效登录会按账号暂停请求一小时，避免每 30 秒无效重试；重新扫码成功后立即恢复。若微信分配了新 Bot，iLink 会自动换绑并清掉旧账号的待发消息，项目选择、微信主会话和超时配置不会丢；之后的新会话权限仍以 Desktop 创建当时的选择为准。
 
 ### Node.js 版本不兼容
 

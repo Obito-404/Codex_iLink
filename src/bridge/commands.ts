@@ -1,6 +1,8 @@
 export type AtomicControlIntent =
   | { code: string | null; kind: "approve" }
+  | { confirmationCode: string | null; kind: "approveAll" }
   | { code: string | null; kind: "deny" }
+  | { confirmationCode: string | null; kind: "denyAll" }
   | { kind: "clearSession" }
   | { kind: "compactSession" }
   | { kind: "enterSession"; index: number }
@@ -47,7 +49,8 @@ export const COMMAND_HELP = [
   "perm — current Codex permissions (read-only)",
   "model | model<n> — 模型",
   "effort | effort<n> — 强度",
-  "y[code] | n[code] — approval",
+  "y[code] | n[code] — 单个审批",
+  "ya | na — 全部审批（按提示带确认码回复）",
   "help — commands",
   "也可直接说：查看项目、打开第2个任务、返回主会话",
 ].join("\n");
@@ -83,6 +86,10 @@ export function parseInboundText(text: string): InboundIntent {
       return { kind: "models" };
     case "effort":
       return { kind: "efforts" };
+    case "ya":
+      return { confirmationCode: null, kind: "approveAll" };
+    case "na":
+      return { confirmationCode: null, kind: "denyAll" };
     case "help":
       return { kind: "help" };
   }
@@ -100,6 +107,14 @@ export function parseInboundText(text: string): InboundIntent {
       code: approval[2]?.toUpperCase() ?? null,
       kind:
         approval[1] === "y" || approval[1] === "ok" ? "approve" : "deny",
+    };
+  }
+
+  const batchApproval = /^(ya|na)#(b[a-f\d]{5})$/u.exec(foldedCommand);
+  if (batchApproval) {
+    return {
+      confirmationCode: batchApproval[2]!.toUpperCase(),
+      kind: batchApproval[1] === "ya" ? "approveAll" : "denyAll",
     };
   }
 
@@ -159,6 +174,11 @@ export function routedControlIntent(value: unknown): RoutedControlIntent | null 
     typeof input.code === "string" && /^[a-f][a-f\d]{5}$/iu.test(input.code)
       ? input.code.toUpperCase()
       : null;
+  const confirmationCode =
+    typeof input.confirmationCode === "string" &&
+    /^b[a-f\d]{5}$/iu.test(input.confirmationCode)
+      ? input.confirmationCode.toUpperCase()
+      : null;
 
   if (kind === "controlSequence") {
     if (
@@ -172,6 +192,9 @@ export function routedControlIntent(value: unknown): RoutedControlIntent | null 
     for (const value of input.intents) {
       const intent = routedControlIntent(value);
       if (!intent || intent.kind === "controlSequence") return null;
+      if (intent.kind === "approveAll" || intent.kind === "denyAll") {
+        return null;
+      }
       intents.push(intent);
     }
     return {
@@ -182,7 +205,15 @@ export function routedControlIntent(value: unknown): RoutedControlIntent | null 
 
   switch (kind) {
     case "approve":
+    case "approveAll":
     case "deny":
+    case "denyAll":
+      if (kind === "approveAll" || kind === "denyAll") {
+        if (input.confirmationCode !== undefined && confirmationCode === null) {
+          return null;
+        }
+        return { confirmationCode, kind };
+      }
       if (input.code !== undefined && code === null) return null;
       return { code, kind };
     case "clearSession":
@@ -233,6 +264,9 @@ function parseNaturalControlSequence(
   for (const part of parts) {
     const intent = parseNaturalControl(part);
     if (!intent) return null;
+    if (intent.kind === "approveAll" || intent.kind === "denyAll") {
+      return null;
+    }
     intents.push(intent);
   }
   return {
@@ -346,6 +380,20 @@ function parseNaturalControl(command: string): AtomicControlIntent | null {
       kind: /^(批准|同意)$/u.test(approval[1]!) ? "approve" : "deny",
     };
   }
+  if (
+    /^(?:(?:全部|所有)(?:审批)?(?:批准|同意)(?:审批)?|(?:批准|同意)(?:全部|所有)(?:审批)?)$/u.test(
+      normalized,
+    )
+  ) {
+    return { confirmationCode: null, kind: "approveAll" };
+  }
+  if (
+    /^(?:(?:全部|所有)(?:审批)?(?:拒绝|否决)(?:审批)?|(?:拒绝|否决)(?:全部|所有)(?:审批)?)$/u.test(
+      normalized,
+    )
+  ) {
+    return { confirmationCode: null, kind: "denyAll" };
+  }
   return null;
 }
 
@@ -428,6 +476,7 @@ function isReservedCommandShape(command: string): boolean {
     /^effort(?::|[+\-.\d])/iu.test(command) ||
     /^effort\s+(?:low|medium|high|xhigh|max|ultra)$/iu.test(command) ||
     /^(?:p|s)(?:\s|[+\-.\d])/iu.test(command) ||
+    /^(?:ya|na)#/iu.test(command) ||
     /^(?:y|n|ok|no)(?:\s|(?=[a-f\d]*\d)[a-f\d]+$)/iu.test(command)
   );
 }

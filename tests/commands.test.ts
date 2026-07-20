@@ -63,6 +63,22 @@ test("the documented short command table is parsed exactly", () => {
     code: "A7C9E2",
     kind: "deny",
   });
+  assert.deepEqual(parseInboundText("ya"), {
+    confirmationCode: null,
+    kind: "approveAll",
+  });
+  assert.deepEqual(parseInboundText("na"), {
+    confirmationCode: null,
+    kind: "denyAll",
+  });
+  assert.deepEqual(parseInboundText("ya#B12345"), {
+    confirmationCode: "B12345",
+    kind: "approveAll",
+  });
+  assert.deepEqual(parseInboundText("na#babcde"), {
+    confirmationCode: "BABCDE",
+    kind: "denyAll",
+  });
   assert.deepEqual(parseInboundText("help"), { kind: "help" });
 });
 
@@ -92,6 +108,9 @@ test("ASCII short commands are case-insensitive", () => {
     ["EFFORT:XHIGH", "effort:xhigh"],
     ["Y", "y"],
     ["Na7C9e2", "na7c9e2"],
+    ["YA", "ya"],
+    ["Na", "na"],
+    ["YA#b12345", "ya#B12345"],
     ["HeLp", "help"],
   ] as const) {
     assert.deepEqual(parseInboundText(mixedCase), parseInboundText(canonical));
@@ -141,6 +160,8 @@ test("explicit Chinese control requests map to the same command intents", () => 
     ["选择第2个推理强度", { index: 2, kind: "selectEffort" }],
     ["批准当前审批", { code: null, kind: "approve" }],
     ["拒绝审批 A7C9E2", { code: "A7C9E2", kind: "deny" }],
+    ["全部同意审批", { confirmationCode: null, kind: "approveAll" }],
+    ["拒绝所有审批", { confirmationCode: null, kind: "denyAll" }],
     ["命令列表", { kind: "help" }],
   ];
 
@@ -168,6 +189,8 @@ test("legacy slash commands, spaced forms, aliases and malformed indices are rej
     "n123456",
     "yA7C9E",
     "nA7C9E20",
+    "ya#B1234G",
+    "na#B1234",
     "/stop",
     "/status",
     "/项目",
@@ -261,6 +284,22 @@ test("ambiguous control-like text is isolated for AI fallback", () => {
   assert.deepEqual(
     routedControlIntent({ id: "GPT-5.6-SOL", kind: "selectModel" }),
     { id: "gpt-5.6-sol", kind: "selectModel" },
+  );
+  assert.deepEqual(routedControlIntent({ kind: "approveAll" }), {
+    confirmationCode: null,
+    kind: "approveAll",
+  });
+  assert.deepEqual(routedControlIntent({ kind: "denyAll" }), {
+    confirmationCode: null,
+    kind: "denyAll",
+  });
+  assert.deepEqual(
+    routedControlIntent({ confirmationCode: "b12345", kind: "approveAll" }),
+    { confirmationCode: "B12345", kind: "approveAll" },
+  );
+  assert.equal(
+    routedControlIntent({ confirmationCode: "wrong", kind: "denyAll" }),
+    null,
   );
   assert.deepEqual(
     routedControlIntent({

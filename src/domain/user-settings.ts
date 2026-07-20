@@ -1,8 +1,5 @@
 export const DEFAULT_SESSION_TIMEOUT_MINUTES = 30;
 export const DEFAULT_AWAY_TIMEOUT_MINUTES = 5;
-export const DEFAULT_PERMISSION_PROFILE = ":workspace";
-export const DEFAULT_APPROVAL_POLICY = "on-request";
-export const DEFAULT_APPROVALS_REVIEWER = "auto_review";
 
 export const SESSION_TIMEOUT_MINUTES_RANGE = { min: 5, max: 24 * 60 } as const;
 export const AWAY_TIMEOUT_MINUTES_RANGE = { min: 1, max: 60 } as const;
@@ -10,19 +7,6 @@ export const AWAY_TIMEOUT_MINUTES_RANGE = { min: 1, max: 60 } as const;
 export type UserTimingSettings = {
   awayTimeoutMinutes: number;
   sessionTimeoutMinutes: number;
-};
-
-export type DefaultPermissionProfile =
-  | ":read-only"
-  | ":workspace"
-  | ":danger-full-access";
-export type DefaultApprovalPolicy = "never" | "on-request";
-export type DefaultApprovalsReviewer = "auto_review" | "user";
-
-export type DefaultThreadPermissionSettings = {
-  approvalPolicy: DefaultApprovalPolicy;
-  approvalsReviewer: DefaultApprovalsReviewer;
-  permissions: DefaultPermissionProfile;
 };
 
 export function parseMinuteDuration(value: string): number | null {

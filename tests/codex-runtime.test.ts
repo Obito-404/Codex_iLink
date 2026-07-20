@@ -849,7 +849,7 @@ test("existing threads inherit settings and new threads override only cwd", asyn
   }
 });
 
-test("new threads receive explicit iLink permission defaults", async () => {
+test("new threads forward Desktop-derived permission settings", async () => {
   const runtime = await CodexRuntime.create({
     bridgeInstanceId: "bridge-instance-thread-permissions",
     command: [process.execPath, fakeRuntime],

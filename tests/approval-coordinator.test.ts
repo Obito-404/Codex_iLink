@@ -114,7 +114,10 @@ test("multiple approvals require their immutable short codes", async () => {
     sent[1] ?? "",
     new RegExp(`${second?.code}：Command: pnpm typecheck`, "u"),
   );
-  assert.match(sent[1] ?? "", /回复：y<code> 或 n<code>/u);
+  assert.match(
+    sent[1] ?? "",
+    /逐条：y<code> \/ n<code>；批量：ya \/ na（需确认）/u,
+  );
   assert.deepEqual(approvals.decide(null, true), {
     approvals: [first, second],
     kind: "ambiguous",
@@ -126,6 +129,61 @@ test("multiple approvals require their immutable short codes", async () => {
     kind: "decided",
   });
   assert.deepEqual(responses, [{ id: 52, result: { decision: "decline" } }]);
+});
+
+test("batch decisions snapshot current approvals and exclude later requests", async () => {
+  const decisions: string[] = [];
+  const live = new Map<string, boolean>();
+  let spawned: Promise<boolean> | null = null;
+  const approvals = new ApprovalCoordinator({
+    async notify() {},
+    now: () => 1_550,
+    respond() {},
+  });
+  const ingest = (
+    itemId: string,
+    respond: (approved: boolean) => boolean | void,
+  ) => {
+    live.set(itemId, true);
+    return approvals.ingestCallback({
+      isLive: () => live.get(itemId) === true,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        command: itemId,
+        itemId,
+        threadId: `thread-${itemId}`,
+        turnId: `turn-${itemId}`,
+      },
+      respond,
+    });
+  };
+
+  try {
+    await ingest("first", (approved) => {
+      decisions.push(`first:${String(approved)}`);
+      spawned = ingest("later", (laterApproved) => {
+        decisions.push(`later:${String(laterApproved)}`);
+      });
+    });
+    await ingest("second", (approved) => {
+      decisions.push(`second:${String(approved)}`);
+    });
+
+    const codes = approvals.list().map((approval) => approval.code);
+    live.set("second", false);
+    assert.deepEqual(approvals.decideMany(codes, true), {
+      attempted: 2,
+      decided: 1,
+    });
+    await spawned;
+    assert.deepEqual(decisions, ["first:true"]);
+    assert.deepEqual(
+      approvals.list().map((approval) => approval.summary),
+      ["Command: later"],
+    );
+  } finally {
+    approvals.close();
+  }
 });
 
 test("approval summaries preserve both the reason and concrete command", async () => {

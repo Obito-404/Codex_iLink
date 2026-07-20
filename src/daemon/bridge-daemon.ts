@@ -21,7 +21,7 @@ import {
   parseDesktopNotificationClientId,
 } from "../bridge/desktop-notification-identity.ts";
 import type { HookDecision, HookEvent } from "../hooks/hook-receiver.ts";
-import type { DefaultThreadPermissionSettings } from "../domain/user-settings.ts";
+import type { ThreadPermissionSettings } from "../codex/protocol.ts";
 import {
   ILinkError,
   type GetUpdatesResult,
@@ -51,7 +51,7 @@ export type DaemonCodexPort = CodexTurnStarter & {
   setThreadName(input: { name: string; threadId: string }): Promise<unknown>;
   startThread(
     cwd: string,
-    permissions?: DefaultThreadPermissionSettings,
+    permissions?: ThreadPermissionSettings,
   ): Promise<{ thread: { id: string } }>;
 };
 
@@ -92,6 +92,7 @@ export type BridgeDaemonOptions = {
   leases: SqliteTurnLeaseStore;
   listProjects?: BridgeEngineOptions["listProjects"];
   media?: DaemonMediaPort;
+  newThreadPermissions?: () => ThreadPermissionSettings;
   newId: () => string;
   now: () => number;
   onLifecycleWarning?: (
@@ -155,9 +156,12 @@ export class BridgeDaemon {
 
     let mainThreadId = this.#options.state.getBridgeSettings().mainThreadId;
     if (!mainThreadId) {
+      if (!this.#options.newThreadPermissions) {
+        throw new Error("Desktop permission source is not configured");
+      }
       const started = await this.#options.codex.startThread(
         this.#options.inboxDirectory,
-        this.#options.state.getDefaultThreadPermissionSettings(),
+        this.#options.newThreadPermissions(),
       );
       mainThreadId = started.thread.id;
       await this.#options.codex.setThreadName({
@@ -186,6 +190,9 @@ export class BridgeDaemon {
       leases: this.#options.leases,
       mainThreadId,
       newId: this.#options.newId,
+      ...(this.#options.newThreadPermissions
+        ? { newThreadPermissions: this.#options.newThreadPermissions }
+        : {}),
       now: this.#options.now,
       ...(this.#options.listProjects
         ? { listProjects: this.#options.listProjects }

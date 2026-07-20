@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受，部分取代 [ADR 0015](./0015-codex-is-the-only-permission-source.md) 的新任务创建与 Desktop 审批决策。
+已接受；其中“iLink 保存并配置新任务默认权限”的决策已被 [ADR 0017](./0017-new-tasks-follow-desktop-permissions.md) 取代，Desktop 在线审批部分仍有效。本文保留为历史决策。
 
 ## 背景
 
@@ -20,6 +20,7 @@
 6. 只有 `approvalsReviewer=user` 的在线请求进入与 App Server 共用的临时短码队列；微信 `y/n` 返回 `hookSpecificOutput.decision.behavior=allow|deny`。
 7. PermissionRequest 不写 Spool。30 分钟超时或 Bridge 正常关闭时拒绝；Hook 断开或 Bridge 崩溃时 stdout 为空并回退原生流程。旧决定不持久化、不重放。
 8. 审批按 `method + threadId + turnId + itemId` 去重；不同 item 即使文案相同也保留独立短码，摘要同时展示原因和具体命令。
+9. `ya`、`na` 只展示并快照在线短码，两分钟内使用该快照的唯一确认码才逐个回应；切换操作或其他消息取消确认，快照之后新增的审批不继承本次批量决定。
 
 ## 结果
 

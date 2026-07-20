@@ -27,6 +27,7 @@ import {
   desktopProjectStatePath,
   readDesktopProjects,
 } from "./desktop-projects.ts";
+import { readDesktopPermissionSelection } from "./desktop-permissions.ts";
 import {
   createPowerRequestCommand,
   PowerRequestController,
@@ -489,6 +490,10 @@ export async function runWindowsHost(
       listProjects: () =>
         readDesktopProjects(desktopProjectStatePath(environment)),
       media,
+      newThreadPermissions: () =>
+        readDesktopPermissionSelection(
+          desktopProjectStatePath(environment),
+        ).settings,
       newId: randomUUID,
       now: Date.now,
       onLifecycleWarning: (operation, error) => {

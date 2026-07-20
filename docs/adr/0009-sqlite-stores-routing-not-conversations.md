@@ -1,6 +1,6 @@
 # SQLite 只保存路由和传输状态
 
-Bridge 使用 SQLite WAL 持久化绑定、队列、游标、审批通知的投递/失效状态、去重、Dispatch Intent 和 Outbox，但 Codex 持久化会话仍是唯一对话与当前任务权限事实源。SQLite 不保存已有任务的权限快照、Sandbox 或可重放的批准决定；[ADR 0016](./0016-new-task-permission-defaults-and-live-desktop-approval.md) 允许保存只在后续 `thread/start` 使用的 iLink 全局默认 Profile、审批策略和审批者。入站正文在恢复责任已原子转移到队列或 Dispatch Intent，或失败回复已持久化后删除；Dispatch 输入在 App Server 明确接受且不再需要提交恢复后删除，出站正文在 iLink 明确确认后删除。这样既避免 Bridge 演变成第二套聊天与权限状态，也保留崩溃恢复与至少一次传输所需状态。
+Bridge 使用 SQLite WAL 持久化绑定、队列、游标、审批通知的投递/失效状态、去重、Dispatch Intent 和 Outbox，但 Codex 持久化会话仍是唯一对话与当前任务权限事实源。SQLite 不保存已有任务的权限快照、Sandbox 或可重放的批准决定；schema v15 已部署的三个新任务权限列只为迁移兼容而惰性保留，业务不读、不写、不重置。新任务权限按 [ADR 0017](./0017-new-tasks-follow-desktop-permissions.md) 在创建瞬间直接读取 Desktop。入站正文在恢复责任已原子转移到队列或 Dispatch Intent，或失败回复已持久化后删除；Dispatch 输入在 App Server 明确接受且不再需要提交恢复后删除，出站正文在 iLink 明确确认后删除。这样既避免 Bridge 演变成第二套聊天与权限状态，也保留崩溃恢复与至少一次传输所需状态。
 
 微信入站消息可以带媒体，因此 `inbound_messages`、`queued_turns` 和 `dispatch_intents` 的正文列保存同一种版本化输入 payload：文本、附件种类、显示名和本地绝对路径。图片最终映射为 Codex `localImage`，文件和视频映射为 `mention`。SQLite 不保存媒体二进制。
 

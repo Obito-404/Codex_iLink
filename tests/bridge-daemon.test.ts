@@ -862,6 +862,19 @@ test("an unmatched CLI Stop is inspected once and still suppresses a late Prompt
       null,
       "a Prompt drained after its Stop must stay completed",
     );
+
+    const abortedReplay = new AbortController();
+    abortedReplay.abort(new Error("spool delivery timed out"));
+    reads = 0;
+    await daemon.ingestHookEvent(
+      {
+        ...desktopStopEvent(),
+        sessionId: "aborted-thread",
+        turnId: "aborted-turn",
+      },
+      abortedReplay.signal,
+    );
+    assert.equal(reads, 0, "an aborted replay must not enter Codex reconciliation");
     await daemon.stop();
   } finally {
     leases.close();

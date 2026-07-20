@@ -360,6 +360,7 @@ export class BridgeDaemon {
       return { behavior };
     }
     if (event.eventName !== "Stop" || !event.turnId) return;
+    if (signal.aborted) return;
     if (this.#options.state.getDispatchIntentByTurnId(event.turnId)) return;
     const leaseStopped = this.#options.leases.markDesktopStop({
       stoppedAtMs: event.capturedAtMs,
@@ -382,10 +383,16 @@ export class BridgeDaemon {
         { ...event, turnId: event.turnId },
         0,
         true,
+        signal,
       );
       return;
     }
-    await this.#reconcileDesktopStop({ ...event, turnId: event.turnId }, 0);
+    await this.#reconcileDesktopStop(
+      { ...event, turnId: event.turnId },
+      0,
+      false,
+      signal,
+    );
   }
 
   async stop(): Promise<void> {
@@ -469,18 +476,20 @@ export class BridgeDaemon {
     event: HookEvent & { turnId: string },
     attempt: number,
     requireDesktopSource = false,
+    signal?: AbortSignal,
   ): Promise<void> {
     const threadId = event.sessionId;
     const turnId = event.turnId;
     let lastError: unknown;
     for (let currentAttempt = attempt; currentAttempt <= 20; currentAttempt += 1) {
-      if (!this.#started) return;
+      if (!this.#started || signal?.aborted) return;
       try {
         await this.#options.codex.ensureThread?.(threadId);
         const read = await this.#options.codex.readThread({
           includeTurns: true,
           threadId,
         });
+        if (signal?.aborted) return;
         const turns = Array.isArray(read.thread.turns) ? read.thread.turns : [];
         const turn = turns
           .filter(
@@ -527,7 +536,10 @@ export class BridgeDaemon {
       } catch (error) {
         lastError = error;
       }
-      if (currentAttempt < 20) await delay(250);
+      if (currentAttempt < 20) {
+        await delay(250);
+        if (signal?.aborted) return;
+      }
     }
     throw new Error("E_DESKTOP_STOP_NOT_DURABLE", { cause: lastError });
   }

@@ -7,6 +7,7 @@ import {
   readdirSync,
   rmSync,
   utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -294,6 +295,173 @@ test("concurrent spool drains share one delivery pass", async () => {
     assert.equal(await first, 1);
     assert.equal(await second, 1);
     assert.equal(readdirSync(spoolDirectory).length, 0);
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a failed spool event is quarantined once without blocking later events", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-spool-poison-"));
+  const spoolDirectory = join(directory, "spool");
+  runHook({ pipePath: pipePath(), spoolDirectory });
+  runHook({ pipePath: pipePath(), spoolDirectory });
+  let deliveries = 0;
+  const receiver = new HookReceiver({
+    onEvent: () => {
+      deliveries += 1;
+      if (deliveries === 1) throw new Error("poison event");
+    },
+    pipePath: pipePath(),
+    spoolDirectory,
+  });
+
+  try {
+    assert.equal(await receiver.drainSpool(), 0);
+    assert.equal(deliveries, 1);
+    assert.equal(
+      readdirSync(spoolDirectory, { withFileTypes: true }).filter(
+        (entry) => entry.isFile() && entry.name.endsWith(".json"),
+      ).length,
+      1,
+    );
+    assert.equal(
+      readdirSync(join(spoolDirectory, "dead-letter")).filter((name) =>
+        name.endsWith(".json"),
+      ).length,
+      1,
+    );
+
+    assert.equal(await receiver.drainSpool(), 1);
+    assert.equal(deliveries, 2);
+    assert.equal(await receiver.drainSpool(), 0);
+    assert.equal(deliveries, 2);
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a guarded prompt gets bounded retries before quarantine", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-spool-retry-"));
+  const spoolDirectory = join(directory, "spool");
+  runHook({
+    hook: {
+      ...hookInput(),
+      hook_event_name: "UserPromptSubmit",
+      source: "codex-ilink-guard",
+    },
+    pipePath: pipePath(),
+    spoolDirectory,
+  });
+  let deliveries = 0;
+  const receiver = new HookReceiver({
+    onEvent: () => {
+      deliveries += 1;
+      throw new Error("database busy");
+    },
+    pipePath: pipePath(),
+    spoolDirectory,
+  });
+
+  try {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      assert.equal(await receiver.drainSpool(), 0);
+      assert.equal(deliveries, attempt);
+      assert.equal(
+        readdirSync(spoolDirectory, { withFileTypes: true }).filter(
+          (entry) => entry.isFile() && entry.name.endsWith(".json"),
+        ).length,
+        1,
+      );
+    }
+    assert.equal(await receiver.drainSpool(), 0);
+    assert.equal(deliveries, 3);
+    assert.equal(
+      readdirSync(join(spoolDirectory, "dead-letter")).length,
+      1,
+    );
+    assert.equal(await receiver.drainSpool(), 0);
+    assert.equal(deliveries, 3);
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test(
+  "a hanging spool consumer is timed out and quarantined",
+  { timeout: 500 },
+  async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-ilink-spool-timeout-"));
+    const spoolDirectory = join(directory, "spool");
+    runHook({ pipePath: pipePath(), spoolDirectory });
+    let aborted = false;
+    const receiver = new HookReceiver({
+      onEvent: async (_event, signal) => {
+        await new Promise<void>((resolveAbort) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              resolveAbort();
+            },
+            { once: true },
+          );
+        });
+      },
+      pipePath: pipePath(),
+      spoolDeliveryTimeoutMs: 20,
+      spoolDirectory,
+    });
+
+    try {
+      assert.equal(await receiver.drainSpool(), 0);
+      assert.equal(aborted, true);
+      assert.equal(
+        readdirSync(join(spoolDirectory, "dead-letter")).filter((name) =>
+          name.endsWith(".json"),
+        ).length,
+        1,
+      );
+    } finally {
+      await receiver.close();
+      rmSync(directory, { force: true, recursive: true });
+    }
+  },
+);
+
+test("dead-letter spool is bounded by age and file count", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-dead-letter-bound-"));
+  const spoolDirectory = join(directory, "spool");
+  runHook({ pipePath: pipePath(), spoolDirectory });
+  const receiver = new HookReceiver({
+    onEvent: () => {
+      throw new Error("poison event");
+    },
+    pipePath: pipePath(),
+    spoolDirectory,
+  });
+
+  try {
+    assert.equal(await receiver.drainSpool(), 0);
+    const deadLetterDirectory = join(spoolDirectory, "dead-letter");
+    const expiredPath = join(
+      deadLetterDirectory,
+      readdirSync(deadLetterDirectory)[0]!,
+    );
+    const expired = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000);
+    utimesSync(expiredPath, expired, expired);
+    for (let index = 0; index < 130; index += 1) {
+      writeFileSync(
+        join(deadLetterDirectory, `new-${String(index).padStart(3, "0")}.json`),
+        "{}",
+      );
+    }
+
+    assert.equal(await receiver.drainSpool(), 0);
+    assert.equal(existsSync(expiredPath), false);
+    assert.equal(readdirSync(deadLetterDirectory).length, 128);
   } finally {
     await receiver.close();
     rmSync(directory, { force: true, recursive: true });

@@ -21,7 +21,7 @@
 - 外部 App Server 无法可靠实时订阅另一个 Desktop 进程的所有事件，因此需要 Hooks 和持久化 Spool。
 - 实机进一步确认：独立 App Server 读取同一活动 Desktop turn 时可能返回 `thread=notLoaded`、`turn=interrupted`，而 Desktop 本身仍显示 `active/inProgress`。因此公开 `thread/read` 只能配合精确 Stop 证据做对账，不能单独承担并发仲裁或 Desktop 租约释放。
 - 官方 Hooks 提供 `SessionStart`、`UserPromptSubmit`、`Stop`、`PermissionRequest`，以及 `session_id`、`turn_id`、`cwd`、模型和权限模式等输入。
-- `PermissionRequest` Hook 技术上支持输出 `allow` 或 `deny`；V1 出于安全策略不启用该能力，探针与生产 Hook 都保持 stdout 为空，Desktop 审批仍由 Desktop 处理。
+- `PermissionRequest` Hook 已接入在线审批适配器：Bridge 无覆盖读取任务实际审批者，`auto_review` 保持 stdout 为空且不通知微信；`user` 可通过微信短码返回 `allow` 或 `deny`。
 - 继承到子进程的失效 `CODEX_API_KEY` 或 `OPENAI_API_KEY` 会污染现有 ChatGPT 登录认证；从 Desktop 内启动探针时，`CODEX_INTERNAL_ORIGINATOR_OVERRIDE` 和 `CODEX_THREAD_ID` 还会错误标记子进程来源。探针已按大小写不敏感方式清理这四项，生产 Bridge 必须使用同样的受控环境策略。
 - Windows 最后输入 API 可读取当前用户键鼠空闲时间。
 - 腾讯 `openclaw-weixin` 源码包含扫码登录、`get_updates_buf` 长轮询、`message_id`、`context_token` 和文本发送。
@@ -41,7 +41,7 @@
 
 - App Server 当前有 `thread/list`，没有 `project/list`；项目只能从会话与 Hook 观察数据派生。
 - App Server Schema 是版本相关产物，升级 Codex 后必须先做兼容检查。
-- `PermissionRequest` Hook 协议允许返回 `allow` 或 `deny`，但 V1 主动放弃这项能力：微信不参与 Desktop 回合审批，Hook stdout 始终为空，审批在 Desktop 内完成。
+- `PermissionRequest` 只在在线 Pipe、请求身份完整且微信回复上下文存在时等待微信决定；Pipe 离线或状态不确定时 stdout 为空并回退 Desktop/Codex，不把审批写入 Spool，也不重放旧决定。
 - 非托管命令 Hook 的持久信任绑定当前定义 hash，首次安装和定义变化后都需要用户人工审核。普通安装没有受支持的自动持久信任接口；`--dangerously-bypass-hook-trust` 只适用于已经在 Codex 外部审查来源的单次自动化调用，本项目生产流程不使用。
 - Hook Transcript 格式不是稳定接口；插件不解析 Transcript，最终结果通过公开会话接口获取。
 - 插件可以打包 Hooks，但不是后台服务，也不能被当成稳定的 Desktop UI 扩展点。

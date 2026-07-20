@@ -392,6 +392,24 @@ test("new without a project uses the reserved Inbox and stays product-level unpr
   });
 });
 
+test("new applies the current global permission defaults", async () => {
+  await withNavigationBridge(async ({ bridge, codex, state }) => {
+    state.setDefaultPermissionProfile(":read-only");
+    state.setDefaultApprovalPolicy("never");
+    state.setDefaultApprovalsReviewer("user");
+
+    await ingest(bridge, 401, "new");
+
+    assert.deepEqual(codex.startedPermissions, [
+      {
+        approvalPolicy: "never",
+        approvalsReviewer: "user",
+        permissions: ":read-only",
+      },
+    ]);
+  });
+});
+
 test("an expired session binding sends one reminder and preserves the session", async () => {
   await withNavigationBridge(async ({ bridge, clock, codex, sent, state }) => {
     state.setSelectedProjectPath("D:\\Selected");
@@ -858,7 +876,7 @@ test("perm reads the current Codex task permissions without a write path", async
         "Codex 当前权限：工作区（推荐） (:workspace)",
         "审批：on-request；审批人：user",
         "Sandbox：workspaceWrite",
-        "权限只能在 Codex Desktop 中修改；iLink 仅实时读取当前任务设置。",
+        "当前任务权限只能在 Codex Desktop 中修改；新任务默认值可用 ilink config 设置。",
       ].join(String.fromCharCode(10)),
     );
     assert.doesNotMatch(sent[0]?.text ?? "", /perm<n>|只读/u);
@@ -880,7 +898,7 @@ test("perm reads the current Codex task permissions without a write path", async
         "Codex 当前权限：完全访问 (:danger-full-access)",
         "审批：never；审批人：auto_review",
         "Sandbox：dangerFullAccess",
-        "权限只能在 Codex Desktop 中修改；iLink 仅实时读取当前任务设置。",
+        "当前任务权限只能在 Codex Desktop 中修改；新任务默认值可用 ilink config 设置。",
       ].join(String.fromCharCode(10)),
     );
     assert.deepEqual(
@@ -909,7 +927,7 @@ test("perm reports future Codex permission metadata without inference", async ()
         "Codex 当前权限：自定义 (custom-team-profile)",
         "审批：future-policy；审批人：future_reviewer",
         "Sandbox：futureSandbox",
-        "权限只能在 Codex Desktop 中修改；iLink 仅实时读取当前任务设置。",
+        "当前任务权限只能在 Codex Desktop 中修改；新任务默认值可用 ilink config 设置。",
       ].join(String.fromCharCode(10)),
     );
   });
@@ -1324,6 +1342,7 @@ class FakeNavigationCodex implements CodexTurnStarter {
     | ((input: { threadId: string; turnId: string }) => Promise<void> | void)
     | undefined;
   startedCwds: string[] = [];
+  startedPermissions: Array<Record<string, unknown> | undefined> = [];
   startedTurns: Array<{ text: string; threadId: string }> = [];
   threadNames: Array<{ name: string; threadId: string }> = [];
   readonly loadedThreadIds = new Set<string>();
@@ -1428,9 +1447,10 @@ class FakeNavigationCodex implements CodexTurnStarter {
     return { name: input.name };
   }
 
-  async startThread(cwd: string) {
+  async startThread(cwd: string, permissions?: Record<string, unknown>) {
     await this.beforeStartThread?.();
     this.startedCwds.push(cwd);
+    this.startedPermissions.push(permissions);
     this.loadedThreadIds.add(this.nextStartedThreadId);
     return {
       activePermissionProfile: { id: ":workspace" },

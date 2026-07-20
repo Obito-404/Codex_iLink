@@ -14,6 +14,8 @@ export type HookEvent = {
   eventName: string;
   model: string | null;
   permissionMode: string | null;
+  requestId?: string | null;
+  requestSummary?: string | null;
   schemaVersion: 1;
   sessionId: string;
   source: string | null;
@@ -22,9 +24,16 @@ export type HookEvent = {
 };
 
 export type HookReceiverOptions = {
-  onEvent: (event: HookEvent) => Promise<void> | void;
+  onEvent: (
+    event: HookEvent,
+    signal: AbortSignal,
+  ) => Promise<HookDecision | void> | HookDecision | void;
   pipePath: string;
   spoolDirectory: string;
+};
+
+export type HookDecision = {
+  behavior: "allow" | "deny" | "passthrough";
 };
 
 const MAX_EVENT_BYTES = 16 * 1024;
@@ -34,7 +43,9 @@ export class HookReceiver {
   readonly #onEvent: HookReceiverOptions["onEvent"];
   readonly #pipePath: string;
   readonly #server: Server;
+  readonly #sockets = new Set<Socket>();
   readonly #spoolDirectory: string;
+  #closePromise: Promise<void> | undefined;
   #draining: Promise<number> | undefined;
   #started = false;
 
@@ -42,9 +53,11 @@ export class HookReceiver {
     this.#onEvent = options.onEvent;
     this.#pipePath = options.pipePath;
     this.#spoolDirectory = options.spoolDirectory;
-    this.#server = createServer({ allowHalfOpen: true }, (socket) =>
-      this.#accept(socket),
-    );
+    this.#server = createServer({ allowHalfOpen: true }, (socket) => {
+      this.#sockets.add(socket);
+      socket.once("close", () => this.#sockets.delete(socket));
+      this.#accept(socket);
+    });
   }
 
   start(): Promise<void> {
@@ -89,7 +102,7 @@ export class HookReceiver {
         }
         const event = parseHookEvent(readFileSync(path, "utf8"));
         if (event) {
-          await this.#onEvent(event);
+          await this.#onEvent(event, new AbortController().signal);
           drained += 1;
         }
         unlinkSync(path);
@@ -107,8 +120,23 @@ export class HookReceiver {
   }
 
   close(): Promise<void> {
-    if (!this.#started) return Promise.resolve();
-    return new Promise((resolveClose, rejectClose) => {
+    const wasAlreadyStopping = this.#closePromise !== undefined;
+    this.stopAccepting();
+    const closePromise = this.#closePromise;
+    if (!closePromise) return Promise.resolve();
+    if (wasAlreadyStopping) {
+      return new Promise<void>((resolve) => setImmediate(resolve)).then(() => {
+        for (const socket of this.#sockets) socket.destroy();
+        return closePromise;
+      });
+    }
+    for (const socket of this.#sockets) socket.destroy();
+    return closePromise;
+  }
+
+  stopAccepting(): void {
+    if (!this.#started || this.#closePromise) return;
+    this.#closePromise = new Promise((resolveClose, rejectClose) => {
       this.#server.close((error) => {
         if (error) rejectClose(error);
         else {
@@ -150,8 +178,20 @@ export class HookReceiver {
       return;
     }
     try {
-      await this.#onEvent(event);
-      socket.end("ok\n");
+      const disconnected = new AbortController();
+      const abort = () => disconnected.abort(new Error("E_HOOK_DISCONNECTED"));
+      socket.once("close", abort);
+      socket.once("error", abort);
+      if (event.eventName === "PermissionRequest") {
+        socket.write(`${JSON.stringify({ status: "accepted" })}\n`);
+      }
+      const decision = await this.#onEvent(event, disconnected.signal);
+      socket.off("close", abort);
+      socket.off("error", abort);
+      if (socket.destroyed) return;
+      socket.end(
+        `${JSON.stringify({ behavior: decision?.behavior ?? "passthrough" })}\n`,
+      );
     } catch {
       socket.destroy();
     }
@@ -172,6 +212,8 @@ function parseHookEvent(raw: string): HookEvent | null {
       !isNullableString(event.cwd) ||
       !isNullableString(event.model) ||
       !isNullableString(event.permissionMode) ||
+      !isOptionalNullableString(event.requestId) ||
+      !isOptionalNullableString(event.requestSummary) ||
       !isNullableString(event.toolName) ||
       !isNullableString(event.source)
     ) {
@@ -181,6 +223,10 @@ function parseHookEvent(raw: string): HookEvent | null {
   } catch {
     return null;
   }
+}
+
+function isOptionalNullableString(value: unknown): value is string | null | undefined {
+  return value === undefined || isNullableString(value);
 }
 
 function isNullableString(value: unknown): value is string | null {

@@ -16,7 +16,28 @@ async function main() {
     if (!event) return;
     const payload = `${JSON.stringify(event)}\n`;
     const pipePath = process.env.CODEX_ILINK_PIPE_PATH ?? defaultPipePath();
-    if (await sendToPipe(pipePath, payload)) return;
+    const response = await sendToPipe(
+      pipePath,
+      payload,
+      event.eventName === "PermissionRequest" ? 30 * 60 * 1_000 + 2_000 : 300,
+    );
+    if (response) {
+      if (
+        event.eventName === "PermissionRequest" &&
+        (response.behavior === "allow" || response.behavior === "deny")
+      ) {
+        process.stdout.write(
+          JSON.stringify({
+            hookSpecificOutput: {
+              decision: { behavior: response.behavior },
+              hookEventName: "PermissionRequest",
+            },
+          }),
+        );
+      }
+      return;
+    }
+    if (event.eventName === "PermissionRequest") return;
 
     spoolPayload(resolveSpoolDirectory(), payload);
   } catch {
@@ -24,25 +45,48 @@ async function main() {
   }
 }
 
-function sendToPipe(pipePath, payload) {
+function sendToPipe(pipePath, payload, timeoutMs) {
   return new Promise((resolveSend) => {
     const socket = connect(pipePath);
     let settled = false;
-    const finish = (sent) => {
+    let response = "";
+    const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       socket.destroy();
-      resolveSend(sent);
+      resolveSend(result);
     };
-    const timeout = setTimeout(() => finish(false), 300);
+    let timeout = setTimeout(() => finish(null), 300);
     socket.setEncoding("utf8");
     socket.once("connect", () => socket.write(payload));
     socket.on("data", (chunk) => {
-      if (chunk.includes("ok")) finish(true);
+      response += chunk;
+      while (response.includes("\n")) {
+        const newline = response.indexOf("\n");
+        const line = response.slice(0, newline);
+        response = response.slice(newline + 1);
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed?.status === "accepted") {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => finish(null), timeoutMs);
+            continue;
+          }
+          finish(
+            parsed?.behavior === "allow" ||
+              parsed?.behavior === "deny" ||
+              parsed?.behavior === "passthrough"
+              ? parsed
+              : null,
+          );
+        } catch {
+          finish(null);
+        }
+      }
     });
-    socket.once("error", () => finish(false));
-    socket.once("close", () => finish(false));
+    socket.once("error", () => finish(null));
+    socket.once("close", () => finish(null));
   });
 }
 

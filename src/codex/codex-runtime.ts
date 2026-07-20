@@ -11,6 +11,7 @@ import type {
   ModelListResult,
   ThreadArchiveResult,
   ThreadListResult,
+  ThreadPermissionSettings,
   ThreadReadResult,
   ThreadResumeResult,
   ThreadStartResult,
@@ -306,11 +307,15 @@ export class CodexRuntime {
     return result;
   }
 
-  async startThread(cwd: string): Promise<ThreadStartResult> {
+  async startThread(
+    cwd: string,
+    permissions: ThreadPermissionSettings = {},
+  ): Promise<ThreadStartResult> {
     const result = (await this.#requestOnceWithUnknownOutcome("thread/start", {
       cwd,
       developerInstructions: ILINK_DEVELOPER_INSTRUCTIONS,
       dynamicTools: ILINK_DYNAMIC_TOOLS,
+      ...permissions,
     })) as ThreadStartResult;
     this.#loadedThreadIds.add(result.thread.id);
     return result;

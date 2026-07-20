@@ -449,7 +449,7 @@ export async function runWindowsHost(
     power = new PowerRequestController(createPowerRequestCommand());
     let daemon: BridgeDaemon | undefined;
     hookReceiver = new HookReceiver({
-      onEvent: (event) => daemon?.ingestHookEvent(event),
+      onEvent: (event, signal) => daemon?.ingestHookEvent(event, signal),
       pipePath: paths.pipePath,
       spoolDirectory: paths.spoolDirectory,
     });

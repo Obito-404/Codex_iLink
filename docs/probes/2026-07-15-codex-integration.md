@@ -80,6 +80,8 @@ Codex `0.144.2` 和 `0.144.4` 的 `PermissionRequest` Hook 技术上支持通过
 
 微信仍可处理 Bridge 自己启动的 App Server 在线审批请求；这与 Desktop `PermissionRequest` Hook 是两条独立链路。
 
+2026-07-20 更新：生产实现已把两条在线回调统一到同一短码队列。Bridge 会先读取 Desktop 任务实际的 `approvalsReviewer`；`auto_review` 不通知微信，`user` 才允许 Hook 保持 Pipe 连接并由微信 `ok/no` 返回 `allow/deny`。PermissionRequest 不进入 Spool，连接断开后旧决定不可重放。
+
 参考：[Codex Hooks](https://learn.chatgpt.com/docs/hooks) 与 [Codex 0.144.2 PermissionRequest 输出 Schema](https://github.com/openai/codex/blob/rust-v0.144.2/codex-rs/hooks/schema/generated/permission-request.command.output.schema.json)。
 
 ## Desktop 可见性补充验证
@@ -103,7 +105,7 @@ status=idle
 
 ## 超时边界
 
-当前 Hook manifest 的 `timeout` 为 5 秒，仅用于容纳 PowerShell 冷启动并验证集成链路，不是生产延迟目标。生产设计要求 Named Pipe 与失败回退 Spool 的合计等待不超过 500ms，全部失败时仍需 fail-open。进入生产实现时必须按 500ms 预算重新实现和压测，不能把探针的 5 秒配置沿用到正式插件。
+当时探针 Hook manifest 的 `timeout` 为 5 秒，仅用于容纳 PowerShell 冷启动并验证集成链路，不是生产延迟目标。普通生命周期通知要求 Named Pipe 与失败回退 Spool 的合计等待不超过 500ms，全部失败时仍需 fail-open；2026-07-20 增加的在线 `PermissionRequest` 是例外，其 manifest 超时覆盖 30 分钟人工审批窗口。
 
 ## 探针客户端审查
 

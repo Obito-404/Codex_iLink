@@ -73,6 +73,7 @@ import {
   type InboundMediaResolution,
 } from "../media/inbound-media.ts";
 import { CodexOutcomeUnknownError } from "../codex/protocol.ts";
+import type { DefaultThreadPermissionSettings } from "../domain/user-settings.ts";
 import type { SendTypingInput } from "../ilink/ilink-client.ts";
 
 export type ILinkSender = OutboxILinkSender & {
@@ -170,7 +171,10 @@ export type CodexTurnStarter = {
     name: string;
     threadId: string;
   }): Promise<Record<string, unknown>>;
-  startThread?(cwd: string): Promise<Record<string, unknown> & {
+  startThread?(
+    cwd: string,
+    permissions?: DefaultThreadPermissionSettings,
+  ): Promise<Record<string, unknown> & {
     thread: { id: string } & Record<string, unknown>;
   }>;
   updateThreadModelSettings?(
@@ -654,6 +658,61 @@ export class BridgeEngine {
       }
     }
     return true;
+  }
+
+  async requestDesktopApproval(input: {
+    requestId: string;
+    signal: AbortSignal;
+    summary: string;
+    threadId: string;
+    toolName: string | null;
+    turnId: string;
+  }): Promise<"allow" | "deny" | "passthrough"> {
+    if (this.#closing) return "deny";
+    const approvals = this.#approvals;
+    if (!approvals || input.signal.aborted) return "passthrough";
+
+    let settled = false;
+    let resolveDecision!: (decision: "allow" | "deny" | "passthrough") => void;
+    const decision = new Promise<"allow" | "deny" | "passthrough">(
+      (resolve) => {
+        resolveDecision = resolve;
+      },
+    );
+    const finish = (behavior: "allow" | "deny" | "passthrough"): boolean => {
+      if (settled) return false;
+      settled = true;
+      resolveDecision(behavior);
+      return true;
+    };
+    const abort = () => {
+      approvals.expire();
+      finish("passthrough");
+    };
+    input.signal.addEventListener("abort", abort, { once: true });
+
+    const method =
+      input.toolName === "apply_patch"
+        ? "item/fileChange/requestApproval"
+        : "item/commandExecution/requestApproval";
+    const ingested = await approvals.ingestCallback({
+      isLive: () => !settled && !input.signal.aborted,
+      method,
+      params: {
+        command: input.summary,
+        itemId: input.requestId,
+        threadId: input.threadId,
+        turnId: input.turnId,
+      },
+      respond: (approved) => finish(approved ? "allow" : "deny"),
+    });
+    if (!ingested) finish("passthrough");
+
+    try {
+      return await decision;
+    } finally {
+      input.signal.removeEventListener("abort", abort);
+    }
   }
 
   async #handleSendFileCall(event: CodexEvent): Promise<boolean> {
@@ -1661,7 +1720,10 @@ export class BridgeEngine {
       throw new Error("new session is not configured");
     }
     const cwd = projectPath ?? this.#inboxDirectory;
-    const started = await this.#codex.startThread(cwd);
+    const started = await this.#codex.startThread(
+      cwd,
+      this.#state.getDefaultThreadPermissionSettings(),
+    );
     const threadId = stringField(started.thread, "id");
     if (!threadId) throw new Error("Codex did not return a thread id");
     const nowMs = this.#now();
@@ -1966,7 +2028,7 @@ export class BridgeEngine {
         "；审批人：" +
         approvalsReviewerText(current),
       "Sandbox：" + sandboxTypeText(current),
-      "权限只能在 Codex Desktop 中修改；iLink 仅实时读取当前任务设置。",
+      "当前任务权限只能在 Codex Desktop 中修改；新任务默认值可用 ilink config 设置。",
     ].join("\n");
   }
 
@@ -1974,7 +2036,10 @@ export class BridgeEngine {
     if (!this.#codex?.startThread || !this.#inboxDirectory) {
       throw new Error("main session replacement is not configured");
     }
-    const started = await this.#codex.startThread(this.#inboxDirectory);
+    const started = await this.#codex.startThread(
+      this.#inboxDirectory,
+      this.#state.getDefaultThreadPermissionSettings(),
+    );
     const threadId = stringField(started.thread, "id");
     if (!threadId) throw new Error("Codex did not return a thread id");
     try {

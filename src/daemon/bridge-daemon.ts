@@ -20,7 +20,8 @@ import {
   isFinalDesktopNotificationPart,
   parseDesktopNotificationClientId,
 } from "../bridge/desktop-notification-identity.ts";
-import type { HookEvent } from "../hooks/hook-receiver.ts";
+import type { HookDecision, HookEvent } from "../hooks/hook-receiver.ts";
+import type { DefaultThreadPermissionSettings } from "../domain/user-settings.ts";
 import type {
   GetUpdatesResult,
   ILinkSession,
@@ -43,9 +44,14 @@ export type DaemonCodexPort = CodexTurnStarter & {
     includeTurns: boolean;
     threadId: string;
   }): Promise<{ thread: Record<string, unknown> }>;
-  resumeThread(threadId: string): Promise<{ thread: { id: string } }>;
+  resumeThread(
+    threadId: string,
+  ): Promise<Record<string, unknown> & { thread: { id: string } }>;
   setThreadName(input: { name: string; threadId: string }): Promise<unknown>;
-  startThread(cwd: string): Promise<{ thread: { id: string } }>;
+  startThread(
+    cwd: string,
+    permissions?: DefaultThreadPermissionSettings,
+  ): Promise<{ thread: { id: string } }>;
 };
 
 export type DaemonILinkPort = ILinkSender & {
@@ -63,6 +69,7 @@ export type HookReceiverPort = {
   close(): Promise<void>;
   drainSpool(): Promise<number>;
   start(): Promise<void>;
+  stopAccepting?(): Promise<void> | void;
 };
 
 export type ActiveTaskCounterPort = {
@@ -149,6 +156,7 @@ export class BridgeDaemon {
     if (!mainThreadId) {
       const started = await this.#options.codex.startThread(
         this.#options.inboxDirectory,
+        this.#options.state.getDefaultThreadPermissionSettings(),
       );
       mainThreadId = started.thread.id;
       await this.#options.codex.setThreadName({
@@ -286,7 +294,10 @@ export class BridgeDaemon {
     }
   }
 
-  async ingestHookEvent(event: HookEvent): Promise<void> {
+  async ingestHookEvent(
+    event: HookEvent,
+    signal = new AbortController().signal,
+  ): Promise<HookDecision | void> {
     if (event.eventName === "UserPromptSubmit") {
       if (!event.turnId || event.source !== "codex-ilink-guard") return;
       const lease = this.#options.leases.getLease(event.sessionId);
@@ -305,16 +316,48 @@ export class BridgeDaemon {
       return;
     }
     if (event.eventName === "PermissionRequest") {
+      const bridge = this.#bridge;
       const lease = this.#options.leases.getLease(event.sessionId);
       if (
         event.turnId &&
         (this.#options.state.getDispatchIntentByTurnId(event.turnId) ||
           (lease?.owner === "bridge" && lease.turnId === event.turnId))
       ) {
-        return;
+        return { behavior: "passthrough" };
       }
-      await this.#notifyDesktopPermission(event);
-      return;
+      if (!event.turnId || !event.requestId || !bridge) {
+        return { behavior: "passthrough" };
+      }
+      if (
+        !this.#options.state.getILinkState(this.#options.session.botId)
+          ?.contextToken
+      ) {
+        return { behavior: "passthrough" };
+      }
+      let permissions: Record<string, unknown>;
+      try {
+        permissions = await this.#options.codex.resumeThread(event.sessionId);
+      } catch {
+        return { behavior: "passthrough" };
+      }
+      if (
+        permissions.approvalsReviewer !== "user" ||
+        permissions.approvalPolicy === "never"
+      ) {
+        return { behavior: "passthrough" };
+      }
+      const behavior = await bridge.requestDesktopApproval({
+        requestId: event.requestId,
+        signal,
+        summary:
+          event.requestSummary ??
+          event.toolName ??
+          "Codex Desktop permission request",
+        threadId: event.sessionId,
+        toolName: event.toolName,
+        turnId: event.turnId,
+      });
+      return { behavior };
     }
     if (event.eventName !== "Stop" || !event.turnId) return;
     if (this.#options.state.getDispatchIntentByTurnId(event.turnId)) return;
@@ -356,7 +399,7 @@ export class BridgeDaemon {
       }
     };
 
-    await attempt(() => this.#options.hookReceiver.close());
+    await attempt(() => this.#options.hookReceiver.stopAccepting?.());
     const unsubscribe = this.#unsubscribe;
     this.#unsubscribe = undefined;
     await attempt(() => unsubscribe?.());
@@ -377,6 +420,7 @@ export class BridgeDaemon {
     }
     if (!bridgeClosed) await attempt(() => this.#bridge?.close());
     if (!codexClosed) await attempt(() => this.#options.codex.close());
+    await attempt(() => this.#options.hookReceiver.close());
     await attempt(() => this.#notifyILinkLifecycle("notifyStop"));
     await attempt(() =>
       this.#options.state.disableArbitration(this.#options.bridgeInstanceId),
@@ -587,13 +631,6 @@ export class BridgeDaemon {
         // Keep the durable candidate for the next poll.
       }
     }
-  }
-
-  async #notifyDesktopPermission(event: HookEvent): Promise<void> {
-    const notifier = this.#desktopNotifier;
-    if (!notifier) return;
-    const result = await notifier.notifyPermission(event);
-    if (result !== "present") void this.#outbox?.drain().catch(() => undefined);
   }
 
   async #syncActiveTaskCount(): Promise<void> {

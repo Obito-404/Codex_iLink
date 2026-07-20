@@ -8,10 +8,17 @@ import { outboundMediaPathKey } from "../media/outbound-media.ts";
 import {
   AWAY_TIMEOUT_MINUTES_RANGE,
   DEFAULT_AWAY_TIMEOUT_MINUTES,
+  DEFAULT_APPROVAL_POLICY,
+  DEFAULT_APPROVALS_REVIEWER,
+  DEFAULT_PERMISSION_PROFILE,
   DEFAULT_SESSION_TIMEOUT_MINUTES,
   isInMinuteRange,
   SESSION_TIMEOUT_MINUTES_RANGE,
   type UserTimingSettings,
+  type DefaultApprovalPolicy,
+  type DefaultApprovalsReviewer,
+  type DefaultPermissionProfile,
+  type DefaultThreadPermissionSettings,
 } from "../domain/user-settings.ts";
 
 export type Controller = {
@@ -1814,6 +1821,55 @@ export class SqliteState {
     };
   }
 
+  getDefaultThreadPermissionSettings(): DefaultThreadPermissionSettings {
+    const row = this.#database
+      .prepare(
+        `SELECT default_permission_profile, default_approval_policy,
+                default_approvals_reviewer
+         FROM bridge_settings WHERE singleton = 1`,
+      )
+      .get() as
+      | {
+          default_approval_policy: DefaultThreadPermissionSettings["approvalPolicy"];
+          default_approvals_reviewer: DefaultThreadPermissionSettings["approvalsReviewer"];
+          default_permission_profile: DefaultThreadPermissionSettings["permissions"];
+        }
+      | undefined;
+    if (!row) throw new Error("bridge settings are missing");
+    return {
+      approvalPolicy: row.default_approval_policy,
+      approvalsReviewer: row.default_approvals_reviewer,
+      permissions: row.default_permission_profile,
+    };
+  }
+
+  setDefaultPermissionProfile(profile: DefaultPermissionProfile): void {
+    this.#database
+      .prepare(
+        `UPDATE bridge_settings SET default_permission_profile = ?
+         WHERE singleton = 1`,
+      )
+      .run(profile);
+  }
+
+  setDefaultApprovalPolicy(policy: DefaultApprovalPolicy): void {
+    this.#database
+      .prepare(
+        `UPDATE bridge_settings SET default_approval_policy = ?
+         WHERE singleton = 1`,
+      )
+      .run(policy);
+  }
+
+  setDefaultApprovalsReviewer(reviewer: DefaultApprovalsReviewer): void {
+    this.#database
+      .prepare(
+        `UPDATE bridge_settings SET default_approvals_reviewer = ?
+         WHERE singleton = 1`,
+      )
+      .run(reviewer);
+  }
+
   setSessionTimeoutMinutes(minutes: number, nowMs = Date.now()): void {
     if (!isInMinuteRange(minutes, SESSION_TIMEOUT_MINUTES_RANGE)) {
       throw new Error("session timeout is outside the supported range");
@@ -1856,6 +1912,33 @@ export class SqliteState {
            WHERE singleton = 1`,
         )
         .run(DEFAULT_SESSION_TIMEOUT_MINUTES, DEFAULT_AWAY_TIMEOUT_MINUTES);
+      this.#database
+        .prepare(
+          `UPDATE bindings
+           SET expires_at_ms = updated_at_ms + ?, expiry_notified_at_ms = NULL
+           WHERE singleton = 1 AND expires_at_ms > ?`,
+        )
+        .run(DEFAULT_SESSION_TIMEOUT_MINUTES * 60 * 1_000, nowMs);
+    });
+  }
+
+  resetUserSettings(nowMs = Date.now()): void {
+    this.#transaction(() => {
+      this.#database
+        .prepare(
+          `UPDATE bridge_settings
+           SET session_timeout_minutes = ?, away_timeout_minutes = ?,
+               default_permission_profile = ?, default_approval_policy = ?,
+               default_approvals_reviewer = ?
+           WHERE singleton = 1`,
+        )
+        .run(
+          DEFAULT_SESSION_TIMEOUT_MINUTES,
+          DEFAULT_AWAY_TIMEOUT_MINUTES,
+          DEFAULT_PERMISSION_PROFILE,
+          DEFAULT_APPROVAL_POLICY,
+          DEFAULT_APPROVALS_REVIEWER,
+        );
       this.#database
         .prepare(
           `UPDATE bindings
@@ -2202,6 +2285,7 @@ export class SqliteState {
       "./migrations/012-outbound-attachment-provenance.sql",
       "./migrations/013-transport-retention-indexes.sql",
       "./migrations/014-drop-thread-permission-profiles.sql",
+      "./migrations/015-default-thread-permissions.sql",
     ];
     const observed = this.#database.prepare("PRAGMA user_version").get() as
       | { user_version: number }

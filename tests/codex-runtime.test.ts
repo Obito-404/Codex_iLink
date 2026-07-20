@@ -849,6 +849,28 @@ test("existing threads inherit settings and new threads override only cwd", asyn
   }
 });
 
+test("new threads receive explicit iLink permission defaults", async () => {
+  const runtime = await CodexRuntime.create({
+    bridgeInstanceId: "bridge-instance-thread-permissions",
+    command: [process.execPath, fakeRuntime],
+  });
+
+  try {
+    const started = await runtime.startThread("D:\\Configured Project", {
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+      permissions: ":workspace",
+    });
+
+    const params = started.fixtureParams as Record<string, unknown>;
+    assert.equal(params.approvalPolicy, "on-request");
+    assert.equal(params.approvalsReviewer, "auto_review");
+    assert.equal(params.permissions, ":workspace");
+  } finally {
+    runtime.close();
+  }
+});
+
 test("iLink threads never use Markdown as a file-send fallback", async () => {
   const runtime = await CodexRuntime.create({
     bridgeInstanceId: "bridge-instance-file-tool",

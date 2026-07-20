@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受，完全取代 [ADR 0013](./0013-wechat-selects-native-permission-profiles.md) 与 [ADR 0014](./0014-permission-modes-bind-profile-and-approval-policy.md)。
+已接受，完全取代 [ADR 0013](./0013-wechat-selects-native-permission-profiles.md) 与 [ADR 0014](./0014-permission-modes-bind-profile-and-approval-policy.md)；其中“新任务不提交权限默认值”和“Desktop 只能本机审批”已由 [ADR 0016](./0016-new-task-permission-defaults-and-live-desktop-approval.md) 取代。
 
 ## 背景
 

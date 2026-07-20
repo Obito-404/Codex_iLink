@@ -30,6 +30,12 @@ export type ThreadListResult = JsonObject & {
   nextCursor: string | null;
 };
 
+export type ThreadPermissionSettings = {
+  approvalPolicy?: "never" | "on-request";
+  approvalsReviewer?: "auto_review" | "user";
+  permissions?: ":danger-full-access" | ":read-only" | ":workspace";
+};
+
 export type ModelSummary = JsonObject & {
   defaultReasoningEffort: string;
   displayName: string;

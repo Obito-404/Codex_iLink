@@ -41,12 +41,16 @@ test("daemon creates one persistent main thread and polls iLink", async () => {
   const leases = new RetryOnceTurnLeaseStore(databasePath);
   const sent: string[] = [];
   let starts = 0;
+  let startedPermissions: Record<string, unknown> | undefined;
   const resumed: string[] = [];
   let receiverStarted = 0;
   let spoolDrains = 0;
   let desktopTurnTerminal = false;
   let desktopQueuedStarted = 0;
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  state.setDefaultPermissionProfile(":read-only");
+  state.setDefaultApprovalPolicy("never");
+  state.setDefaultApprovalsReviewer("user");
 
   const runtime = {
     close() {},
@@ -71,8 +75,9 @@ test("daemon creates one persistent main thread and polls iLink", async () => {
     async setThreadName() {
       return {};
     },
-    async startThread(inputCwd: string) {
+    async startThread(inputCwd: string, permissions?: Record<string, unknown>) {
       starts += 1;
+      startedPermissions = permissions;
       assert.equal(inputCwd, join(directory, "Inbox"));
       return { thread: { id: "thread-main" } };
     },
@@ -136,6 +141,11 @@ test("daemon creates one persistent main thread and polls iLink", async () => {
     assert.equal(receiverStarted, 1);
     assert.equal(spoolDrains, 1);
     assert.equal(starts, 1);
+    assert.deepEqual(startedPermissions, {
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      permissions: ":read-only",
+    });
     assert.equal(state.getBridgeSettings().mainThreadId, "thread-main");
     assert.deepEqual(state.getBridgeRuntime(), {
       arbitrationEnabled: true,
@@ -1466,17 +1476,23 @@ test("daemon startup cancels a completion followed by input and sends the unseen
   }
 });
 
-test("an away Desktop permission Hook is delivered durably without a reply route", async () => {
+test("Desktop user approval is actionable in WeChat while auto_review stays silent", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-permission-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
   const sent: Array<{ clientId: string; text: string }> = [];
-  let presence: "away" | "present" = "away";
-  let releaseDelivery!: () => void;
-  const deliveryGate = new Promise<void>((resolveDelivery) => {
-    releaseDelivery = resolveDelivery;
+  let blockResume = false;
+  let releaseResume!: () => void;
+  let resumeStarted!: () => void;
+  const resumeGate = new Promise<void>((resolve) => {
+    releaseResume = resolve;
   });
+  const resumeObserved = new Promise<void>((resolve) => {
+    resumeStarted = resolve;
+  });
+  let reviewer: "auto_review" | "user" = "user";
+  let updates: "approve" | "timeout" = "timeout";
   state.setMainThreadId("thread-main");
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
   state.acceptInboundBatch({
@@ -1499,11 +1515,23 @@ test("an away Desktop permission Hook is delivered durably without a reply route
     bridgeInstanceId: "bridge-instance",
     codex: {
       close() {},
+      isServerRequestLive() { return true; },
       onEvent() { return () => undefined; },
       async readThread() {
         return { thread: { cwd: "D:\\Project", name: "审批中的任务" } };
       },
-      async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
+      async resumeThread(threadId: string) {
+        if (blockResume) {
+          resumeStarted();
+          await resumeGate;
+        }
+        return {
+          approvalPolicy: "on-request",
+          approvalsReviewer: reviewer,
+          thread: { id: threadId },
+        };
+      },
+      respondToServerRequest() { return true; },
       async setThreadName() { return {}; },
       async startThread() { assert.fail("main thread already exists"); },
       async startTurn() { assert.fail("no inbound messages"); },
@@ -1513,11 +1541,25 @@ test("an away Desktop permission Hook is delivered durably without a reply route
     },
     ilink: {
       async getUpdates() {
-        return { cursor: "cursor-permission", kind: "timeout" as const };
+        if (updates === "timeout") {
+          return { cursor: "cursor-permission", kind: "timeout" as const };
+        }
+        updates = "timeout";
+        return {
+          cursor: "cursor-approved",
+          kind: "updates" as const,
+          messages: [
+            {
+              context_token: "ctx-permission",
+              from_user_id: "controller-a",
+              item_list: [{ text_item: { text: "ok" }, type: 1 }],
+              message_id: 2,
+            },
+          ],
+        };
       },
       async sendText(input) {
         sent.push(input);
-        await deliveryGate;
         return { accepted: true as const, clientId: input.clientId };
       },
     },
@@ -1525,64 +1567,73 @@ test("an away Desktop permission Hook is delivered durably without a reply route
     leases,
     newId: () => "unused",
     now: () => 40_000,
-    presence: async () => presence,
     session,
     state,
   });
 
   try {
     await daemon.start();
-    const persisted = daemon.ingestHookEvent({
+    const approval = daemon.ingestHookEvent({
       ...desktopStopEvent(),
       capturedAtMs: 40_000,
       eventName: "PermissionRequest",
-      toolName: "shell_command",
+      requestId: "desktop-request-1",
+      requestSummary: "shutdown /s /t 0",
+      toolName: "Bash",
     });
-    assert.ok(persisted instanceof Promise);
-    await persisted;
-    assert.equal(state.listPendingOutbox().length, 1);
-    releaseDelivery();
     await waitFor(() => sent.length === 1);
-    await waitFor(
-      () => state.getOutbox(sent[0]?.clientId ?? "")?.status === "confirmed",
-    );
-    assert.match(sent[0]?.text ?? "", /等待本机批准[\s\S]*微信不能批准/u);
-    assert.equal(state.getOutbox(sent[0]?.clientId ?? "")?.status, "confirmed");
-    assert.deepEqual(state.listLiveNotificationRoutes(40_001), []);
+    assert.match(sent[0]?.text ?? "", /需要批准[\s\S]*shutdown \/s \/t 0/u);
+    assert.doesNotMatch(sent[0]?.text ?? "", /微信不能批准|回到电脑/u);
 
-    assert.equal(
-      leases.tryAcquire({
-        createdAtMs: 40_001,
-        instanceId: "bridge-instance",
-        operationId: "bridge-operation",
-        owner: "bridge",
-        threadId: "thread-bridge",
-        turnId: "turn-bridge",
-      }).acquired,
-      true,
-    );
-    daemon.ingestHookEvent({
+    updates = "approve";
+    await daemon.pollOnce();
+    assert.deepEqual(await approval, { behavior: "allow" });
+
+    reviewer = "auto_review";
+    assert.deepEqual(await daemon.ingestHookEvent({
       ...desktopStopEvent(),
       capturedAtMs: 40_001,
       eventName: "PermissionRequest",
-      sessionId: "thread-bridge",
-      toolName: "shell_command",
-      turnId: "turn-bridge",
-    });
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
-    assert.equal(sent.length, 1, "a Bridge permission Hook must not look like Desktop");
-
-    presence = "present";
-    daemon.ingestHookEvent({
-      ...desktopStopEvent(),
-      capturedAtMs: 40_001,
-      eventName: "PermissionRequest",
+      requestId: "desktop-request-2",
+      requestSummary: "npm test",
       toolName: "apply_patch",
-    });
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    }), { behavior: "passthrough" });
     assert.equal(sent.length, 1);
-    assert.deepEqual(state.listPendingOutbox(), []);
+
+    reviewer = "user";
+    assert.deepEqual(await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      capturedAtMs: 40_002,
+      eventName: "PermissionRequest",
+      requestSummary: "missing official request id",
+      toolName: "Bash",
+    }), { behavior: "passthrough" });
+    assert.equal(sent.length, 1);
+
+    const shutdownApproval = daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      capturedAtMs: 40_003,
+      eventName: "PermissionRequest",
+      requestId: "desktop-request-3",
+      requestSummary: "npm publish",
+      toolName: "Bash",
+    });
+    await waitFor(() => sent.length === 2);
+
+    blockResume = true;
+    const lateShutdownApproval = daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      capturedAtMs: 40_004,
+      eventName: "PermissionRequest",
+      requestId: "desktop-request-4",
+      requestSummary: "late shutdown request",
+      toolName: "Bash",
+    });
+    await resumeObserved;
     await daemon.stop();
+    assert.deepEqual(await shutdownApproval, { behavior: "deny" });
+    releaseResume();
+    assert.deepEqual(await lateShutdownApproval, { behavior: "deny" });
   } finally {
     leases.close();
     state.close();
@@ -2331,7 +2382,7 @@ test("the next real controller message retries a delivery deferred for this daem
   }
 });
 
-test("the first controller context delivers an earlier no-context Desktop notification", async () => {
+test("a Desktop approval without a WeChat reply context falls back to Desktop", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-no-context-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -2390,25 +2441,23 @@ test("the first controller context delivers an earlier no-context Desktop notifi
 
   try {
     await daemon.start();
-    daemon.ingestHookEvent({
+    assert.deepEqual(await daemon.ingestHookEvent({
       ...desktopStopEvent(),
       capturedAtMs: 49_000,
       eventName: "PermissionRequest",
+      requestId: "desktop-without-context",
+      requestSummary: "npm publish",
       toolName: "shell_command",
-    });
-    await waitFor(() => state.listPendingOutbox().length === 1);
+    }), { behavior: "passthrough" });
+    assert.deepEqual(state.listPendingOutbox(), []);
     assert.equal(sent.length, 0);
-    assert.equal(state.listPendingOutbox()[0]?.contextToken, "");
 
     await assert.rejects(
       daemon.pollOnce(),
       /reply transport failed after accepting inbound/u,
     );
-    assert.match(sent[0]?.text ?? "", /等待本机批准/u);
+    assert.ok(sent[0]?.text.includes("s<n>"));
     assert.equal(sent[0]?.contextToken, "ctx-first-controller");
-    assert.ok(sent[1]?.text.includes("s<n>"));
-    assert.equal(state.getOutbox(sent[0]?.clientId ?? "")?.status, "confirmed");
-    assert.deepEqual(state.listLiveNotificationRoutes(50_001), []);
     await daemon.stop();
   } finally {
     leases.close();
@@ -2456,6 +2505,10 @@ test("daemon announces iLink availability and closes ingress before Codex", asyn
         assert.equal(arbitrationIsEnabled(), true);
         order.push("hook.start");
       },
+      stopAccepting() {
+        assert.equal(arbitrationIsEnabled(), true);
+        order.push("hook.stopAccepting");
+      },
     },
     ilink: {
       async getUpdates() { return { cursor: "", kind: "timeout" as const }; },
@@ -2483,9 +2536,10 @@ test("daemon announces iLink availability and closes ingress before Codex", asyn
     assert.deepEqual(order, [
       "ilink.notifyStart",
       "hook.start",
-      "hook.close",
+      "hook.stopAccepting",
       "codex.unsubscribe",
       "codex.close",
+      "hook.close",
       "ilink.notifyStop",
     ]);
     assert.equal(arbitrationIsEnabled(), false);
@@ -2594,9 +2648,9 @@ test("daemon finishes shutdown and disables arbitration after a cleanup failure"
     await daemon.start();
     await assert.rejects(daemon.stop(), /E_DAEMON_STOP/u);
     assert.deepEqual(order, [
-      "hook.close",
       "codex.unsubscribe",
       "codex.close",
+      "hook.close",
       "ilink.notifyStop",
     ]);
     assert.equal(state.getBridgeRuntime()?.arbitrationEnabled, false);

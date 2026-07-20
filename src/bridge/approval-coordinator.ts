@@ -1,4 +1,4 @@
-import { randomBytes, randomInt } from "node:crypto";
+import { createHash, randomBytes, randomInt } from "node:crypto";
 
 import type { CodexEvent } from "./bridge.ts";
 
@@ -42,8 +42,20 @@ type ApprovalMethod =
   | "item/fileChange/requestApproval"
   | "item/permissions/requestApproval";
 
+export type LiveApprovalCallbackInput = {
+  isLive: () => boolean;
+  method: ApprovalMethod;
+  params: Record<string, unknown>;
+  respond: (approved: boolean) => boolean | void;
+};
+
+type ApprovalCallback = Pick<
+  LiveApprovalCallbackInput,
+  "isLive" | "respond"
+>;
+
 type LiveApproval = PendingApproval & {
-  id: number | string;
+  callbacks: ApprovalCallback[];
   notificationText: string;
   params: Record<string, unknown>;
   timer: NodeJS.Timeout;
@@ -58,7 +70,7 @@ const APPROVAL_METHODS = new Set<ApprovalMethod>([
 ]);
 
 /**
- * Holds only live App Server callbacks. Deliberately nothing here is durable:
+ * Holds only live App Server or Desktop Hook callbacks. Nothing here is durable:
  * after a restart there is no safe callback to which an old approval can be
  * replayed, so close() declines every still-live request.
  */
@@ -92,27 +104,59 @@ export class ApprovalCoordinator {
 
   async ingest(event: CodexEvent & { id?: number | string }): Promise<boolean> {
     if (!isApprovalMethod(event.method) || event.id === undefined) return false;
-    const threadId = stringField(event.params, "threadId");
-    const turnId = stringField(event.params, "turnId");
-    const itemId = stringField(event.params, "itemId");
+    const id = event.id;
+    const method = event.method;
+    return this.ingestCallback({
+      isLive: () => this.#isLive(id),
+      method,
+      params: event.params,
+      respond: (approved) =>
+        this.#respond(
+          id,
+          approved
+            ? approvalResult(method, event.params)
+            : denialResult(method),
+        ),
+    });
+  }
+
+  async ingestCallback(input: LiveApprovalCallbackInput): Promise<boolean> {
+    const { method, params } = input;
+    const threadId = stringField(params, "threadId");
+    const turnId = stringField(params, "turnId");
+    const itemId = stringField(params, "itemId");
     if (!threadId || !turnId || !itemId) return false;
-    if (!this.#isLive(event.id)) return true;
+    if (!input.isLive()) return true;
 
     this.expire();
+    const existing = [...this.#live.values()].find(
+      (approval) =>
+        approval.method === method &&
+        approval.threadId === threadId &&
+        approval.turnId === turnId &&
+        stringField(approval.params, "itemId") === itemId,
+    );
+    if (existing) {
+      existing.callbacks.push({
+        isLive: input.isLive,
+        respond: input.respond,
+      });
+      return true;
+    }
     const code = this.#newCode();
     const timer = setTimeout(() => this.#expireCode(code), this.#timeoutMs);
     timer.unref();
     const approval: LiveApproval = {
       code,
+      callbacks: [{ isLive: input.isLive, respond: input.respond }],
       deliveryAttempts: 0,
       deliveryStatus: "pending",
       expiresAtMs: this.#now() + this.#timeoutMs,
-      id: event.id,
-      method: event.method,
+      method,
       notificationText: "",
-      params: event.params,
+      params,
       reminderCount: 0,
-      summary: approvalSummary(event.method, event.params),
+      summary: approvalSummary(method, params),
       timer,
       threadId,
       turnId,
@@ -124,7 +168,7 @@ export class ApprovalCoordinator {
     this.#live.set(code, approval);
     await this.#deliver(code);
     this.#scheduleReminders(code);
-    if (!this.#isLive(event.id) && this.#live.get(code) === approval) {
+    if (!this.#approvalIsLive(approval) && this.#live.get(code) === approval) {
       this.#live.delete(code);
       clearTimeout(timer);
       this.#emitExpired(approval, "request-lost");
@@ -145,12 +189,7 @@ export class ApprovalCoordinator {
     if (!approval) return { code: normalizedCode, kind: "not-found" };
     this.#live.delete(normalizedCode);
     clearTimeout(approval.timer);
-    const responded = this.#respond(
-      approval.id,
-      approved
-        ? approvalResult(approval.method, approval.params)
-        : denialResult(approval.method),
-    );
+    const responded = this.#respondToApproval(approval, approved);
     return responded === false
       ? { code: normalizedCode, kind: "not-found" }
       : { code: normalizedCode, kind: "decided" };
@@ -159,7 +198,7 @@ export class ApprovalCoordinator {
   expire(nowMs = this.#now()): number {
     let expired = 0;
     for (const [code, approval] of this.#live) {
-      if (!this.#isLive(approval.id)) {
+      if (!this.#approvalIsLive(approval)) {
         this.#live.delete(code);
         clearTimeout(approval.timer);
         this.#emitExpired(approval, "request-lost");
@@ -169,7 +208,7 @@ export class ApprovalCoordinator {
       if (approval.expiresAtMs > nowMs) continue;
       this.#live.delete(code);
       clearTimeout(approval.timer);
-      this.#respond(approval.id, denialResult(approval.method));
+      this.#respondToApproval(approval, false);
       this.#emitExpired(approval, "timeout");
       expired += 1;
     }
@@ -181,7 +220,7 @@ export class ApprovalCoordinator {
     return [...this.#live.values()]
       .map(
         ({
-          id: _id,
+          callbacks: _callbacks,
           notificationText: _notificationText,
           params: _params,
           timer: _timer,
@@ -193,8 +232,8 @@ export class ApprovalCoordinator {
   close(): void {
     for (const approval of this.#live.values()) {
       clearTimeout(approval.timer);
-      if (this.#isLive(approval.id)) {
-        this.#respond(approval.id, denialResult(approval.method));
+      if (this.#approvalIsLive(approval)) {
+        this.#respondToApproval(approval, false);
       }
       this.#emitExpired(approval, "request-lost");
     }
@@ -206,9 +245,9 @@ export class ApprovalCoordinator {
     if (!approval) return;
     this.#live.delete(code);
     clearTimeout(approval.timer);
-    const live = this.#isLive(approval.id);
+    const live = this.#approvalIsLive(approval);
     if (live) {
-      this.#respond(approval.id, denialResult(approval.method));
+      this.#respondToApproval(approval, false);
     }
     this.#emitExpired(approval, live ? "timeout" : "request-lost");
   }
@@ -216,7 +255,7 @@ export class ApprovalCoordinator {
   async #deliver(code: string): Promise<void> {
     const approval = this.#live.get(code);
     if (!approval) return;
-    if (!this.#isLive(approval.id)) {
+    if (!this.#approvalIsLive(approval)) {
       this.#live.delete(code);
       clearTimeout(approval.timer);
       this.#emitExpired(approval, "request-lost");
@@ -231,7 +270,7 @@ export class ApprovalCoordinator {
     try {
       await this.#notify(
         approval.notificationText,
-        `codex-ilink:approval:${approval.turnId}:${stringField(approval.params, "itemId") ?? "unknown"}`,
+        approvalClientId(approval),
       );
       if (this.#live.get(code) === approval) {
         approval.deliveryStatus = "delivered";
@@ -240,7 +279,7 @@ export class ApprovalCoordinator {
       if (this.#live.get(code) !== approval) {
         return;
       }
-      if (!this.#isLive(approval.id)) {
+      if (!this.#approvalIsLive(approval)) {
         this.#live.delete(code);
         clearTimeout(approval.timer);
         this.#emitExpired(approval, "request-lost");
@@ -272,16 +311,15 @@ export class ApprovalCoordinator {
     attempt = 1,
   ): Promise<void> {
     const approval = this.#live.get(code);
-    if (!approval || !this.#isLive(approval.id)) return;
+    if (!approval || !this.#approvalIsLive(approval)) return;
     if (approval.expiresAtMs <= this.#now()) {
       this.#expireCode(code);
       return;
     }
-    const itemId = stringField(approval.params, "itemId") ?? "unknown";
     try {
       await this.#notify(
         approvalReminder(approval, this.#live.size > 1),
-        `codex-ilink:approval:${approval.turnId}:${itemId}:reminder:${String(reminderNumber)}`,
+        `${approvalClientId(approval)}:reminder:${String(reminderNumber)}`,
       );
       if (this.#live.get(code) === approval) {
         approval.reminderCount = Math.max(
@@ -290,7 +328,7 @@ export class ApprovalCoordinator {
         );
       }
     } catch {
-      if (this.#live.get(code) !== approval || !this.#isLive(approval.id)) {
+      if (this.#live.get(code) !== approval || !this.#approvalIsLive(approval)) {
         return;
       }
       const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(attempt - 1, 5));
@@ -309,6 +347,19 @@ export class ApprovalCoordinator {
       this.#usedCodes.add(code);
       return code;
     }
+  }
+
+  #approvalIsLive(approval: LiveApproval): boolean {
+    return approval.callbacks.some((callback) => callback.isLive());
+  }
+
+  #respondToApproval(approval: LiveApproval, approved: boolean): boolean {
+    let responded = false;
+    for (const callback of approval.callbacks) {
+      if (!callback.isLive()) continue;
+      if (callback.respond(approved) !== false) responded = true;
+    }
+    return responded;
   }
 
   #emitExpired(
@@ -361,10 +412,13 @@ function approvalSummary(
   method: ApprovalMethod,
   params: Record<string, unknown>,
 ): string {
+  const details = [
+    stringField(params, "reason"),
+    stringField(params, "command"),
+    stringField(params, "cwd"),
+  ].filter((value): value is string => Boolean(value));
   const reason = truncate(
-    stringField(params, "reason") ??
-      stringField(params, "command") ??
-      stringField(params, "cwd") ??
+    [...new Set(details)].join(" | ") ||
       "Codex requests additional permission",
   );
   const label =
@@ -416,6 +470,21 @@ function approvalReminder(
         `回复：ok${approval.code} 或 no${approval.code}`,
       ].join("\n")
     : ["⏳ 仍在等待审批", approval.summary, "回复：ok 或 no"].join("\n");
+}
+
+function approvalClientId(approval: LiveApproval): string {
+  const itemId = stringField(approval.params, "itemId") ?? "unknown";
+  const identity = [
+    approval.method,
+    approval.threadId,
+    approval.turnId,
+    itemId,
+  ].join("\0");
+  const suffix = createHash("sha256")
+    .update(identity)
+    .digest("hex")
+    .slice(0, 24);
+  return `codex-ilink:approval:${suffix}`;
 }
 
 function retrySleep(milliseconds: number): Promise<void> {

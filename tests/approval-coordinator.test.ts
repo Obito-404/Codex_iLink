@@ -41,6 +41,36 @@ test("one live approval uses bare ok or no and is answered once", async () => {
   });
 });
 
+test("a live Desktop Hook approval uses the same ok/no decision queue", async () => {
+  const decisions: boolean[] = [];
+  const approvals = new ApprovalCoordinator({
+    async notify() {},
+    now: () => 1_250,
+    respond() {},
+  });
+
+  assert.equal(
+    await approvals.ingestCallback({
+      isLive: () => true,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        command: "shutdown /s /t 0",
+        itemId: "desktop-request-1",
+        threadId: "desktop-thread",
+        turnId: "desktop-turn",
+      },
+      respond: (approved) => {
+        decisions.push(approved);
+      },
+    }),
+    true,
+  );
+
+  assert.match(approvals.list()[0]?.summary ?? "", /shutdown \/s \/t 0/u);
+  assert.deepEqual(approvals.decide(null, true).kind, "decided");
+  assert.deepEqual(decisions, [true]);
+});
+
 test("multiple approvals require their immutable short codes", async () => {
   const sent: string[] = [];
   const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
@@ -96,6 +126,122 @@ test("multiple approvals require their immutable short codes", async () => {
     kind: "decided",
   });
   assert.deepEqual(responses, [{ id: 52, result: { decision: "decline" } }]);
+});
+
+test("approval summaries preserve both the reason and concrete command", async () => {
+  const approvals = new ApprovalCoordinator({
+    async notify() {},
+    now: () => 1_600,
+    respond() {},
+  });
+
+  await approvals.ingest({
+    id: 53,
+    method: "item/commandExecution/requestApproval",
+    params: {
+      command: "shutdown /s /t 0",
+      itemId: "item-shutdown",
+      reason: "是否允许我立即关闭这台电脑？",
+      threadId: "thread-shutdown",
+      turnId: "turn-shutdown",
+    },
+  });
+
+  assert.match(
+    approvals.list()[0]?.summary ?? "",
+    /是否允许我立即关闭这台电脑？[\s\S]*shutdown \/s \/t 0/u,
+  );
+});
+
+test("replayed approval events keep one request while distinct item ids stay separate", async () => {
+  const sent: string[] = [];
+  const approvals = new ApprovalCoordinator({
+    async notify(text) { sent.push(text); },
+    now: () => 1_700,
+    respond() {},
+  });
+  const event = {
+    id: 54,
+    method: "item/commandExecution/requestApproval",
+    params: {
+      command: "shutdown /s /t 0",
+      itemId: "item-a",
+      threadId: "thread-a",
+      turnId: "turn-a",
+    },
+  } as const;
+
+  await approvals.ingest(event);
+  await approvals.ingest(event);
+  await approvals.ingest({
+    ...event,
+    id: 55,
+    params: { ...event.params, itemId: "item-b" },
+  });
+
+  assert.equal(approvals.list().length, 2);
+  assert.equal(sent.length, 2);
+});
+
+test("replayed live callbacks share one approval decision", async () => {
+  const decisions: string[] = [];
+  const approvals = new ApprovalCoordinator({
+    async notify() {},
+    now: () => 1_725,
+    respond() {},
+  });
+  const request = {
+    method: "item/commandExecution/requestApproval" as const,
+    params: {
+      command: "npm publish",
+      itemId: "shared-item",
+      threadId: "shared-thread",
+      turnId: "shared-turn",
+    },
+  };
+
+  await approvals.ingestCallback({
+    ...request,
+    isLive: () => true,
+    respond: (approved) => { decisions.push(`first:${String(approved)}`); },
+  });
+  await approvals.ingestCallback({
+    ...request,
+    isLive: () => true,
+    respond: (approved) => { decisions.push(`second:${String(approved)}`); },
+  });
+
+  assert.equal(approvals.list().length, 1);
+  approvals.decide(null, true);
+  assert.deepEqual(decisions, ["first:true", "second:true"]);
+});
+
+test("approval delivery ids include the full request identity", async () => {
+  const clientIds: string[] = [];
+  const approvals = new ApprovalCoordinator({
+    async notify(_text, clientId) { clientIds.push(clientId); },
+    now: () => 1_750,
+    respond() {},
+  });
+
+  for (const [method, threadId] of [
+    ["item/commandExecution/requestApproval", "thread-command"],
+    ["item/fileChange/requestApproval", "thread-file"],
+  ] as const) {
+    await approvals.ingestCallback({
+      isLive: () => true,
+      method,
+      params: {
+        itemId: "same-item",
+        threadId,
+        turnId: "same-turn",
+      },
+      respond() {},
+    });
+  }
+
+  assert.equal(clientIds.length, 2);
+  assert.notEqual(clientIds[0], clientIds[1]);
 });
 
 test("a completed approval code cannot decide a later request", async () => {

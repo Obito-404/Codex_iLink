@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -56,6 +57,24 @@ test("a lifecycle Hook spools only routing metadata when the pipe is offline", (
   }
 });
 
+test("an offline PermissionRequest falls back to Desktop without durable spooling", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-permission-offline-"));
+  const spoolDirectory = join(directory, "spool");
+
+  try {
+    const result = runHook({
+      hook: permissionHookInput(),
+      pipePath: pipePath(),
+      spoolDirectory,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.equal(existsSync(spoolDirectory) ? readdirSync(spoolDirectory).length : 0, 0);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("the receiver accepts a live Hook and drains an earlier spool", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-spool-"));
   const spoolDirectory = join(directory, "spool");
@@ -83,6 +102,165 @@ test("the receiver accepts a live Hook and drains an earlier spool", async () =>
       ["Stop", "Stop"],
     );
     assert.equal(readdirSync(spoolDirectory).length, 0);
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a live PermissionRequest returns an actionable allow decision to Codex", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-approval-"));
+  const spoolDirectory = join(directory, "spool");
+  const path = pipePath();
+  let received: HookEvent | undefined;
+  const receiver = new HookReceiver({
+    onEvent: async (event) => {
+      received = event;
+      return { behavior: "allow" as const };
+    },
+    pipePath: path,
+    spoolDirectory,
+  });
+
+  try {
+    await receiver.start();
+    const result = await runHookAsync({
+      hook: permissionHookInput(),
+      pipePath: path,
+      spoolDirectory,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(received?.requestId);
+    assert.equal(received.requestSummary, "shutdown /s /t 0");
+    assert.deepEqual(JSON.parse(result.stdout), {
+      hookSpecificOutput: {
+        decision: { behavior: "allow" },
+        hookEventName: "PermissionRequest",
+      },
+    });
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("a PermissionRequest without an official request id stays unidentified", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-no-id-"));
+  const spoolDirectory = join(directory, "spool");
+  const path = pipePath();
+  let received: HookEvent | undefined;
+  const receiver = new HookReceiver({
+    onEvent(event) {
+      received = event;
+      return { behavior: "passthrough" as const };
+    },
+    pipePath: path,
+    spoolDirectory,
+  });
+
+  try {
+    await receiver.start();
+    const hook = permissionHookInput();
+    delete hook.request_id;
+    const result = await runHookAsync({ hook, pipePath: path, spoolDirectory });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.equal(received?.requestId, null);
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("stopping Hook ingress lets a pending PermissionRequest receive its denial", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-drain-"));
+  const spoolDirectory = join(directory, "spool");
+  const path = pipePath();
+  let deny!: () => void;
+  let accepted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    accepted = resolve;
+  });
+  const receiver = new HookReceiver({
+    onEvent: async () => {
+      accepted();
+      await new Promise<void>((resolve) => {
+        deny = resolve;
+      });
+      return { behavior: "deny" as const };
+    },
+    pipePath: path,
+    spoolDirectory,
+  });
+
+  try {
+    await receiver.start();
+    const hook = runHookAsync({
+      hook: permissionHookInput(),
+      pipePath: path,
+      spoolDirectory,
+    });
+    await started;
+    receiver.stopAccepting();
+    deny();
+    const result = await hook;
+    await receiver.close();
+
+    assert.deepEqual(JSON.parse(result.stdout), {
+      hookSpecificOutput: {
+        decision: { behavior: "deny" },
+        hookEventName: "PermissionRequest",
+      },
+    });
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("closing the receiver aborts a pending PermissionRequest connection", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-close-"));
+  const spoolDirectory = join(directory, "spool");
+  const path = pipePath();
+  let release!: () => void;
+  let started!: () => void;
+  const accepted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const receiver = new HookReceiver({
+    onEvent: async (_event, signal) => {
+      started();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return { behavior: "passthrough" as const };
+    },
+    pipePath: path,
+    spoolDirectory,
+  });
+
+  try {
+    await receiver.start();
+    const hook = runHookAsync({
+      hook: permissionHookInput(),
+      pipePath: path,
+      spoolDirectory,
+    });
+    await accepted;
+    const close = receiver.close();
+    const closedImmediately = await Promise.race([
+      close.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    release();
+    await close;
+    const result = await hook;
+
+    assert.equal(closedImmediately, true);
+    assert.equal(result.stdout, "");
   } finally {
     await receiver.close();
     rmSync(directory, { force: true, recursive: true });
@@ -148,7 +326,11 @@ test("the receiver deletes expired spool events without delivering them", async 
   }
 });
 
-function runHook(input: { pipePath: string; spoolDirectory: string }) {
+function runHook(input: {
+  hook?: Record<string, unknown>;
+  pipePath: string;
+  spoolDirectory: string;
+}) {
   return spawnSync(process.execPath, [hookScript], {
     encoding: "utf8",
     env: {
@@ -156,12 +338,16 @@ function runHook(input: { pipePath: string; spoolDirectory: string }) {
       CODEX_ILINK_PIPE_PATH: input.pipePath,
       CODEX_ILINK_SPOOL_DIR: input.spoolDirectory,
     },
-    input: JSON.stringify(hookInput()),
+    input: JSON.stringify(input.hook ?? hookInput()),
     timeout: 10_000,
   });
 }
 
-function runHookAsync(input: { pipePath: string; spoolDirectory: string }) {
+function runHookAsync(input: {
+  hook?: Record<string, unknown>;
+  pipePath: string;
+  spoolDirectory: string;
+}) {
   return new Promise<{ status: number | null; stderr: string; stdout: string }>(
     (resolveRun, rejectRun) => {
       const child = spawn(process.execPath, [hookScript], {
@@ -181,9 +367,23 @@ function runHookAsync(input: { pipePath: string; spoolDirectory: string }) {
       child.stderr.on("data", (chunk: string) => (stderr += chunk));
       child.once("error", rejectRun);
       child.once("close", (status) => resolveRun({ status, stderr, stdout }));
-      child.stdin.end(JSON.stringify(hookInput()));
+      child.stdin.end(JSON.stringify(input.hook ?? hookInput()));
     },
   );
+}
+
+function permissionHookInput(): Record<string, unknown> {
+  return {
+    cwd: "D:\\Codex_iLink",
+    hook_event_name: "PermissionRequest",
+    permission_mode: "default",
+    request_id: "permission-request-a",
+    session_id: "thread-a",
+    source: "desktop",
+    tool_input: { command: "shutdown /s /t 0" },
+    tool_name: "Bash",
+    turn_id: "turn-a",
+  };
 }
 
 function hookInput(): Record<string, unknown> {

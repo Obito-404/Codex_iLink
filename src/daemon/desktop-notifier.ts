@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { win32 } from "node:path";
 
 import {
@@ -79,55 +78,6 @@ export class DesktopNotifier {
     return notification;
   }
 
-  notifyPermission(event: HookEvent): Promise<DesktopNotificationResult> {
-    if (!event.turnId) return Promise.resolve("already-sent");
-    const clientId = desktopPermissionClientId(event);
-    const current = this.#inFlight.get(clientId);
-    if (current) return current;
-    const notification = this.#queuePermission(event, clientId).finally(() => {
-      if (this.#inFlight.get(clientId) === notification) {
-        this.#inFlight.delete(clientId);
-      }
-    });
-    this.#inFlight.set(clientId, notification);
-    return notification;
-  }
-
-  async #queuePermission(
-    event: HookEvent,
-    clientId: string,
-  ): Promise<DesktopNotificationResult> {
-    if (this.#state.getOutbox(clientId)) return "already-sent";
-    let presence: PresenceState;
-    try {
-      presence = await this.#presence();
-    } catch {
-      return "present";
-    }
-    if (presence === "present") return "present";
-
-    let thread: Record<string, unknown> = {};
-    try {
-      thread = (
-        await this.#readThread({
-          includeTurns: false,
-          threadId: event.sessionId,
-        })
-      ).thread;
-    } catch {
-      // The Hook metadata is sufficient for a safe fallback notification.
-    }
-    this.#state.enqueueOutbox({
-      body: formatDesktopPermissionNotification(event, thread),
-      clientId,
-      contextToken:
-        this.#state.getILinkState(this.#session.botId)?.contextToken ?? "",
-      createdAtMs: this.#now(),
-      targetUserId: this.#session.controllerUserId,
-    });
-    return "queued";
-  }
-
   async #notify(
     event: HookEvent,
     status: DesktopTerminalStatus,
@@ -192,12 +142,6 @@ function hasDesktopNotification(state: SqliteState, baseClientId: string): boole
   return desktopNotificationCandidateClientIds(baseClientId).some((clientId) =>
     Boolean(state.getOutbox(clientId)),
   );
-}
-
-export function desktopPermissionClientId(event: HookEvent): string {
-  const identity = `${event.sessionId}\0${event.turnId ?? ""}`;
-  const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 16);
-  return `codex-ilink:desktop:${event.sessionId}:permission:${suffix}`;
 }
 
 export function markDesktopNotificationDelivered(
@@ -306,24 +250,6 @@ function summarizeUserText(value: string): string {
   return characters.length <= 160
     ? normalized
     : `${characters.slice(0, 159).join("")}…`;
-}
-
-function formatDesktopPermissionNotification(
-  event: HookEvent,
-  thread: Record<string, unknown>,
-): string {
-  const title = shortText(
-    stringField(thread, "name") ?? event.sessionId,
-  );
-  const cwd = projectName(stringField(thread, "cwd") ?? event.cwd ?? "未知项目");
-  const toolName = shortText(event.toolName ?? "未知工具");
-  return [
-    "⏳ Codex Desktop 正等待本机批准",
-    `项目：${cwd}`,
-    `会话：${title}`,
-    `工具：${toolName}`,
-    "微信不能批准此请求，请回到电脑处理。",
-  ].join("\n");
 }
 
 function stringField(value: Record<string, unknown>, name: string): string | null {

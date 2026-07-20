@@ -27,12 +27,42 @@ export function createHookEvent(input, capturedAtMs = Date.now()) {
     eventName,
     model: nullableString(input.model),
     permissionMode: nullableString(input.permission_mode),
+    ...(eventName === "PermissionRequest"
+      ? {
+          requestId:
+            nullableString(input.request_id) ??
+            nullableString(input.tool_use_id) ??
+            nullableString(input.tool_call_id),
+          requestSummary: permissionSummary(input),
+        }
+      : {}),
     schemaVersion: 1,
     sessionId,
     source: nullableString(input.source),
     toolName: nullableString(input.tool_name),
     turnId: nullableString(input.turn_id),
   };
+}
+
+function permissionSummary(input) {
+  const toolInput =
+    input.tool_input && typeof input.tool_input === "object" && !Array.isArray(input.tool_input)
+      ? input.tool_input
+      : null;
+  const command = toolInput?.command;
+  if (typeof command === "string" && command) return truncate(command);
+  if (Array.isArray(command) && command.every((part) => typeof part === "string")) {
+    return truncate(command.join(" "));
+  }
+  for (const field of ["reason", "path", "file_path"]) {
+    const value = toolInput?.[field];
+    if (typeof value === "string" && value) return truncate(value);
+  }
+  return nullableString(input.tool_name) ?? "Codex Desktop permission request";
+}
+
+function truncate(value) {
+  return [...value].slice(0, 500).join("");
 }
 
 export function resolveSpoolDirectory() {

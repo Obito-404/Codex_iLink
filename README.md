@@ -133,19 +133,22 @@ npm 预览版把 `@latest` 替换为 `@next`。
 
 `clear` 会用空白 Codex 会话替换当前上下文，并把原会话归档；在微信主会话执行时会替换内部主会话，但仍停留在微信主会话。`exit` 会返回微信主会话并取消当前项目选择。`new` 只使用此时明确选择的项目；没有选择项目时创建无项目会话。
 
-`perm` 每次都从 Codex 读取当前任务的实际 Profile、审批策略、审批人和 Sandbox。权限只能在 Codex Desktop 中修改；同一任务在 Desktop 修改后，下一次 `perm` 会显示新值。旧版 `perm<n>` 输入也只会返回当前权限，不再切换或提升权限。`ok/no` 只回应仍在线的单次 Codex 审批请求，不代表 iLink 自己维护审批策略。
+`perm` 每次都从 Codex 读取当前任务的实际 Profile、审批策略、审批人和 Sandbox。已有任务的权限只能在 Codex Desktop 中修改；同一任务在 Desktop 修改后，下一次 `perm` 会显示新值。旧版 `perm<n>` 输入也只会返回当前权限，不再切换或提升权限。`ok/no` 只回应仍在线的单次 Codex 审批请求，包括审批人为 `user` 的 Desktop Hook 请求；`auto_review` 不会触发微信审批。
 
-## 超时配置
+## 全局默认配置
 
-默认会话绑定保持 30 分钟，未锁屏时连续 5 分钟没有键鼠输入会判定为离开：
+新建任务默认使用 `workspace + on-request + auto_review`。这些设置只用于 iLink 之后创建的微信主会话、`new` 和 `clear`；恢复已有任务时不会覆盖其权限：
 
 ```powershell
+ilink config set default-permission workspace  # read-only / workspace / full-access
+ilink config set default-approval on-request   # on-request / never
+ilink config set default-reviewer auto_review  # auto_review / user
 ilink config set session-timeout 60m
 ilink config set away-timeout 10m
 ilink config reset
 ```
 
-锁屏会立即判定为离开，不受 `away-timeout` 影响。
+默认会话绑定保持 30 分钟；未锁屏时连续 5 分钟没有键鼠输入会判定为离开。锁屏会立即判定为离开，不受 `away-timeout` 影响。
 
 ## 常见问题
 

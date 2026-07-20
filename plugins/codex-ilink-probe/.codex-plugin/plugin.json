@@ -1,6 +1,6 @@
 {
   "name": "codex-ilink-probe",
-  "version": "0.1.3+codex.20260716141315",
+  "version": "0.1.4",
   "description": "Coordinates Codex Desktop and Codex iLink turns with a local atomic lease.",
   "author": {
     "name": "Codex iLink"
@@ -8,12 +8,13 @@
   "interface": {
     "displayName": "Codex iLink Guard",
     "shortDescription": "Prevent conflicting Desktop and WeChat turns.",
-    "longDescription": "Sends privacy-limited lifecycle metadata to the local Codex iLink Bridge and uses a fail-closed SQLite lease only for the WeChat main task, the task currently entered from WeChat, and tasks with pending WeChat work. Other Codex Desktop projects and tasks are always allowed and retain only a local active-turn observation so a later WeChat /s <n> cannot race them. Prompts and transcripts are not copied by the plugin.",
+    "longDescription": "Sends privacy-limited lifecycle metadata to the local Codex iLink Bridge and uses a fail-closed SQLite lease only for the WeChat main task, the task currently entered from WeChat, and tasks with pending WeChat work. User-reviewed Desktop permission requests can stay online for an actionable WeChat decision; auto-reviewed requests remain silent. Prompts and transcripts are not copied by the plugin.",
     "developerName": "Codex iLink",
     "category": "Productivity",
     "capabilities": [
       "Lifecycle notifications",
-      "Atomic turn arbitration"
+      "Atomic turn arbitration",
+      "Live user approval routing"
     ],
     "defaultPrompt": "Show the current Codex iLink Bridge and arbitration status."
   }

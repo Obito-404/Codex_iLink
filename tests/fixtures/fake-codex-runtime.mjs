@@ -331,7 +331,14 @@ lines.on("line", (line) => {
         message.params,
         isControlRouter
           ? ["cwd", "developerInstructions", "dynamicTools", "ephemeral"]
-          : ["cwd", "developerInstructions", "dynamicTools"],
+          : [
+              "cwd",
+              "developerInstructions",
+              "dynamicTools",
+              ...["approvalPolicy", "approvalsReviewer", "permissions"].filter(
+                (key) => key in message.params,
+              ),
+            ],
       )
     ) {
       rejectUnexpectedParams(message);

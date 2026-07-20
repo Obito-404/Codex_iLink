@@ -69,15 +69,19 @@ _Avoid_: 插话、并发回合、改变当前回合
 _Avoid_: 微信权限、远程权限覆盖
 
 **权限只读查询**:
-`perm` 对当前绑定任务执行无覆盖恢复，显示 Codex 回读的 Profile、审批策略、审批者和 Sandbox。权限只能在 Codex Desktop 中修改；同一项目的不同任务可以拥有不同权限，Bridge 不提供远程编辑入口。
+`perm` 对当前绑定任务执行无覆盖恢复，显示 Codex 回读的 Profile、审批策略、审批者和 Sandbox。已有任务的权限只能在 Codex Desktop 中修改；同一项目的不同任务可以拥有不同权限，Bridge 不提供远程编辑入口。
 _Avoid_: `permissionProfile/list`、权限编号选择、Bridge 提交权限字段、拼装自定义 Sandbox、跨任务权限继承
 
+**新任务权限默认值**:
+iLink 全局配置中仅用于之后新建任务的 Profile、审批策略和审批者组合；默认是 `:workspace + on-request + auto_review`。微信主会话首次创建、`new` 和 `clear` 读取当时的配置并随 `thread/start` 提交；恢复已有任务不回灌。
+_Avoid_: 覆盖已有任务、按项目保存权限快照、把默认值当成当前任务实际权限
+
 **权限事实源**:
-Codex 持久化任务的当前权限设置是唯一事实源；权限属于任务/会话，而不是项目或微信入口。既有任务恢复不携带权限覆盖字段；Codex 升级后原生 Profile 的含义自然随 Codex 改变。
+Codex 持久化任务的当前权限设置是唯一事实源；权限属于任务/会话，而不是项目或微信入口。新建时可接收 iLink 显式默认值，之后以 Codex 返回及持久化的结果为准；既有任务恢复不携带权限覆盖字段。
 _Avoid_: SQLite 权限快照、重启回灌、根据 Profile 名称推断审批策略
 
 **单次审批**:
-某个微信回合为一项具体受限操作发出的临时授权请求。
+某个微信回合，或审批者确为 `user` 的在线 Desktop Hook，为一项具体受限操作发出的临时授权请求。Desktop 的 `auto_review` 请求不进入微信；Hook 断开、Bridge 重启或超时后决定失效。
 _Avoid_: 永久授权、自动提权、跨入口审批
 
 **审批送达状态**:

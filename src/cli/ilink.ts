@@ -536,12 +536,49 @@ async function configCommand(
   const state = new SqliteState(runtimePaths().stateDatabasePath);
   try {
     if (args.length === 1 && args[0] === "reset") {
-      state.resetUserTimingSettings();
-      io.log("超时配置已恢复默认值：会话 30 分钟，离开 5 分钟。");
+      state.resetUserSettings();
+      io.log(
+        "配置已恢复默认值：workspace + on-request + auto_review；会话 30 分钟，离开 5 分钟。",
+      );
       return 0;
     }
     if (args.length === 3 && args[0] === "set") {
       const [_, name, rawDuration] = args;
+      if (name === "default-permission") {
+        const profile =
+          rawDuration === "read-only"
+            ? ":read-only"
+            : rawDuration === "workspace"
+              ? ":workspace"
+              : rawDuration === "full-access"
+                ? ":danger-full-access"
+                : null;
+        if (!profile) {
+          io.error("默认权限必须是 read-only、workspace 或 full-access。");
+          return 2;
+        }
+        state.setDefaultPermissionProfile(profile);
+        io.log(`新会话默认权限已设置为 ${rawDuration}，立即生效。`);
+        return 0;
+      }
+      if (name === "default-approval") {
+        if (rawDuration !== "on-request" && rawDuration !== "never") {
+          io.error("默认审批必须是 on-request 或 never。");
+          return 2;
+        }
+        state.setDefaultApprovalPolicy(rawDuration);
+        io.log(`新会话默认审批已设置为 ${rawDuration}，立即生效。`);
+        return 0;
+      }
+      if (name === "default-reviewer") {
+        if (rawDuration !== "auto_review" && rawDuration !== "user") {
+          io.error("默认审批人必须是 auto_review 或 user。");
+          return 2;
+        }
+        state.setDefaultApprovalsReviewer(rawDuration);
+        io.log(`新会话默认审批人已设置为 ${rawDuration}，立即生效。`);
+        return 0;
+      }
       const minutes = rawDuration ? parseMinuteDuration(rawDuration) : null;
       if (name === "session-timeout") {
         if (minutes === null || !isInMinuteRange(minutes, SESSION_TIMEOUT_MINUTES_RANGE)) {
@@ -567,6 +604,12 @@ async function configCommand(
       return 2;
     }
     const settings = state.getBridgeSettings();
+    const permissions = state.getDefaultThreadPermissionSettings();
+    io.log(
+      `新会话默认权限：${permissions.permissions === ":read-only" ? "read-only" : permissions.permissions === ":danger-full-access" ? "full-access" : "workspace"}`,
+    );
+    io.log(`新会话默认审批：${permissions.approvalPolicy}`);
+    io.log(`新会话默认审批人：${permissions.approvalsReviewer}`);
     io.log(`会话绑定超时：${String(settings.sessionTimeoutMinutes)} 分钟`);
     io.log(
       `离开判定时间：${String(settings.awayTimeoutMinutes)} 分钟（锁屏仍立即判定离开）`,

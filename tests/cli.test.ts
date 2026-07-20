@@ -302,7 +302,7 @@ test("published package exposes a runnable ilink executable", () => {
   assert.match(result.stdout, /setup\s+完成插件安装/u);
 });
 
-test("ilink config shows the default session and away timeouts", (t) => {
+test("ilink config shows safe defaults for new task permissions and timeouts", (t) => {
   const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-"));
   t.after(() => rmSync(localAppData, { force: true, recursive: true }));
 
@@ -312,6 +312,9 @@ test("ilink config shows the default session and away timeouts", (t) => {
   });
 
   assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /新会话默认权限：workspace/u);
+  assert.match(result.stdout, /新会话默认审批：on-request/u);
+  assert.match(result.stdout, /新会话默认审批人：auto_review/u);
   assert.match(result.stdout, /会话绑定超时：30 分钟/u);
   assert.match(result.stdout, /离开判定时间：5 分钟/u);
   assert.match(result.stdout, /锁屏仍立即判定离开/u);
@@ -340,6 +343,26 @@ test("ilink config set persists timing settings across CLI processes", (t) => {
   assert.match(current.stdout, /离开判定时间：10 分钟/u);
 });
 
+test("ilink config set persists defaults for newly created tasks", (t) => {
+  const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-permissions-"));
+  t.after(() => rmSync(localAppData, { force: true, recursive: true }));
+  const run = (...args: string[]) =>
+    spawnSync(process.execPath, ["dist/cli/main.js", "config", ...args], {
+      encoding: "utf8",
+      env: { ...process.env, LOCALAPPDATA: localAppData },
+    });
+
+  assert.equal(run("set", "default-permission", "full-access").status, 0);
+  assert.equal(run("set", "default-approval", "never").status, 0);
+  assert.equal(run("set", "default-reviewer", "user").status, 0);
+
+  const current = run();
+  assert.equal(current.status, 0, current.stderr);
+  assert.match(current.stdout, /新会话默认权限：full-access/u);
+  assert.match(current.stdout, /新会话默认审批：never/u);
+  assert.match(current.stdout, /新会话默认审批人：user/u);
+});
+
 test("ilink config reset restores safe defaults", (t) => {
   const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-reset-"));
   t.after(() => rmSync(localAppData, { force: true, recursive: true }));
@@ -351,16 +374,22 @@ test("ilink config reset restores safe defaults", (t) => {
 
   assert.equal(run("set", "session-timeout", "60m").status, 0);
   assert.equal(run("set", "away-timeout", "10m").status, 0);
+  assert.equal(run("set", "default-permission", "read-only").status, 0);
+  assert.equal(run("set", "default-approval", "never").status, 0);
+  assert.equal(run("set", "default-reviewer", "user").status, 0);
   const reset = run("reset");
   assert.equal(reset.status, 0, reset.stderr);
   assert.match(reset.stdout, /已恢复默认值/u);
 
   const current = run();
+  assert.match(current.stdout, /新会话默认权限：workspace/u);
+  assert.match(current.stdout, /新会话默认审批：on-request/u);
+  assert.match(current.stdout, /新会话默认审批人：auto_review/u);
   assert.match(current.stdout, /会话绑定超时：30 分钟/u);
   assert.match(current.stdout, /离开判定时间：5 分钟/u);
 });
 
-test("ilink config rejects unsafe timeout values without changing settings", (t) => {
+test("ilink config rejects unsupported values without changing settings", (t) => {
   const localAppData = mkdtempSync(join(tmpdir(), "codex-ilink-config-range-"));
   t.after(() => rmSync(localAppData, { force: true, recursive: true }));
   const run = (...args: string[]) =>
@@ -373,7 +402,13 @@ test("ilink config rejects unsafe timeout values without changing settings", (t)
   assert.equal(run("set", "session-timeout", "1441m").status, 2);
   assert.equal(run("set", "away-timeout", "0m").status, 2);
   assert.equal(run("set", "away-timeout", "61m").status, 2);
+  assert.equal(run("set", "default-permission", "danger").status, 2);
+  assert.equal(run("set", "default-approval", "always").status, 2);
+  assert.equal(run("set", "default-reviewer", "anyone").status, 2);
   const current = run();
+  assert.match(current.stdout, /新会话默认权限：workspace/u);
+  assert.match(current.stdout, /新会话默认审批：on-request/u);
+  assert.match(current.stdout, /新会话默认审批人：auto_review/u);
   assert.match(current.stdout, /会话绑定超时：30 分钟/u);
   assert.match(current.stdout, /离开判定时间：5 分钟/u);
 });

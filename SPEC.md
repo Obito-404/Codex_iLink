@@ -39,20 +39,23 @@ flowchart LR
     P["Codex Desktop 插件 Hooks"] -->|"Named Pipe"| B
     P -->|"失败回退"| S["有界 Spool"]
     S --> B
+    P -->|"同任务租约 / 活动观察"| DB
     B <--> DB["SQLite 状态库"]
-    B <--> M["入站媒体目录"]
+    B <--> M["入站媒体 / 出站快照目录"]
+    B -->|"只读项目与新任务权限"| G["Desktop 全局状态"]
     B <--> A["常驻 Codex App Server"]
     A <--> H["Codex 持久化会话"]
     D["Codex Desktop"] <--> H
+    D --> G
 ```
 
 ### 3.1 Desktop 插件
 
 - 打包 `SessionStart`、`UserPromptSubmit`、`Stop` 和 `PermissionRequest` Hooks。
-- 普通生命周期 Hook 只发送 `session_id`、`turn_id`、`cwd`、事件名、模型和权限模式等元数据，不发送完整 Transcript。`PermissionRequest` 额外发送本次请求 ID 和最多 500 字符的命令/文件摘要，仅走在线 Pipe，不写 Spool。
+- 普通生命周期 Hook 只发送 `session_id`、`turn_id`、`cwd`、事件名、模型和权限模式等元数据，不发送完整 Transcript。`PermissionRequest` 额外发送本次请求 ID、绑定完整 Hook 输入（含 `cwd + tool_name + tool_input`）的 SHA-256 指纹，以及最多 500 个 Unicode 字符的可核验摘要，仅走在线 Pipe，不写 Spool。摘要只接受严格白名单 envelope、可验证 Windows `cwd` 的末级项目名、白名单命令工具的唯一字符串 `command` 字段，或能完整解析且不超过 8 个操作的 `apply_patch`；不发送完整本机路径。命令只要包含完整本机绝对路径，就整条回退原生审批，不会脱敏后继续发送微信。未知工具、额外语义字段、绝对/非规范 patch 路径、隐藏/截断操作、控制字符、格式字符、检测到的凭证或伪造回复提示一律不进入微信审批。
 - Hook 优先通过当前用户专属 Named Pipe 通知 Bridge；Pipe 不可用时把同一份元数据写入有界本地 Spool，Bridge 在启动及每轮运行期轮询中 single-flight 排空。单次消费上限为 5 秒；普通生命周期事件失败后直接移入 `dead-letter`，门禁 `UserPromptSubmit` 因承载仲裁状态最多尝试 3 次，耗尽后再隔离。失败事件不会无限重放阻塞微信轮询，并且一次排空最多处理一个失败事件。`UserPromptSubmit` 不在门禁判定前发送生命周期事件；只有当前微信所选项目或已受管任务的 Prompt 需要 observation、但因 SQLite 瞬时写锁无法直接入库时，门禁 Hook 才写入带受控来源标记的 Spool。其他 Desktop 项目立即 fail-open，不记录活动观察或门禁 Spool；其 Stop 完成事件仍通过独立的 fail-open 生命周期通道进入 Pipe 或 Spool，用于离开通知。未匹配受管任务的 Stop 仅在 `thread/read` 确认来源为 Desktop（当前为 `source=vscode`）后通知，CLI 来源只保留防迟到 Prompt 的 tombstone。Bridge 在 iLink 长轮询返回后及每条已接受微信消息执行前排空，避免同批 `/s <n>` 与正文越过该观察。
 - 除 `PermissionRequest` 外，生命周期通知的 Pipe、Spool 合计等待上限 500ms；两者都失败时放行，不阻塞 Desktop。`UserPromptSubmit` 的共享会话写入仲裁是安全边界，不使用这条 fail-open 路径。
-- `PermissionRequest` 通过 Pipe 保持在线回调：`auto_review` 或元数据不可确认时 stdout 为空并回退 Codex/Desktop；`user` 审批生成不可复用短码，微信 `y/n` 后输出 `hookSpecificOutput.decision.behavior=allow|deny`。Pipe 离线、无微信上下文或 Hook 断开时不落盘、不复用决定。
+- `PermissionRequest` 通过 Pipe 保持在线回调：`auto_review` 或请求无法完整、安全展示时 stdout 为空并回退 Codex/Desktop；`user + on-request` 审批生成不可复用短码，微信 `y/n` 后输出 `hookSpecificOutput.decision.behavior=allow|deny`。Pipe 离线、无微信上下文或 Hook 断开时不落盘、不复用决定。
 - Bridge 启动的 App Server 带受控来源标记，Hook 据此区分 Bridge 回合和其他本机 Codex 回合，避免重复通知。
 - 插件通过个人本地 Marketplace 安装，内部 ID 为 `codex-ilink-probe`，显示名为 `Codex iLink Guard`；非托管命令 Hook 按当前定义 hash 由用户在显示内部 ID 的信任页人工审核。首次安装必须确认，定义变化后必须重新确认；安装器和 Bridge 不读取或写入 Codex 的持久信任状态，也不在生产流程中传入 `--dangerously-bypass-hook-trust`。
 
@@ -101,11 +104,11 @@ flowchart LR
 - 更换设备时重新部署并扫码。
 - iLink Token 使用 Windows DPAPI 的 CurrentUser 范围加密，数据目录使用当前用户 ACL。
 - 微信可显式更改当前共享会话的模型和 reasoning effort，但只能查询已有任务权限；权限 Profile 及其策略只在 Codex Desktop 修改。CLI 只显示 Desktop 当前选择，不能配置独立的新任务权限。iLink 不评估风险或替用户自动允许，只路由 Codex 明确交给 `user` 的实时请求并回传本次选择。
-- 微信只能批准仍然在线等待的 Bridge App Server 审批或 Desktop `PermissionRequest` Hook 审批；通知发送失败持续退避重试，等待 60 秒和 5 分钟仍未处理时分别提醒一次，30 分钟未处理自动拒绝。
+- 微信只能批准仍然在线等待且能完整核验的审批：App Server 命令必须含具体命令；若携带 `cwd`，只接受可验证 Windows 绝对路径并展示末级项目名；未展示的环境/网络上下文、解析动作或策略建议一律拒绝。权限请求只允许严格白名单、规范化后的网络开关或特殊文件系统范围，显式本机权限路径、未知字段和非空环境 ID 均拒绝；App Server 原生文件变更因协议不含实际 patch/目标而留在原生客户端。Desktop `PermissionRequest` 只允许严格白名单 envelope、已绑定原始 payload、展示安全项目名的白名单命令或完整 `apply_patch` 摘要。通知发送失败持续退避重试，等待 60 秒和 5 分钟仍未处理时分别提醒一次，30 分钟未处理自动拒绝。
 - 发送 `ya`、`na` 只快照并展示当时在线的全部审批和唯一确认码；两分钟内按提示回复 `ya#<确认码>`、`na#<确认码>` 才执行。确认码只绑定这份快照；之后新增的请求必须重新决定，切换批量操作或发送任何其他消息都会让旧确认码失效。
 - “替我审批”由会话的自动审批者处理；只有实际路由给用户的 Bridge 审批才生成 `y`、`n` 编号。
 - 正常关闭时仍在线的审批会被拒绝；进程崩溃或 Desktop Hook 断开后无法安全回复的请求回退 Codex/Desktop 原生流程。任何情况下都不把旧批准或短码重放到新进程。
-- Desktop `PermissionRequest` 只有在任务实际 `approvalsReviewer=user`、`approvalPolicy!=never`、请求 ID/turn ID 完整且微信回复上下文可用时进入微信；同一 `(method, thread_id, turn_id, item_id)` 只登记一次，不同 item 保持独立短码。`auto_review` 不通知微信。
+- Desktop `PermissionRequest` 只有在任务实际 `approvalsReviewer=user`、`approvalPolicy=on-request`、请求 ID/turn ID/请求指纹完整且微信回复上下文可用时进入微信。App Server 命令有 `approvalId` 时以 `(method, thread_id, turn_id, approval_id)` 区分子命令回调，否则回退 `item_id`；Desktop Hook 使用请求 ID。相同身份且完整 payload 指纹一致的重放共享决定，payload 改变则新回调立即拒绝；不同身份保持独立短码。`auto_review` 不通知微信。
 
 ## 5. 项目与会话发现
 
@@ -275,7 +278,7 @@ flowchart LR
 - 无 `voice_item.text` 的语音识别或把 SILK → WAV 当作 ASR
 - Codex → 微信语音气泡、任意远程 URL 媒体发送或从普通自然语言路径猜测附件
 - 保证 Codex 能读取任意 `mention` 文件格式或越过目标会话的 Sandbox/审批策略
-- Desktop 回合远程审批或远程停止
+- 远程停止 Desktop 回合
 - 通过微信修改任务权限
 - 修改项目或全局的模型、reasoning effort 或权限默认值
 - 扫描磁盘发现项目或读取 Desktop 私有数据库

@@ -527,12 +527,12 @@
         <div class="pulse-dot"></div>
         <h1>Codex iLink 系统架构</h1>
       </div>
-      <p class="subtitle">微信与 Codex Desktop 共享持久化任务；Bridge 只负责传输、路由、仲裁与可靠送达</p>
+      <p class="subtitle">微信进入 Windows 本机 Codex；历史与权限仍由 Codex 管理</p>
     </div>
 
     <!-- Main Diagram -->
     <div class="diagram-container">
-      <svg viewBox="0 0 1340 560" role="img" aria-label="Codex iLink 系统架构 — 微信与 Codex Desktop 共享持久化任务；Bridge 只负责传输、路由、仲裁与可靠送达 (architecture diagram)">
+      <svg viewBox="0 0 1340 720" role="img" aria-label="Codex iLink 系统架构 — 微信进入 Windows 本机 Codex；历史与权限仍由 Codex 管理 (architecture diagram)">
         <!-- Definitions -->
         <defs>
           <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
@@ -556,98 +556,116 @@
         <rect width="100%" height="100%" fill="url(#grid)" />
 
         <!-- Boundaries (behind everything) -->
-        <rect x="390" y="100" width="940" height="334" rx="12" class="c-region" stroke-width="1"/>
-        <text x="398" y="118" class="t-cloud" font-size="9" font-weight="600">Windows 当前用户会话 · DPAPI / 用户 ACL</text>
+        <rect x="360" y="140" width="930" height="312" rx="12" class="c-region" stroke-width="1"/>
+        <text x="368" y="158" class="t-cloud" font-size="9" font-weight="600">Windows 当前用户会话 · DPAPI · 用户 ACL · 无 TCP 监听</text>
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path d="M 160 167 L 205 167" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path d="M 355 167 L 420 167" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path d="M 580 167 L 650 167" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path d="M 820 167 L 890 167" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path d="M 1060 167 L 1140 167" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path d="M 500 204 L 500 272 L 500 272 L 500 340" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path d="M 1220 204 L 1220 262 Q 1220 270 1212 270 L 983 270 Q 975 270 975 278 L 975 340" class="a-security" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
-        <path d="M 890 377 L 580 377" class="a-security" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
-        <path d="M 890 377 L 858 377 Q 850 377 850 369 L 850 278 Q 850 270 842 270 L 608 270 Q 600 270 600 262 L 600 175 Q 600 167 592 167 L 580 167" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path d="M 150 204 L 185 204" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path d="M 325 204 L 356.5 204 Q 357.5 204 357.5 205 L 357.5 205 Q 357.5 206 358.5 206 L 390 206" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path d="M 550 206 L 620 206" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path d="M 780 206 L 850 206" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path d="M 1020 206 L 1100 206" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path d="M 470 242 L 470 301 L 470 301 L 470 360" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path d="M 470 242 L 470 293 Q 470 301 478 301 L 692 301 Q 700 301 700 309 L 700 360" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path d="M 470 242 L 470 293 Q 470 301 478 301 L 927 301 Q 935 301 935 309 L 935 360" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path d="M 1180 242 L 1180 301 L 1180 301 L 1180 360" class="a-security" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
+        <path d="M 1180 432 L 1180 492 Q 1180 500 1172 500 L 478 500 Q 470 500 470 492 L 470 242" class="a-security" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
+        <path d="M 1180 432 L 1180 527 Q 1180 535 1172 535 L 588 535 Q 580 535 580 527 L 580 404 Q 580 396 572 396 L 550 396" class="a-security" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
 
         <!-- Components -->
-        <rect x="20" y="130" width="140" height="74" rx="6" class="c-mask"/>
-        <rect x="20" y="130" width="140" height="74" rx="6" class="c-external" stroke-width="1.5"/>
-        <text x="90" y="165" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">微信控制者</text>
-        <text x="90" y="181" class="t-muted" font-size="9" text-anchor="middle">唯一绑定用户</text>
+        <rect x="20" y="170" width="130" height="68" rx="6" class="c-mask"/>
+        <rect x="20" y="170" width="130" height="68" rx="6" class="c-external" stroke-width="1.5"/>
+        <text x="85" y="202" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">微信控制者</text>
+        <text x="85" y="218" class="t-muted" font-size="9" text-anchor="middle">唯一绑定用户</text>
 
-        <rect x="205" y="130" width="150" height="74" rx="6" class="c-mask"/>
-        <rect x="205" y="130" width="150" height="74" rx="6" class="c-cloud" stroke-width="1.5"/>
-        <text x="280" y="165" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">腾讯 iLink</text>
-        <text x="280" y="181" class="t-muted" font-size="9" text-anchor="middle">长轮询 · 媒体协议</text>
+        <rect x="185" y="170" width="140" height="68" rx="6" class="c-mask"/>
+        <rect x="185" y="170" width="140" height="68" rx="6" class="c-cloud" stroke-width="1.5"/>
+        <text x="255" y="202" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">腾讯 iLink</text>
+        <text x="255" y="218" class="t-muted" font-size="9" text-anchor="middle">长轮询 · 媒体协议</text>
 
-        <rect x="420" y="130" width="160" height="74" rx="6" class="c-mask"/>
-        <rect x="420" y="130" width="160" height="74" rx="6" class="c-backend" stroke-width="1.5"/>
-        <text x="500" y="165" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Bridge Daemon</text>
-        <text x="500" y="181" class="t-muted" font-size="9" text-anchor="middle">混合路由 · 调度器</text>
-        <text x="500" y="196" class="t-backend" font-size="7" text-anchor="middle">单实例 · 配额 3</text>
+        <rect x="390" y="170" width="160" height="72" rx="6" class="c-mask"/>
+        <rect x="390" y="170" width="160" height="72" rx="6" class="c-backend" stroke-width="1.5"/>
+        <text x="470" y="204" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Bridge Daemon</text>
+        <text x="470" y="220" class="t-muted" font-size="9" text-anchor="middle">路由 · 调度 · 可靠送达</text>
+        <text x="470" y="234" class="t-backend" font-size="7" text-anchor="middle">单实例 · 并发 3</text>
 
-        <rect x="650" y="130" width="170" height="74" rx="6" class="c-mask"/>
-        <rect x="650" y="130" width="170" height="74" rx="6" class="c-backend" stroke-width="1.5"/>
-        <text x="735" y="165" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Codex App Server</text>
-        <text x="735" y="181" class="t-muted" font-size="9" text-anchor="middle">常驻子进程</text>
+        <rect x="620" y="170" width="160" height="72" rx="6" class="c-mask"/>
+        <rect x="620" y="170" width="160" height="72" rx="6" class="c-backend" stroke-width="1.5"/>
+        <text x="700" y="204" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Codex App Server</text>
+        <text x="700" y="220" class="t-muted" font-size="9" text-anchor="middle">常驻本机子进程</text>
 
-        <rect x="890" y="130" width="170" height="74" rx="6" class="c-mask"/>
-        <rect x="890" y="130" width="170" height="74" rx="6" class="c-database" stroke-width="1.5"/>
-        <text x="975" y="165" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Codex 持久化任务</text>
-        <text x="975" y="181" class="t-muted" font-size="9" text-anchor="middle">历史与任务配置事实源</text>
+        <rect x="850" y="170" width="170" height="72" rx="6" class="c-mask"/>
+        <rect x="850" y="170" width="170" height="72" rx="6" class="c-database" stroke-width="1.5"/>
+        <text x="935" y="204" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Codex 持久化任务</text>
+        <text x="935" y="220" class="t-muted" font-size="9" text-anchor="middle">历史与任务配置事实源</text>
 
-        <rect x="1140" y="130" width="160" height="74" rx="6" class="c-mask"/>
-        <rect x="1140" y="130" width="160" height="74" rx="6" class="c-frontend" stroke-width="1.5"/>
-        <text x="1220" y="165" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Codex Desktop</text>
-        <text x="1220" y="181" class="t-muted" font-size="9" text-anchor="middle">继续同一 thread_id</text>
+        <rect x="1100" y="170" width="160" height="72" rx="6" class="c-mask"/>
+        <rect x="1100" y="170" width="160" height="72" rx="6" class="c-frontend" stroke-width="1.5"/>
+        <text x="1180" y="204" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Codex Desktop</text>
+        <text x="1180" y="220" class="t-muted" font-size="9" text-anchor="middle">继续同一 thread_id</text>
 
-        <rect x="420" y="340" width="160" height="74" rx="6" class="c-mask"/>
-        <rect x="420" y="340" width="160" height="74" rx="6" class="c-database" stroke-width="1.5"/>
-        <text x="500" y="375" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">SQLite 状态库</text>
-        <text x="500" y="391" class="t-muted" font-size="9" text-anchor="middle">队列 · Dispatch · Outbox</text>
-        <text x="500" y="406" class="t-database" font-size="7" text-anchor="middle">WAL + 崩溃恢复</text>
+        <rect x="390" y="360" width="160" height="72" rx="6" class="c-mask"/>
+        <rect x="390" y="360" width="160" height="72" rx="6" class="c-database" stroke-width="1.5"/>
+        <text x="470" y="394" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">SQLite 状态库</text>
+        <text x="470" y="410" class="t-muted" font-size="9" text-anchor="middle">路由 · 队列 · 租约 · Outbox</text>
+        <text x="470" y="424" class="t-database" font-size="7" text-anchor="middle">WAL + 崩溃恢复</text>
 
-        <rect x="890" y="340" width="170" height="74" rx="6" class="c-mask"/>
-        <rect x="890" y="340" width="170" height="74" rx="6" class="c-security" stroke-width="1.5"/>
-        <text x="975" y="375" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Codex iLink Guard</text>
-        <text x="975" y="391" class="t-muted" font-size="9" text-anchor="middle">Hooks · Named Pipe · Spool</text>
-        <text x="975" y="406" class="t-security" font-size="7" text-anchor="middle">同 thread 原子租约</text>
+        <rect x="620" y="360" width="160" height="72" rx="6" class="c-mask"/>
+        <rect x="620" y="360" width="160" height="72" rx="6" class="c-database" stroke-width="1.5"/>
+        <text x="700" y="394" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">媒体目录</text>
+        <text x="700" y="410" class="t-muted" font-size="9" text-anchor="middle">入站文件 · 出站快照</text>
+        <text x="700" y="424" class="t-database" font-size="7" text-anchor="middle">显式 send_file</text>
+
+        <rect x="850" y="360" width="170" height="72" rx="6" class="c-mask"/>
+        <rect x="850" y="360" width="170" height="72" rx="6" class="c-database" stroke-width="1.5"/>
+        <text x="935" y="394" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Desktop 全局状态</text>
+        <text x="935" y="410" class="t-muted" font-size="9" text-anchor="middle">项目顺序 · 新任务权限选择</text>
+        <text x="935" y="424" class="t-database" font-size="7" text-anchor="middle">Bridge 只读</text>
+
+        <rect x="1100" y="360" width="160" height="72" rx="6" class="c-mask"/>
+        <rect x="1100" y="360" width="160" height="72" rx="6" class="c-security" stroke-width="1.5"/>
+        <text x="1180" y="394" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Codex iLink Guard</text>
+        <text x="1180" y="410" class="t-muted" font-size="9" text-anchor="middle">Hooks · Named Pipe · Spool</text>
+        <text x="1180" y="424" class="t-security" font-size="7" text-anchor="middle">在线审批回调</text>
 
         <!-- Connection labels -->
-        <rect x="151.6" y="116" width="62.8" height="14" rx="3" class="c-mask"/>
-        <text x="183" y="126" class="t-backend" font-size="8" text-anchor="middle">消息 / 附件</text>
-        <rect x="351.8" y="116" width="72.4" height="14" rx="3" class="c-mask"/>
-        <text x="388" y="126" class="t-backend" font-size="8" text-anchor="middle">长轮询 / 回包</text>
-        <rect x="590.8" y="147" width="48.4" height="14" rx="3" class="c-mask"/>
-        <text x="615" y="157" class="t-backend" font-size="8" text-anchor="middle">JSON-RPC</text>
-        <rect x="823.6" y="147" width="62.8" height="14" rx="3" class="c-mask"/>
-        <text x="855" y="157" class="t-backend" font-size="8" text-anchor="middle">恢复 / 写入</text>
-        <rect x="1075.8" y="147" width="48.4" height="14" rx="3" class="c-mask"/>
-        <text x="1100" y="157" class="t-backend" font-size="8" text-anchor="middle">同一历史</text>
-        <rect x="523.8" y="252" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
-        <text x="572" y="262" class="t-muted" font-size="8" text-anchor="middle">路由 / 队列 / 送达</text>
-        <rect x="1061.8" y="245" width="72.4" height="14" rx="3" class="c-mask"/>
-        <text x="1098" y="255" class="t-security" font-size="8" text-anchor="middle">Prompt / Stop</text>
-        <rect x="679.6" y="341" width="110.8" height="14" rx="3" class="c-mask"/>
-        <text x="735" y="351" class="t-security" font-size="8" text-anchor="middle">按 thread_id 竞争租约</text>
-        <rect x="686.4" y="245" width="77.2" height="14" rx="3" class="c-mask"/>
-        <text x="725" y="255" class="t-messagebus" font-size="8" text-anchor="middle">生命周期元数据</text>
+        <rect x="136.6" y="150" width="62.8" height="14" rx="3" class="c-mask"/>
+        <text x="168" y="160" class="t-backend" font-size="8" text-anchor="middle">消息 / 附件</text>
+        <rect x="320.8" y="150" width="72.4" height="14" rx="3" class="c-mask"/>
+        <text x="357" y="160" class="t-backend" font-size="8" text-anchor="middle">长轮询 / 回包</text>
+        <rect x="560.8" y="186" width="48.4" height="14" rx="3" class="c-mask"/>
+        <text x="585" y="196" class="t-backend" font-size="8" text-anchor="middle">JSON-RPC</text>
+        <rect x="783.6" y="186" width="62.8" height="14" rx="3" class="c-mask"/>
+        <text x="815" y="196" class="t-backend" font-size="8" text-anchor="middle">恢复 / 写入</text>
+        <rect x="1035.8" y="186" width="48.4" height="14" rx="3" class="c-mask"/>
+        <text x="1060" y="196" class="t-backend" font-size="8" text-anchor="middle">同一历史</text>
+        <rect x="499.8" y="281" width="48.4" height="14" rx="3" class="c-mask"/>
+        <text x="524" y="291" class="t-muted" font-size="8" text-anchor="middle">原子提交</text>
+        <rect x="563.6" y="290" width="62.8" height="14" rx="3" class="c-mask"/>
+        <text x="595" y="300" class="t-messagebus" font-size="8" text-anchor="middle">下载 / 快照</text>
+        <rect x="753.8" y="290" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+        <text x="802" y="300" class="t-messagebus" font-size="8" text-anchor="middle">只读项目与权限选择</text>
+        <rect x="1024.6" y="281" width="134.8" height="14" rx="3" class="c-mask"/>
+        <text x="1092" y="291" class="t-security" font-size="8" text-anchor="middle">Prompt / Stop / Permission</text>
+        <rect x="755" y="476" width="130" height="14" rx="3" class="c-mask"/>
+        <text x="820" y="486" class="t-security" font-size="8" text-anchor="middle">生命周期元数据 / 审批请求</text>
+        <rect x="821.8" y="511" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+        <text x="870" y="521" class="t-security" font-size="8" text-anchor="middle">同 thread 原子租约</text>
 
         <!-- Legend -->
-        <text x="40" y="531" class="t-primary" font-size="9" font-weight="600">Legend</text>
-        <rect x="40" y="536" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
-        <text x="60" y="544" class="t-muted" font-size="8">External</text>
-        <rect x="138" y="536" width="14" height="9" rx="2" class="c-cloud" stroke-width="1"/>
-        <text x="158" y="544" class="t-muted" font-size="8">Cloud</text>
-        <rect x="221" y="536" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
-        <text x="241" y="544" class="t-muted" font-size="8">Backend</text>
-        <rect x="314" y="536" width="14" height="9" rx="2" class="c-database" stroke-width="1"/>
-        <text x="334" y="544" class="t-muted" font-size="8">Database</text>
-        <rect x="412" y="536" width="14" height="9" rx="2" class="c-frontend" stroke-width="1"/>
-        <text x="432" y="544" class="t-muted" font-size="8">Frontend</text>
-        <rect x="510" y="536" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
-        <text x="530" y="544" class="t-muted" font-size="8">Security</text>
+        <text x="40" y="691" class="t-primary" font-size="9" font-weight="600">Legend</text>
+        <rect x="40" y="696" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
+        <text x="60" y="704" class="t-muted" font-size="8">External</text>
+        <rect x="138" y="696" width="14" height="9" rx="2" class="c-cloud" stroke-width="1"/>
+        <text x="158" y="704" class="t-muted" font-size="8">Cloud</text>
+        <rect x="221" y="696" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
+        <text x="241" y="704" class="t-muted" font-size="8">Backend</text>
+        <rect x="314" y="696" width="14" height="9" rx="2" class="c-database" stroke-width="1"/>
+        <text x="334" y="704" class="t-muted" font-size="8">Database</text>
+        <rect x="412" y="696" width="14" height="9" rx="2" class="c-frontend" stroke-width="1"/>
+        <text x="432" y="704" class="t-muted" font-size="8">Frontend</text>
+        <rect x="510" y="696" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
+        <text x="530" y="704" class="t-muted" font-size="8">Security</text>
       </svg>
     </div>
 
@@ -656,36 +674,36 @@
       <div class="card">
         <div class="card-header">
           <div class="card-dot emerald"></div>
-          <h3>共享而非复制</h3>
+          <h3>共享事实源</h3>
         </div>
         <ul>
-          <li>&bull; Codex 持久化任务是唯一历史事实源</li>
-          <li>&bull; Desktop 与微信通过同一个 thread_id 继续</li>
-          <li>&bull; Bridge 不创建第二套 Agent 或 Transcript</li>
+          <li>&bull; Desktop 与微信继续同一个 thread_id</li>
+          <li>&bull; Bridge 不复制 Transcript 或任务权限</li>
+          <li>&bull; 新任务只读取 Desktop 当前权限选择</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot rose"></div>
-          <h3>并发边界</h3>
+          <h3>安全边界</h3>
         </div>
         <ul>
-          <li>&bull; 同一会话一次只允许一个回合写入</li>
-          <li>&bull; Desktop 与 Bridge 竞争 SQLite 原子租约</li>
-          <li>&bull; 不同会话最多并行三个微信回合</li>
+          <li>&bull; 只接受唯一绑定控制者的单聊</li>
+          <li>&bull; 审批决定只存在于在线回调</li>
+          <li>&bull; 出站文件必须由 send_file 显式登记</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot violet"></div>
-          <h3>可靠恢复</h3>
+          <h3>恢复与并发</h3>
         </div>
         <ul>
-          <li>&bull; 入站去重、FIFO 队列与游标均持久化</li>
-          <li>&bull; Dispatch Intent 隔离提交结果未知窗口</li>
-          <li>&bull; 最终回复通过持久化 Outbox 重试</li>
+          <li>&bull; 同一任务 FIFO 串行，不同任务最多并行三个</li>
+          <li>&bull; Dispatch Intent 隔离结果未知窗口</li>
+          <li>&bull; 最终正文与附件通过持久 Outbox 送达</li>
         </ul>
       </div>
     </div>

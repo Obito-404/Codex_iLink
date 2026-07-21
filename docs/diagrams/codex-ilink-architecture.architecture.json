@@ -3,9 +3,9 @@
   "diagram_type": "architecture",
   "meta": {
     "title": "Codex iLink 系统架构",
-    "subtitle": "微信与 Codex Desktop 共享持久化任务；Bridge 只负责传输、路由、仲裁与可靠送达",
+    "subtitle": "微信进入 Windows 本机 Codex；历史与权限仍由 Codex 管理",
     "output": "codex-ilink-architecture.html",
-    "viewBox": [1340, 560]
+    "viewBox": [1340, 720]
   },
   "components": [
     {
@@ -13,80 +13,100 @@
       "type": "external",
       "label": "微信控制者",
       "sublabel": "唯一绑定用户",
-      "pos": [20, 130],
-      "size": [140, 74]
+      "pos": [20, 170],
+      "size": [130, 68]
     },
     {
       "id": "ilink",
       "type": "cloud",
       "label": "腾讯 iLink",
       "sublabel": "长轮询 · 媒体协议",
-      "pos": [205, 130],
-      "size": [150, 74]
+      "pos": [185, 170],
+      "size": [140, 68]
     },
     {
       "id": "bridge",
       "type": "backend",
       "label": "Bridge Daemon",
-      "sublabel": "混合路由 · 调度器",
-      "pos": [420, 130],
-      "size": [160, 74],
-      "tag": "单实例 · 配额 3"
+      "sublabel": "路由 · 调度 · 可靠送达",
+      "pos": [390, 170],
+      "size": [160, 72],
+      "tag": "单实例 · 并发 3"
     },
     {
       "id": "app_server",
       "type": "backend",
       "label": "Codex App Server",
-      "sublabel": "常驻子进程",
-      "pos": [650, 130],
-      "size": [170, 74]
+      "sublabel": "常驻本机子进程",
+      "pos": [620, 170],
+      "size": [160, 72]
     },
     {
       "id": "threads",
       "type": "database",
       "label": "Codex 持久化任务",
       "sublabel": "历史与任务配置事实源",
-      "pos": [890, 130],
-      "size": [170, 74]
+      "pos": [850, 170],
+      "size": [170, 72]
     },
     {
       "id": "desktop",
       "type": "frontend",
       "label": "Codex Desktop",
       "sublabel": "继续同一 thread_id",
-      "pos": [1140, 130],
-      "size": [160, 74]
+      "pos": [1100, 170],
+      "size": [160, 72]
     },
     {
       "id": "sqlite",
       "type": "database",
       "label": "SQLite 状态库",
-      "sublabel": "队列 · Dispatch · Outbox",
-      "pos": [420, 340],
-      "size": [160, 74],
+      "sublabel": "路由 · 队列 · 租约 · Outbox",
+      "pos": [390, 360],
+      "size": [160, 72],
       "tag": "WAL + 崩溃恢复"
     },
     {
-      "id": "hook",
+      "id": "media",
+      "type": "database",
+      "label": "媒体目录",
+      "sublabel": "入站文件 · 出站快照",
+      "pos": [620, 360],
+      "size": [160, 72],
+      "tag": "显式 send_file"
+    },
+    {
+      "id": "desktop_state",
+      "type": "database",
+      "label": "Desktop 全局状态",
+      "sublabel": "项目顺序 · 新任务权限选择",
+      "pos": [850, 360],
+      "size": [170, 72],
+      "tag": "Bridge 只读"
+    },
+    {
+      "id": "guard",
       "type": "security",
       "label": "Codex iLink Guard",
       "sublabel": "Hooks · Named Pipe · Spool",
-      "pos": [890, 340],
-      "size": [170, 74],
-      "tag": "同 thread 原子租约"
+      "pos": [1100, 360],
+      "size": [160, 72],
+      "tag": "在线审批回调"
     }
   ],
   "boundaries": [
     {
       "kind": "region",
-      "label": "Windows 当前用户会话 · DPAPI / 用户 ACL",
+      "label": "Windows 当前用户会话 · DPAPI · 用户 ACL · 无 TCP 监听",
       "wraps": [
         "bridge",
         "app_server",
         "threads",
         "desktop",
         "sqlite",
-        "hook"
+        "media",
+        "desktop_state",
+        "guard"
       ]
     }
   ],
@@ -96,14 +116,17 @@
       "to": "ilink",
       "label": "消息 / 附件",
       "variant": "emphasis",
-      "labelAt": [183, 126]
+      "labelAt": [168, 160]
     },
     {
       "from": "ilink",
       "to": "bridge",
       "label": "长轮询 / 回包",
       "variant": "emphasis",
-      "labelAt": [388, 126]
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "orthogonal-h",
+      "labelAt": [357, 160]
     },
     {
       "from": "bridge",
@@ -126,70 +149,89 @@
     {
       "from": "bridge",
       "to": "sqlite",
-      "label": "路由 / 队列 / 送达",
+      "label": "原子提交",
       "fromSide": "bottom",
       "toSide": "top",
       "route": "orthogonal-v",
-      "labelDx": 72
+      "labelDx": 54
+    },
+    {
+      "from": "bridge",
+      "to": "media",
+      "label": "下载 / 快照",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "labelAt": [595, 300]
+    },
+    {
+      "from": "bridge",
+      "to": "desktop_state",
+      "label": "只读项目与权限选择",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "labelAt": [802, 300]
     },
     {
       "from": "desktop",
-      "to": "hook",
-      "label": "Prompt / Stop",
+      "to": "guard",
+      "label": "Prompt / Stop / Permission",
       "variant": "security",
       "fromSide": "bottom",
       "toSide": "top",
       "route": "orthogonal-v",
-      "via": [[1220, 270], [975, 270]],
-      "labelAt": [1098, 255]
+      "labelDx": -88
     },
     {
-      "from": "hook",
-      "to": "sqlite",
-      "label": "按 thread_id 竞争租约",
-      "variant": "security",
-      "fromSide": "left",
-      "toSide": "right",
-      "route": "straight",
-      "labelDy": -16
-    },
-    {
-      "from": "hook",
+      "from": "guard",
       "to": "bridge",
-      "label": "生命周期元数据",
-      "variant": "dashed",
-      "fromSide": "left",
+      "label": "生命周期元数据 / 审批请求",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [[1180, 500], [470, 500]],
+      "labelAt": [820, 486]
+    },
+    {
+      "from": "guard",
+      "to": "sqlite",
+      "label": "同 thread 原子租约",
+      "variant": "security",
+      "fromSide": "bottom",
       "toSide": "right",
-      "via": [[850, 377], [850, 270], [600, 270], [600, 167]],
-      "labelAt": [725, 255]
+      "via": [[1180, 535], [580, 535], [580, 396]],
+      "labelAt": [870, 521]
     }
   ],
   "cards": [
     {
       "dot": "emerald",
-      "title": "共享而非复制",
+      "title": "共享事实源",
       "items": [
-        "Codex 持久化任务是唯一历史事实源",
-        "Desktop 与微信通过同一个 thread_id 继续",
-        "Bridge 不创建第二套 Agent 或 Transcript"
+        "Desktop 与微信继续同一个 thread_id",
+        "Bridge 不复制 Transcript 或任务权限",
+        "新任务只读取 Desktop 当前权限选择"
       ]
     },
     {
       "dot": "rose",
-      "title": "并发边界",
+      "title": "安全边界",
       "items": [
-        "同一会话一次只允许一个回合写入",
-        "Desktop 与 Bridge 竞争 SQLite 原子租约",
-        "不同会话最多并行三个微信回合"
+        "只接受唯一绑定控制者的单聊",
+        "审批决定只存在于在线回调",
+        "出站文件必须由 send_file 显式登记"
       ]
     },
     {
       "dot": "violet",
-      "title": "可靠恢复",
+      "title": "恢复与并发",
       "items": [
-        "入站去重、FIFO 队列与游标均持久化",
-        "Dispatch Intent 隔离提交结果未知窗口",
-        "最终回复通过持久化 Outbox 重试"
+        "同一任务 FIFO 串行，不同任务最多并行三个",
+        "Dispatch Intent 隔离结果未知窗口",
+        "最终正文与附件通过持久 Outbox 送达"
       ]
     }
   ]

@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Codex iLink 消息执行时序",
+    "subtitle": "持久接收、同任务租约、可选在线审批与可靠回包",
+    "output": "codex-ilink-message-flow.html",
+    "viewBox": [820, 1120]
+  },
+  "participants": [
+    { "id": "controller", "type": "external", "label": "微信控制者", "sublabel": "唯一绑定用户" },
+    { "id": "ilink", "type": "cloud", "label": "腾讯 iLink", "sublabel": "消息与媒体" },
+    { "id": "bridge", "type": "backend", "label": "Bridge", "sublabel": "路由与调度" },
+    { "id": "sqlite", "type": "database", "label": "SQLite", "sublabel": "提交与恢复" },
+    { "id": "app", "type": "backend", "label": "App Server", "sublabel": "Codex runtime" },
+    { "id": "thread", "type": "database", "label": "Codex 任务", "sublabel": "历史事实源" }
+  ],
+  "segments": [
+    { "from": 150, "to": 315, "label": "接收与持久化" },
+    { "from": 325, "to": 455, "label": "恢复并执行" },
+    { "from": 465, "to": 710, "label": "需要用户审批时" },
+    { "from": 720, "to": 990, "label": "终态与可靠回包" }
+  ],
+  "messages": [
+    { "from": "controller", "to": "ilink", "y": 178, "label": "文本 / 媒体", "variant": "emphasis" },
+    { "from": "ilink", "to": "bridge", "y": 218, "label": "长轮询更新", "variant": "emphasis" },
+    { "from": "bridge", "to": "sqlite", "y": 258, "label": "去重 + cursor + payload", "variant": "security", "note": "同一事务接收入站并推进游标" },
+    { "from": "bridge", "to": "sqlite", "y": 298, "label": "申请 thread 租约", "variant": "security", "note": "忙时进入持久 FIFO 队列" },
+    { "from": "bridge", "to": "app", "y": 348, "label": "thread/resume + turn/start", "variant": "emphasis" },
+    { "from": "app", "to": "thread", "y": 393, "label": "读取历史并写入回合", "variant": "emphasis" },
+    { "from": "app", "to": "bridge", "y": 438, "label": "事件流 / dynamic tools", "variant": "return" },
+    { "from": "app", "to": "bridge", "y": 488, "label": "请求用户审批（可选）", "variant": "security", "note": "仅 approvalsReviewer=user 且在线上下文完整" },
+    { "from": "bridge", "to": "ilink", "y": 533, "label": "审批通知 + 短码", "variant": "security" },
+    { "from": "ilink", "to": "controller", "y": 573, "label": "等待 y / n", "variant": "security" },
+    { "from": "controller", "to": "ilink", "y": 613, "label": "y<code> / n<code>", "variant": "security" },
+    { "from": "ilink", "to": "bridge", "y": 653, "label": "本次审批决定", "variant": "security" },
+    { "from": "bridge", "to": "app", "y": 693, "label": "allow / deny", "variant": "security", "note": "决定不落盘，不跨进程复用" },
+    { "from": "app", "to": "thread", "y": 743, "label": "提交回合结果", "variant": "emphasis" },
+    { "from": "app", "to": "bridge", "y": 788, "label": "completed / failed", "variant": "return" },
+    { "from": "bridge", "to": "sqlite", "y": 833, "label": "终态 + Outbox 原子提交", "variant": "security", "note": "正文与已登记附件一起提交" },
+    { "from": "bridge", "to": "ilink", "y": 878, "label": "回复正文 / 附件", "variant": "emphasis" },
+    { "from": "ilink", "to": "controller", "y": 918, "label": "最终回复", "variant": "return" },
+    { "from": "ilink", "to": "bridge", "y": 958, "label": "发送确认", "variant": "return" },
+    { "from": "bridge", "to": "sqlite", "y": 998, "label": "确认送达", "variant": "dashed" }
+  ],
+  "activations": [
+    { "participant": "bridge", "from": 212, "to": 1004, "type": "backend" },
+    { "participant": "sqlite", "from": 252, "to": 1004, "type": "database" },
+    { "participant": "app", "from": 342, "to": 794, "type": "backend" },
+    { "participant": "thread", "from": 387, "to": 750, "type": "database" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "顺序",
+      "items": [
+        "同一 thread_id 严格 FIFO 串行",
+        "不同任务最多并行三个微信回合",
+        "切换项目不会移动已接收的工作"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "审批",
+      "items": [
+        "auto_review 不重复通知微信",
+        "user 审批只处理仍在线的原请求",
+        "断线、超时或上下文缺失时安全回退"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "故障恢复",
+      "items": [
+        "入站、队列、Dispatch 与 Outbox 均可恢复",
+        "提交结果未知时不自动重试输入",
+        "发送重试复用稳定 client_id"
+      ]
+    }
+  ]
+}

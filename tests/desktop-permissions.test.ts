@@ -102,6 +102,41 @@ test("Desktop permission loading falls back to the fixed backup", () => {
   }
 });
 
+test("Desktop permission loading reports both missing state files", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-desktop-permissions-"));
+  const primaryPath = join(directory, ".codex-global-state.json");
+  try {
+    assert.throws(
+      () => readDesktopPermissionSelection(primaryPath),
+      (error) =>
+        error instanceof AggregateError &&
+        error.message === "E_DESKTOP_PERMISSION_STATE_UNAVAILABLE" &&
+        error.errors.length === 2,
+    );
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("Desktop permission loading reports when primary and backup are invalid", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-desktop-permissions-"));
+  const primaryPath = join(directory, ".codex-global-state.json");
+  try {
+    writeFileSync(primaryPath, "{not-json", "utf8");
+    writeFileSync(`${primaryPath}.bak`, "{also-not-json", "utf8");
+
+    assert.throws(
+      () => readDesktopPermissionSelection(primaryPath),
+      (error) =>
+        error instanceof AggregateError &&
+        error.message === "E_DESKTOP_PERMISSION_STATE_UNAVAILABLE" &&
+        error.errors.length === 2,
+    );
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("a semantic error in primary state never falls back to stale full access", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-desktop-permissions-"));
   const primaryPath = join(directory, ".codex-global-state.json");

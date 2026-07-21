@@ -5045,6 +5045,102 @@ test("a resume failure does not leave later messages blocked behind a stale queu
   }
 });
 
+test("aborting a Desktop approval is not blocked by a hanging WeChat notification", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-approval-abort-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const started: string[] = [];
+  const responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
+  let notificationStarted!: () => void;
+  let releaseNotification!: () => void;
+  const notificationObserved = new Promise<void>((resolve) => {
+    notificationStarted = resolve;
+  });
+  const notificationGate = new Promise<void>((resolve) => {
+    releaseNotification = resolve;
+  });
+  let hangNotification = false;
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+
+  const bridge = new BridgeEngine({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      respondToServerRequest(id, result) {
+        responses.push({ id, result });
+      },
+      async resumeThread(threadId) {
+        return { thread: { id: threadId } };
+      },
+      async startTurn(input) {
+        started.push(input.text);
+        return { turn: { id: "turn-after-abort" } };
+      },
+    },
+    ilink: {
+      async sendText(input) {
+        if (hangNotification) {
+          notificationStarted();
+          await notificationGate;
+        }
+        return { accepted: true, clientId: input.clientId };
+      },
+    },
+    leases,
+    mainThreadId: "thread-main",
+    newId: () => "approval-abort-client",
+    now: () => 5_000,
+    session,
+    state,
+  });
+
+  try {
+    await bridge.ingestBatch({
+      cursor: "cursor-approval-abort-context",
+      messages: [textMessage(29, "help")],
+    });
+    hangNotification = true;
+    const abortController = new AbortController();
+    const approval = bridge.requestDesktopApproval({
+      requestId: "desktop-request-abort",
+      requestFingerprint: "a".repeat(64),
+      signal: abortController.signal,
+      summary: "npm publish",
+      threadId: "thread-approval-abort",
+      toolName: "Bash",
+      turnId: "turn-approval-abort",
+    });
+
+    await notificationObserved;
+    abortController.abort();
+    assert.equal(
+      await Promise.race([
+        approval,
+        new Promise<"timed-out">((resolve) =>
+          setTimeout(() => resolve("timed-out"), 1_000),
+        ),
+      ]),
+      "passthrough",
+    );
+
+    releaseNotification();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    hangNotification = false;
+    await bridge.ingestBatch({
+      cursor: "cursor-approval-abort-y",
+      messages: [textMessage(30, "y")],
+    });
+    assert.deepEqual(started, ["y"]);
+    assert.deepEqual(responses, []);
+  } finally {
+    releaseNotification();
+    bridge.close();
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("live Bridge approvals are decided silently from WeChat", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-approval-"));
   const state = new SqliteState(join(directory, "state.sqlite"));
@@ -5533,10 +5629,10 @@ test("a transient approval notification failure stays pending instead of declini
     assert.equal(
       await bridge.ingestCodexEvent({
         id: 78,
-        method: "item/fileChange/requestApproval",
+        method: "item/commandExecution/requestApproval",
         params: {
+          command: "write outside workspace",
           itemId: "item-approval-retry",
-          reason: "write outside workspace",
           threadId: "thread-approval-retry",
           turnId: "turn-approval-retry",
         },
@@ -5591,8 +5687,9 @@ test("closing the bridge durably reports that a live approval became invalid", a
     });
     await bridge.ingestCodexEvent({
       id: 80,
-      method: "item/fileChange/requestApproval",
+      method: "item/commandExecution/requestApproval",
       params: {
+        command: "write project file",
         itemId: "item-approval-close",
         threadId: "thread-approval-close",
         turnId: "turn-approval-close",

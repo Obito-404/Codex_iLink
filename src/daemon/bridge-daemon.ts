@@ -345,7 +345,13 @@ export class BridgeDaemon {
       ) {
         return { behavior: "passthrough" };
       }
-      if (!event.turnId || !event.requestId || !bridge) {
+      if (
+        !event.turnId ||
+        !event.requestId ||
+        !event.requestFingerprint ||
+        !event.requestSummary ||
+        !bridge
+      ) {
         return { behavior: "passthrough" };
       }
       if (
@@ -362,17 +368,15 @@ export class BridgeDaemon {
       }
       if (
         permissions.approvalsReviewer !== "user" ||
-        permissions.approvalPolicy === "never"
+        permissions.approvalPolicy !== "on-request"
       ) {
         return { behavior: "passthrough" };
       }
       const behavior = await bridge.requestDesktopApproval({
         requestId: event.requestId,
+        requestFingerprint: event.requestFingerprint,
         signal,
-        summary:
-          event.requestSummary ??
-          event.toolName ??
-          "Codex Desktop permission request",
+        summary: event.requestSummary,
         threadId: event.sessionId,
         toolName: event.toolName,
         turnId: event.turnId,

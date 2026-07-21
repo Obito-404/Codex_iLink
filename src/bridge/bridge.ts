@@ -679,6 +679,7 @@ export class BridgeEngine {
 
   async requestDesktopApproval(input: {
     requestId: string;
+    requestFingerprint: string;
     signal: AbortSignal;
     summary: string;
     threadId: string;
@@ -709,21 +710,26 @@ export class BridgeEngine {
     input.signal.addEventListener("abort", abort, { once: true });
 
     const method =
-      input.toolName === "apply_patch"
+      input.toolName?.toLowerCase() === "apply_patch"
         ? "item/fileChange/requestApproval"
         : "item/commandExecution/requestApproval";
-    const ingested = await approvals.ingestCallback({
+    void approvals.ingestCallback({
       isLive: () => !settled && !input.signal.aborted,
       method,
       params: {
         command: input.summary,
         itemId: input.requestId,
+        requestFingerprint: input.requestFingerprint,
         threadId: input.threadId,
         turnId: input.turnId,
       },
       respond: (approved) => finish(approved ? "allow" : "deny"),
-    });
-    if (!ingested) finish("passthrough");
+    }).then(
+      (ingested) => {
+        if (!ingested) finish("passthrough");
+      },
+      () => finish("passthrough"),
+    );
 
     try {
       return await decision;

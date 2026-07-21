@@ -1656,6 +1656,8 @@ test("Desktop user approval is actionable in WeChat while auto_review stays sile
     resumeStarted = resolve;
   });
   let reviewer: "auto_review" | "user" = "user";
+  let approvalPolicy: unknown = "on-request";
+  let failResume = false;
   let updates: "approve" | "timeout" = "timeout";
   state.setMainThreadId("thread-main");
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
@@ -1689,8 +1691,9 @@ test("Desktop user approval is actionable in WeChat while auto_review stays sile
           resumeStarted();
           await resumeGate;
         }
+        if (failResume) throw new Error("resume failed");
         return {
-          approvalPolicy: "on-request",
+          approvalPolicy,
           approvalsReviewer: reviewer,
           thread: { id: threadId },
         };
@@ -1772,6 +1775,72 @@ test("Desktop user approval is actionable in WeChat while auto_review stays sile
       requestSummary: "missing official request id",
       toolName: "Bash",
     }), { behavior: "passthrough" });
+    assert.equal(sent.length, 1);
+
+    assert.equal(leases.tryAcquire({
+      createdAtMs: 40_002,
+      instanceId: "bridge-instance",
+      operationId: "bridge-owned-operation",
+      owner: "bridge",
+      threadId: "thread-bridge-owned",
+      turnId: "bridge-owned-turn",
+    }).acquired, true);
+    assert.deepEqual(await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      capturedAtMs: 40_002,
+      eventName: "PermissionRequest",
+      requestId: "desktop-request-bridge-owned",
+      requestSummary: "must stay in App Server",
+      sessionId: "thread-bridge-owned",
+      toolName: "Bash",
+      turnId: "bridge-owned-turn",
+    }), { behavior: "passthrough" });
+    assert.equal(sent.length, 1);
+
+    assert.deepEqual(await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      capturedAtMs: 40_002,
+      eventName: "PermissionRequest",
+      requestId: "desktop-request-no-summary",
+      requestSummary: null,
+      toolName: "unknown_tool",
+    }), { behavior: "passthrough" });
+    assert.equal(sent.length, 1);
+
+    failResume = true;
+    assert.deepEqual(await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      capturedAtMs: 40_002,
+      eventName: "PermissionRequest",
+      requestId: "desktop-request-resume-failed",
+      requestSummary: "npm publish",
+      toolName: "Bash",
+    }), { behavior: "passthrough" });
+    failResume = false;
+    assert.equal(sent.length, 1);
+
+    approvalPolicy = "never";
+    assert.deepEqual(await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      capturedAtMs: 40_002,
+      eventName: "PermissionRequest",
+      requestId: "desktop-request-never",
+      requestSummary: "npm publish",
+      toolName: "Bash",
+    }), { behavior: "passthrough" });
+    approvalPolicy = "on-request";
+    assert.equal(sent.length, 1);
+
+    approvalPolicy = "future-policy";
+    assert.deepEqual(await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      capturedAtMs: 40_002,
+      eventName: "PermissionRequest",
+      requestId: "desktop-request-unknown-policy",
+      requestSummary: "npm publish",
+      toolName: "Bash",
+    }), { behavior: "passthrough" });
+    approvalPolicy = "on-request";
     assert.equal(sent.length, 1);
 
     const shutdownApproval = daemon.ingestHookEvent({
@@ -2832,6 +2901,7 @@ function desktopStopEvent() {
     eventName: "Stop",
     model: null,
     permissionMode: null,
+    requestFingerprint: "a".repeat(64),
     schemaVersion: 1 as const,
     sessionId: "thread-desktop",
     source: null,

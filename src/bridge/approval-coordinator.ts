@@ -63,11 +63,14 @@ type LiveApproval = PendingApproval & {
   callbacks: ApprovalCallback[];
   notificationText: string;
   params: Record<string, unknown>;
+  payloadFingerprint: string;
+  requestIdentity: string;
   timer: NodeJS.Timeout;
 };
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000;
 const DEFAULT_REMINDER_DELAYS_MS = [60_000, 5 * 60_000] as const;
+const MAX_APPROVAL_SUMMARY_CODE_POINTS = 500;
 const APPROVAL_METHODS = new Set<ApprovalMethod>([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
@@ -111,22 +114,53 @@ export class ApprovalCoordinator {
     if (!isApprovalMethod(event.method) || event.id === undefined) return false;
     const id = event.id;
     const method = event.method;
-    return this.ingestCallback({
-      isLive: () => this.#isLive(id),
-      method,
-      params: event.params,
-      respond: (approved) =>
-        this.#respond(
-          id,
-          approved
-            ? approvalResult(method, event.params)
-            : denialResult(method),
-        ),
-    });
+    const params = approvalParamsSnapshot(event.params);
+    if (params === null) {
+      this.#respond(id, denialResult(method));
+      return true;
+    }
+    if (
+      !stringField(params, "threadId") ||
+      !stringField(params, "turnId") ||
+      !stringField(params, "itemId")
+    ) {
+      this.#respond(id, denialResult(method));
+      return true;
+    }
+    const approvedResult = approvalResult(method, params);
+    if (approvedResult === null) {
+      this.#respond(id, denialResult(method));
+      return true;
+    }
+    return this.#ingestCallback(
+      {
+        isLive: () => this.#isLive(id),
+        method,
+        params,
+        respond: (approved) =>
+          this.#respond(
+            id,
+            approved ? approvedResult : denialResult(method),
+          ),
+      },
+      false,
+    );
   }
 
   async ingestCallback(input: LiveApprovalCallbackInput): Promise<boolean> {
-    const { method, params } = input;
+    return this.#ingestCallback(input, true);
+  }
+
+  async #ingestCallback(
+    input: LiveApprovalCallbackInput,
+    trustedCallbackSummary: boolean,
+  ): Promise<boolean> {
+    const { method } = input;
+    const params = approvalParamsSnapshot(input.params);
+    if (params === null) {
+      input.respond(false);
+      return true;
+    }
     const threadId = stringField(params, "threadId");
     const turnId = stringField(params, "turnId");
     const itemId = stringField(params, "itemId");
@@ -134,14 +168,29 @@ export class ApprovalCoordinator {
     if (!input.isLive()) return true;
 
     this.expire();
+    const summary = approvalSummary(method, params, trustedCallbackSummary);
+    if (summary === null) {
+      input.respond(false);
+      return true;
+    }
+    const payloadFingerprint = approvalPayloadFingerprint(method, params);
+    if (payloadFingerprint === null) {
+      input.respond(false);
+      return true;
+    }
+    const requestIdentity = approvalRequestIdentity(method, params);
     const existing = [...this.#live.values()].find(
       (approval) =>
         approval.method === method &&
         approval.threadId === threadId &&
         approval.turnId === turnId &&
-        stringField(approval.params, "itemId") === itemId,
+        approval.requestIdentity === requestIdentity,
     );
     if (existing) {
+      if (existing.payloadFingerprint !== payloadFingerprint) {
+        input.respond(false);
+        return true;
+      }
       existing.callbacks.push({
         isLive: input.isLive,
         respond: input.respond,
@@ -160,8 +209,10 @@ export class ApprovalCoordinator {
       method,
       notificationText: "",
       params,
+      payloadFingerprint,
+      requestIdentity,
       reminderCount: 0,
-      summary: approvalSummary(method, params),
+      summary,
       timer,
       threadId,
       turnId,
@@ -240,6 +291,8 @@ export class ApprovalCoordinator {
           callbacks: _callbacks,
           notificationText: _notificationText,
           params: _params,
+          payloadFingerprint: _payloadFingerprint,
+          requestIdentity: _requestIdentity,
           timer: _timer,
           ...approval
         }) => approval,
@@ -411,10 +464,13 @@ function isApprovalMethod(method: string): method is ApprovalMethod {
 function approvalResult(
   method: ApprovalMethod,
   params: Record<string, unknown>,
-): Record<string, unknown> {
+): Record<string, unknown> | null {
   if (method === "item/permissions/requestApproval") {
-    const permissions = recordField(params, "permissions") ?? {};
-    return { permissions, scope: "turn" };
+    const permissions = recordField(params, "permissions");
+    const parsed = permissions ? parsePermissionProfile(permissions) : null;
+    return parsed
+      ? { permissions: parsed.normalized, scope: "turn" }
+      : null;
   }
   return { decision: "accept" };
 }
@@ -428,27 +484,613 @@ function denialResult(method: ApprovalMethod): Record<string, unknown> {
 function approvalSummary(
   method: ApprovalMethod,
   params: Record<string, unknown>,
-): string {
-  const details = [
-    stringField(params, "reason"),
-    stringField(params, "command"),
-    stringField(params, "cwd"),
-  ].filter((value): value is string => Boolean(value));
-  const reason = truncate(
-    [...new Set(details)].join(" | ") ||
-      "Codex requests additional permission",
-  );
+  trustedCallbackSummary: boolean,
+): string | null {
+  const rawDetails: string[] = [];
+  const reason = stringField(params, "reason");
+  const command = stringField(params, "command");
+  if (
+    [reason, command].some(
+      (value) =>
+        value !== null &&
+        (containsCredentialContext(value) ||
+          containsNonDisplayableLocalPath(value)),
+    )
+  ) {
+    return null;
+  }
+  if (reason) rawDetails.push(reason);
+  if (command) rawDetails.push(command);
+  if (hasOwn(params, "cwd")) {
+    const projectName = windowsProjectName(params.cwd);
+    if (!projectName) return null;
+    rawDetails.push(`Project: ${projectName}`);
+  }
+
+  if (method === "item/commandExecution/requestApproval") {
+    if (!command) return null;
+    if (
+      !trustedCallbackSummary &&
+      !hasOnlyKeys(params, [
+        "additionalPermissions",
+        "approvalId",
+        "availableDecisions",
+        "command",
+        "commandActions",
+        "cwd",
+        "environmentId",
+        "itemId",
+        "networkApprovalContext",
+        "proposedExecpolicyAmendment",
+        "proposedNetworkPolicyAmendments",
+        "reason",
+        "startedAtMs",
+        "threadId",
+        "turnId",
+      ])
+    ) {
+      return null;
+    }
+    if (
+      (hasOwn(params, "environmentId") && params.environmentId !== null) ||
+      (hasOwn(params, "networkApprovalContext") &&
+        params.networkApprovalContext !== null) ||
+      (hasOwn(params, "commandActions") && params.commandActions !== null) ||
+      (hasOwn(params, "proposedExecpolicyAmendment") &&
+        params.proposedExecpolicyAmendment !== null) ||
+      (hasOwn(params, "proposedNetworkPolicyAmendments") &&
+        params.proposedNetworkPolicyAmendments !== null)
+    ) {
+      return null;
+    }
+    if (hasOwn(params, "additionalPermissions")) {
+      const value = params.additionalPermissions;
+      if (value !== null) {
+        const profile = asRecord(value);
+        const parsed = profile ? parsePermissionProfile(profile) : null;
+        if (!parsed) return null;
+        rawDetails.push(`Additional permissions: ${parsed.summary}`);
+      }
+    }
+    if (hasOwn(params, "availableDecisions")) {
+      const decisions = params.availableDecisions;
+      if (
+        decisions !== null &&
+        (!Array.isArray(decisions) || !decisions.includes("accept"))
+      ) {
+        return null;
+      }
+    }
+  }
+
+  if (
+    method === "item/fileChange/requestApproval" &&
+    (!trustedCallbackSummary ||
+      !hasOnlyKeys(params, [
+        "command",
+        "itemId",
+        "requestFingerprint",
+        "threadId",
+        "turnId",
+      ]) ||
+      !command ||
+      !/^[a-f0-9]{64}$/u.test(
+        stringField(params, "requestFingerprint") ?? "",
+      ) ||
+      (hasOwn(params, "grantRoot") && params.grantRoot !== null))
+  ) {
+    // Native file-change callbacks do not contain the actual patch or target.
+    // Only the already validated online Hook callback carries a bound summary.
+    return null;
+  }
+
+  if (method === "item/permissions/requestApproval") {
+    if (
+      !hasOnlyKeys(params, [
+        "cwd",
+        "environmentId",
+        "itemId",
+        "permissions",
+        "reason",
+        "startedAtMs",
+        "threadId",
+        "turnId",
+      ]) ||
+      (hasOwn(params, "environmentId") && params.environmentId !== null)
+    ) {
+      return null;
+    }
+    const permissions = recordField(params, "permissions");
+    const parsed = permissions ? parsePermissionProfile(permissions) : null;
+    if (!parsed) return null;
+    rawDetails.push(`Requested permissions: ${parsed.summary}`);
+  }
+
+  if (rawDetails.length === 0) return null;
+  if (
+    rawDetails.some(
+      (value) =>
+        /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value) ||
+        redactionCouldHideExecution(value),
+    )
+  ) {
+    return null;
+  }
+  if (
+    rawDetails.some((value) =>
+      hasMoreThanCodePoints(value, MAX_APPROVAL_SUMMARY_CODE_POINTS),
+    )
+  ) {
+    return null;
+  }
+  const details = rawDetails.map(sanitizeApprovalDetail);
+  if (details.some((detail, index) => detail !== rawDetails[index])) {
+    // Redaction must never change the command a user is authorizing. Requests
+    // containing secrets or forged reply instructions stay in the native UI.
+    return null;
+  }
+  const summaryDetails = [...new Set(details)].join(" | ");
+  if (!summaryDetails) return null;
   const label =
     method === "item/commandExecution/requestApproval"
       ? "Command"
       : method === "item/fileChange/requestApproval"
         ? "File change"
         : "Permission";
-  return `${label}: ${reason}`;
+  const summary = `${label}: ${summaryDetails}`;
+  return hasMoreThanCodePoints(summary, MAX_APPROVAL_SUMMARY_CODE_POINTS)
+    ? null
+    : summary;
 }
 
-function truncate(value: string): string {
-  return [...value].slice(0, 500).join("");
+function sanitizeApprovalDetail(value: string): string {
+  if (containsCredentialSyntax(value)) return "[REDACTED]";
+  return value
+    .replace(/\p{Cc}/gu, " ")
+      .replace(/\p{Cf}/gu, "")
+      .replace(
+        /(\bauthorization\s*[:=]\s*(?:bearer|basic)\s+)[^\s&|,'";}<>]+/giu,
+        "$1[REDACTED]",
+      )
+      .replace(
+        /((?:--)?[A-Z0-9_-]*(?:TOKEN|PASSWORD|PASSWD|SECRET|KEY|COOKIE|SESSION)["']?\s*(?:=|:|\s)\s*)(?:"[^"]*"|'[^']*'|[^\s&|,'";}<>]+)/giu,
+        "$1[REDACTED]",
+      )
+      .replace(
+        /(\b(?:set-cookie|cookie)\s*:\s*)[^\s&|;<>"']+/giu,
+        "$1[REDACTED]",
+      )
+      .replace(
+        /(^|\s)(--cookie(?:-jar)?(?:=|\s+))(?:"[^"]*"|'[^']*'|[^\s&|,'";}<>]+)/gimu,
+        "$1$2[REDACTED]",
+      )
+      .replace(
+        /(^|\s)((?:-u|--user|-b)(?:=|\s+))(?:"[^"]*"|'[^']*'|[^\s&|,'";}<>]+)/gimu,
+        "$1$2[REDACTED]",
+      )
+      .replace(
+        /([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/gu,
+        "$1[REDACTED]@",
+      )
+      .replace(
+        /(?:回复|答复)\s*[:：]?\s*(?:y|n)(?:\s*(?:或|\/)\s*(?:y|n))?/giu,
+        "[REDACTED]",
+      )
+      .replace(/\breply\s*[:：]?\s*(?:y|n)\b/giu, "[REDACTED]")
+      .replace(/【(?:请求内容|系统操作)】/gu, "[REDACTED]");
+}
+
+function hasMoreThanCodePoints(value: string, limit: number): boolean {
+  let count = 0;
+  for (const _character of value) {
+    count += 1;
+    if (count > limit) return true;
+  }
+  return false;
+}
+
+function approvalPayloadFingerprint(
+  method: ApprovalMethod,
+  params: Record<string, unknown>,
+): string | null {
+  try {
+    return createHash("sha256")
+      .update(method)
+      .update("\0")
+      .update(canonicalJson(params, new Set()))
+      .digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+function approvalParamsSnapshot(
+  params: Record<string, unknown>,
+): Record<string, unknown> | null {
+  try {
+    const snapshot = JSON.parse(
+      canonicalJson(params, new Set()),
+    ) as unknown;
+    return asRecord(snapshot);
+  } catch {
+    return null;
+  }
+}
+
+function approvalRequestIdentity(
+  method: ApprovalMethod,
+  params: Record<string, unknown>,
+): string {
+  const approvalId =
+    method === "item/commandExecution/requestApproval"
+      ? stringField(params, "approvalId")
+      : null;
+  return approvalId
+    ? `approval:${approvalId}`
+    : `item:${stringField(params, "itemId") ?? "unknown"}`;
+}
+
+function redactionCouldHideExecution(value: string): boolean {
+  if (!containsPotentialSecret(value)) return false;
+  return /\$\(|`|[&|;<>^()]|%[^%]+%|![^!]+!/u.test(value);
+}
+
+function containsPotentialSecret(value: string): boolean {
+  return (
+    containsCredentialSyntax(value) ||
+    /\bauthorization\s*[:=]\s*(?:bearer|basic)\s+/iu.test(value) ||
+    /(?:--)?[A-Z0-9_-]*(?:TOKEN|PASSWORD|PASSWD|SECRET|KEY|COOKIE|SESSION)["']?\s*(?:=|:|\s)/iu.test(
+      value,
+    ) ||
+    /\b(?:set-cookie|cookie)\s*:/iu.test(value) ||
+    /(^|\s)--cookie(?:-jar)?(?:=|\s+)/imu.test(value) ||
+    /(^|\s)(?:-u|--user|-b)(?:=|\s+)/imu.test(value) ||
+    /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/u.test(value)
+  );
+}
+
+function containsCredentialSyntax(value: string): boolean {
+  const credentialHeader =
+    /\b(?:proxy-)?authorization\s*[:=]|\bx[-_](?:auth|api[-_]?key)\s*[:=]/iu;
+  return (
+    credentialHeader.test(value) ||
+    /(?:^|\s)--proxy-user(?:=|\s+)/u.test(value) ||
+    executableUsesArgument(
+      value,
+      "docker",
+      /\blogin\b[^\r\n]*(?:^|\s)(?:-p(?:=|\s|(?=\S)|$)|--password(?:-stdin)?(?:=|\s|$))/mu,
+    ) ||
+    executableUsesArgument(
+      value,
+      "mysql(?:admin|check|dump|import|pump|show|slap)?|mariadb(?:-(?:admin|check|dump|import|show))?",
+      /(?:^|\s)(?:-p(?:=|\s|(?=\S)|$)|--password(?:=|\s|$))/mu,
+    ) ||
+    executableUsesArgument(
+      value,
+      "sshpass",
+      /(?:^|\s)-p(?:=|\s|(?=\S)|$)/mu,
+    ) ||
+    executableUsesArgument(
+      value,
+      "redis-cli",
+      /(?:^|\s)(?:-a|--pass)(?:=|\s|(?=\S)|$)/mu,
+    ) ||
+    executableUsesArgument(
+      value,
+      "sqlcmd|bcp",
+      /(?:^|\s)-P(?:=|\s|(?=\S)|$)/mu,
+    ) ||
+    executableUsesArgument(
+      value,
+      "gpg2?",
+      /(?:^|\s)--passphrase(?:=|\s|$)/mu,
+    ) ||
+    executableUsesArgument(
+      value,
+      "7z(?:a|r)?|rar|unrar",
+      /(?:^|\s)-[pP](?:=|\s|(?=\S)|$)/mu,
+    ) ||
+    executableUsesArgument(
+      value,
+      "zip|unzip",
+      /(?:^|\s)-P(?:=|\s|(?=\S)|$)/mu,
+    ) ||
+    executableUsesArgument(
+      value,
+      "plink|pscp|psftp|putty",
+      /(?:^|\s)-[pP][wW](?:=|\s|(?=\S)|$)/mu,
+    ) ||
+    executableUsesArgument(
+      value,
+      "ldapsearch",
+      /(?:^|\s)-w(?:=|\s|(?=\S)|$)/mu,
+    ) ||
+    executableUsesArgument(
+      value,
+      "sqlplus|rman|expdp|impdp|sqlldr",
+      /(?:^|\s)(?:"[^"\r\n\s/]+\/[^"\r\n\s]+"|'[^'\r\n\s/]+\/[^'\r\n\s]+'|[^\s"'&|;<>/]+\/[^\s"'&|;<>]+)/mu,
+    )
+  );
+}
+
+function executableUsesArgument(
+  value: string,
+  executablePattern: string,
+  argumentPattern: RegExp,
+): boolean {
+  const executable = new RegExp(
+    `\\b(?:${executablePattern})(?:\\.exe)?\\b`,
+    "giu",
+  );
+  for (const match of value.matchAll(executable)) {
+    const start = (match.index ?? 0) + match[0].length;
+    argumentPattern.lastIndex = 0;
+    if (argumentPattern.test(value.slice(start))) return true;
+  }
+  return false;
+}
+
+function containsCredentialContext(value: string): boolean {
+  return (
+    containsCredentialSyntax(value) ||
+    /(?:^|[^A-Z0-9])(?:AUTH(?:ENTICATION|ORIZATION)?|OAUTH\d*|BEARER|CREDENTIALS?|LOGIN|PASSWORD|PASSWD|PASSPHRASE|PASS|SECRET|TOKEN|API[-_]?KEY|ACCESS[-_]?KEY|PRIVATE[-_]?KEY|COOKIE|SESSION|CERT(?:IFICATE)?|NETRC)(?:[^A-Z0-9]|$)/iu.test(
+      value,
+    ) ||
+    /(?:^|[^A-Z0-9])(?:[A-Z0-9_-]*(?:PWD|PASS|AUTH|CREDENTIALS?))\s*(?:=|:)/iu.test(
+      value,
+    )
+  );
+}
+
+function containsNonDisplayableLocalPath(value: string): boolean {
+  if (/^\s*shutdown(?:\.exe)?\s+\/(?:s|r|l|h)(?:\s+\/f)?(?:\s+\/t\s+\d+)?\s*$/iu.test(value)) {
+    return false;
+  }
+  return (
+    /(?<![\p{L}\p{N}_])[A-Za-z]:[\\/]/u.test(value) ||
+    /(?:^|[\s"'=([{,;:])\\\\/u.test(value) ||
+    /(?:^|[\s"'=([{,;:])\\(?!\\)[^\s"'<>|:]*/u.test(value) ||
+    /(?:^|[\s"'=([{,;])\/(?!\/)[^\s"'<>|:]*/u.test(value) ||
+    /\bfile:\/{3}/iu.test(value) ||
+    /\b(?:HKLM|HKCU|HKCR|HKU|CERT|REGISTRY):[\\/]/iu.test(value)
+  );
+}
+
+function windowsProjectName(value: unknown): string | null {
+  if (
+    typeof value !== "string" ||
+    value !== value.trim() ||
+    !/^[A-Za-z]:[\\/]/u.test(value)
+  ) {
+    return null;
+  }
+  const segments = value.slice(3).split(/[\\/]/u);
+  if (
+    segments.length === 0 ||
+    segments.some(
+      (segment) =>
+        !segment ||
+        segment !== segment.trim() ||
+        segment === "." ||
+        segment === ".." ||
+        /[ .]$/u.test(segment) ||
+        /[<>:"|?*\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(segment) ||
+        /^(?:con|prn|aux|nul|conin\$|conout\$|clock\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$/iu.test(
+          segment,
+        ),
+    )
+  ) {
+    return null;
+  }
+  return segments.at(-1) ?? null;
+}
+
+type ParsedPermissionProfile = {
+  normalized: Record<string, unknown>;
+  summary: string;
+};
+
+function parsePermissionProfile(
+  profile: Record<string, unknown>,
+): ParsedPermissionProfile | null {
+  if (!hasOnlyKeys(profile, ["fileSystem", "network"])) return null;
+  const normalized: Record<string, unknown> = {};
+  const summary: string[] = [];
+
+  if (hasOwn(profile, "network")) {
+    if (profile.network === null) {
+      normalized.network = null;
+    } else {
+      const network = asRecord(profile.network);
+      if (!network || !hasOnlyKeys(network, ["enabled"])) return null;
+      const normalizedNetwork: Record<string, unknown> = {};
+      if (hasOwn(network, "enabled")) {
+        if (network.enabled === null) {
+          normalizedNetwork.enabled = null;
+        } else if (typeof network.enabled === "boolean") {
+          normalizedNetwork.enabled = network.enabled;
+          summary.push(
+            `network access ${network.enabled ? "enabled" : "disabled"}`,
+          );
+        } else {
+          return null;
+        }
+      }
+      normalized.network = normalizedNetwork;
+    }
+  }
+
+  if (hasOwn(profile, "fileSystem")) {
+    if (profile.fileSystem === null) {
+      normalized.fileSystem = null;
+    } else {
+      const fileSystem = asRecord(profile.fileSystem);
+      if (
+        !fileSystem ||
+        !hasOnlyKeys(fileSystem, [
+          "entries",
+          "globScanMaxDepth",
+          "read",
+          "write",
+        ])
+      ) {
+        return null;
+      }
+      const normalizedFileSystem: Record<string, unknown> = {};
+
+      for (const field of ["read", "write"] as const) {
+        if (!hasOwn(fileSystem, field)) continue;
+        const value = fileSystem[field];
+        if (value === null) {
+          normalizedFileSystem[field] = null;
+          continue;
+        }
+        if (
+          !Array.isArray(value) ||
+          !value.every((entry) => typeof entry === "string") ||
+          value.length > 0
+        ) {
+          // Legacy entries contain local paths. A basename is ambiguous while
+          // the full path is private, so native approval is required.
+          return null;
+        }
+        normalizedFileSystem[field] = [];
+      }
+
+      if (hasOwn(fileSystem, "entries")) {
+        const entries = fileSystem.entries;
+        if (entries === null) {
+          normalizedFileSystem.entries = null;
+        } else if (Array.isArray(entries)) {
+          const normalizedEntries: Record<string, unknown>[] = [];
+          for (const entry of entries) {
+            const parsed = parsePermissionEntry(entry);
+            if (!parsed) return null;
+            normalizedEntries.push(parsed.normalized);
+            summary.push(parsed.summary);
+          }
+          normalizedFileSystem.entries = normalizedEntries;
+        } else {
+          return null;
+        }
+      }
+
+      if (hasOwn(fileSystem, "globScanMaxDepth")) {
+        const depth = fileSystem.globScanMaxDepth;
+        if (depth === null) {
+          normalizedFileSystem.globScanMaxDepth = null;
+        } else if (Number.isInteger(depth) && Number(depth) >= 1) {
+          normalizedFileSystem.globScanMaxDepth = depth;
+          summary.push(`filesystem glob scan depth ${String(depth)}`);
+        } else {
+          return null;
+        }
+      }
+      normalized.fileSystem = normalizedFileSystem;
+    }
+  }
+
+  return summary.length > 0
+    ? { normalized, summary: summary.join(", ") }
+    : null;
+}
+
+function parsePermissionEntry(value: unknown): {
+  normalized: Record<string, unknown>;
+  summary: string;
+} | null {
+  const entry = asRecord(value);
+  if (!entry || !hasOnlyKeys(entry, ["access", "path"])) return null;
+  if (
+    entry.access !== "read" &&
+    entry.access !== "write" &&
+    entry.access !== "deny"
+  ) {
+    return null;
+  }
+  const path = asRecord(entry.path);
+  if (
+    !path ||
+    !hasOnlyKeys(path, ["type", "value"]) ||
+    path.type !== "special"
+  ) {
+    // Explicit and glob paths cannot be both private and unambiguous in a
+    // cross-channel notification.
+    return null;
+  }
+  const special = asRecord(path.value);
+  if (!special || typeof special.kind !== "string") return null;
+  const labels: Record<string, string> = {
+    minimal: "minimal system paths",
+    project_roots: "project roots",
+    root: "filesystem root",
+    slash_tmp: "/tmp",
+    tmpdir: "temporary directory",
+  };
+  const label = labels[special.kind];
+  if (!label) return null;
+  if (special.kind === "project_roots") {
+    if (!hasOnlyKeys(special, ["kind", "subpath"])) return null;
+    if (hasOwn(special, "subpath") && special.subpath !== null) return null;
+  } else if (!hasOnlyKeys(special, ["kind"])) {
+    return null;
+  }
+  const normalizedSpecial: Record<string, unknown> = { kind: special.kind };
+  if (hasOwn(special, "subpath")) normalizedSpecial.subpath = null;
+  return {
+    normalized: {
+      access: entry.access,
+      path: { type: "special", value: normalizedSpecial },
+    },
+    summary: `filesystem ${entry.access}: ${label}`,
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function hasOwn(value: Record<string, unknown>, name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, name);
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  const allowedKeys = new Set(allowed);
+  return Object.keys(value).every((key) => allowedKeys.has(key));
+}
+
+function canonicalJson(value: unknown, seen: Set<object>): string {
+  if (value === null) return "null";
+  if (typeof value === "string" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("E_APPROVAL_PARAMS_INVALID");
+    return JSON.stringify(value);
+  }
+  if (typeof value !== "object") throw new Error("E_APPROVAL_PARAMS_INVALID");
+  if (seen.has(value)) throw new Error("E_APPROVAL_PARAMS_CYCLIC");
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => canonicalJson(item, seen)).join(",")}]`;
+    }
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${canonicalJson(record[key], seen)}`,
+      )
+      .join(",")}}`;
+  } finally {
+    seen.delete(value);
+  }
 }
 
 function stringField(
@@ -464,7 +1106,11 @@ function approvalNotification(
   existingApprovals: readonly PendingApproval[],
 ): string {
   if (existingApprovals.length === 0) {
-    return `需要批准\n${approval.summary}\n回复：y 或 n`;
+    return [
+      "需要批准",
+      `【请求内容】${approval.summary}`,
+      "【系统操作】回复：y 或 n",
+    ].join("\n");
   }
   return [
     "当前有多个待审批：",
@@ -472,7 +1118,7 @@ function approvalNotification(
       (existing) => `${existing.code}：${existing.summary}`,
     ),
     `${approval.code}：${approval.summary}`,
-    "逐条：y<code> / n<code>；批量：ya / na（需确认）",
+    "【系统操作】逐条：y<code> / n<code>；批量：ya / na（需确认）",
   ].join("\n");
 }
 
@@ -490,12 +1136,12 @@ function approvalReminder(
 }
 
 function approvalClientId(approval: LiveApproval): string {
-  const itemId = stringField(approval.params, "itemId") ?? "unknown";
   const identity = [
     approval.method,
     approval.threadId,
     approval.turnId,
-    itemId,
+    approval.requestIdentity,
+    approval.payloadFingerprint,
   ].join("\0");
   const suffix = createHash("sha256")
     .update(identity)

@@ -15,6 +15,7 @@ export type HookEvent = {
   eventName: string;
   model: string | null;
   permissionMode: string | null;
+  requestFingerprint?: string | null;
   requestId?: string | null;
   requestSummary?: string | null;
   schemaVersion: 1;
@@ -338,6 +339,7 @@ function parseHookEvent(raw: string): HookEvent | null {
       !isNullableString(event.cwd) ||
       !isNullableString(event.model) ||
       !isNullableString(event.permissionMode) ||
+      !isOptionalFingerprint(event.requestFingerprint) ||
       !isOptionalNullableString(event.requestId) ||
       !isOptionalNullableString(event.requestSummary) ||
       !isNullableString(event.toolName) ||
@@ -349,6 +351,12 @@ function parseHookEvent(raw: string): HookEvent | null {
   } catch {
     return null;
   }
+}
+
+function isOptionalFingerprint(value: unknown): boolean {
+  return value === undefined ||
+    value === null ||
+    (typeof value === "string" && /^[a-f\d]{64}$/u.test(value));
 }
 
 function isOptionalNullableString(value: unknown): value is string | null | undefined {

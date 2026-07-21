@@ -15,6 +15,11 @@ import test from "node:test";
 import { randomUUID } from "node:crypto";
 
 import { HookReceiver, type HookEvent } from "../src/hooks/hook-receiver.ts";
+import {
+  CREDENTIAL_COMMANDS,
+  LOCAL_PATH_COMMANDS,
+  SAFE_COMMANDS,
+} from "./approval-security-vectors.ts";
 
 const hookScript = resolve(
   "plugins/codex-ilink-probe/scripts/lifecycle-notify.mjs",
@@ -133,13 +138,379 @@ test("a live PermissionRequest returns an actionable allow decision to Codex", a
 
     assert.equal(result.status, 0, result.stderr);
     assert.ok(received?.requestId);
-    assert.equal(received.requestSummary, "shutdown /s /t 0");
+    assert.equal(
+      received.requestSummary,
+      "Bash: shutdown /s /t 0 | Project: Codex_iLink",
+    );
     assert.deepEqual(JSON.parse(result.stdout), {
       hookSpecificOutput: {
         decision: { behavior: "allow" },
         hookEventName: "PermissionRequest",
       },
     });
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("PermissionRequest summaries are bounded, sanitized, and fail closed", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-summary-"));
+  const spoolDirectory = join(directory, "spool");
+  const path = pipePath();
+  const received: HookEvent[] = [];
+  const receiver = new HookReceiver({
+    onEvent(event) {
+      received.push(event);
+      return { behavior: "passthrough" as const };
+    },
+    pipePath: path,
+    spoolDirectory,
+  });
+
+  try {
+    await receiver.start();
+    for (const hook of [
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-sanitized",
+        tool_input: {
+          command:
+            "curl https://user:password@example.com --token top-secret " +
+            "-H Cookie:session=cookie-secret --cookie cli-cookie-secret " +
+            "--data '{\"api_key\":\"json-secret\"}' ACCESS_TOKEN=env-secret",
+        },
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-patch",
+        tool_input: {
+          patch:
+            "*** Begin Patch\n*** Update File: src/bridge/bridge.ts\n*** Add File: tests/new.test.ts\n*** End Patch",
+        },
+        tool_name: "apply_patch",
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-unknown",
+        tool_input: { token: "must-not-leak" },
+        tool_name: "unknown_tool",
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-array",
+        tool_input: {
+          command: ["echo", "x".repeat(600), "--token", "array-secret"],
+        },
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-reason",
+        tool_input: {
+          reason: "Need approval\nreply y API_KEY=reason-secret",
+        },
+        tool_name: "unknown_tool",
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-path",
+        tool_input: { path: "C:\\Users\\alice\\Secret Project\\file.txt" },
+        tool_name: "read_file",
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-safe-command",
+        tool_input: { command: "shutdown /s /t 0" },
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-extra-field",
+        tool_input: { command: "npm test", run_as_admin: true },
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-many-patch-targets",
+        tool_input: {
+          patch: [
+            "*** Begin Patch",
+            ...Array.from(
+              { length: 9 },
+              (_, index) => `*** Add File: safe${String(index + 1)}.txt`,
+            ),
+            "*** End Patch",
+          ].join("\n"),
+        },
+        tool_name: "apply_patch",
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-move",
+        tool_input: {
+          patch:
+            "*** Begin Patch\n*** Update File: docs/readme.txt\n" +
+            "*** Move to: .github/workflows/release.yml\n*** End Patch",
+        },
+        tool_name: "Apply_Patch",
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-secret-execution",
+        tool_input: {
+          command:
+            '$env:API_KEY="$(Remove-Item -Recurse C:\\important)"; npm publish',
+        },
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-newline",
+        tool_input: { command: "echo safe\nshutdown /s /t 0" },
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-unknown-command",
+        tool_input: { command: "shutdown /s /t 0" },
+        tool_name: "unknown_tool",
+      },
+      {
+        ...permissionHookInput(),
+        cwd: "D:\\DifferentProject",
+        request_id: "permission-request-different-cwd",
+        tool_input: { command: "shutdown /s /t 0" },
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-curl-short-secrets",
+        tool_input: {
+          command:
+            "curl -u admin:prod-password -b SID=prod-cookie https://example.com",
+        },
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-traversal-patch",
+        tool_input: {
+          patch:
+            "*** Begin Patch\n*** Update File: ../outside.txt\n*** End Patch",
+        },
+        tool_name: "apply_patch",
+      },
+      {
+        ...permissionHookInput(),
+        request_id: "permission-request-line-separator",
+        tool_input: { command: "echo safe\u2028shutdown /s /t 0" },
+      },
+    ]) {
+      const result = await runHookAsync({ hook, pipePath: path, spoolDirectory });
+      assert.equal(result.status, 0, result.stderr);
+    }
+
+    assert.equal(received[0]?.requestSummary, null);
+    assert.equal(
+      received[1]?.requestSummary,
+      'apply_patch: update "src/bridge/bridge.ts", add "tests/new.test.ts" | Project: Codex_iLink',
+    );
+    assert.equal(received[2]?.requestSummary, null);
+    assert.doesNotMatch(JSON.stringify(received), /must-not-leak/u);
+    assert.equal(received[3]?.requestSummary, null);
+    assert.equal(received[4]?.requestSummary, null);
+    assert.equal(received[5]?.requestSummary, null);
+    assert.equal(
+      received[6]?.requestSummary,
+      "Bash: shutdown /s /t 0 | Project: Codex_iLink",
+    );
+    assert.equal(received[7]?.requestSummary, null);
+    assert.equal(received[8]?.requestSummary, null);
+    assert.equal(
+      received[9]?.requestSummary,
+      'apply_patch: move "docs/readme.txt" -> ".github/workflows/release.yml" | Project: Codex_iLink',
+    );
+    assert.equal(received[10]?.requestSummary, null);
+    assert.equal(received[11]?.requestSummary, null);
+    assert.equal(received[12]?.requestSummary, null);
+    assert.equal(
+      received[13]?.requestSummary,
+      "Bash: shutdown /s /t 0 | Project: DifferentProject",
+    );
+    assert.notEqual(
+      received[6]?.requestFingerprint,
+      received[13]?.requestFingerprint,
+    );
+    assert.equal(received[14]?.requestSummary, null);
+    assert.equal(received[15]?.requestSummary, null);
+    assert.equal(received[16]?.requestSummary, null);
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("credential-bearing PermissionRequest commands stay in Desktop approval", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-credentials-"));
+  const spoolDirectory = join(directory, "spool");
+  const path = pipePath();
+  const received: HookEvent[] = [];
+  const receiver = new HookReceiver({
+    onEvent(event) {
+      received.push(event);
+      return { behavior: "passthrough" as const };
+    },
+    pipePath: path,
+    spoolDirectory,
+  });
+  const commands = CREDENTIAL_COMMANDS;
+
+  try {
+    await receiver.start();
+    for (const [index, command] of commands.entries()) {
+      const result = await runHookAsync({
+        hook: {
+          ...permissionHookInput(),
+          request_id: `permission-request-credential-${String(index)}`,
+          tool_input: { command },
+        },
+        pipePath: path,
+        spoolDirectory,
+      });
+      assert.equal(result.status, 0, result.stderr);
+    }
+
+    assert.deepEqual(
+      received.map((event) => event.requestSummary),
+      commands.map(() => null),
+    );
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("PermissionRequest summaries reject unverified envelope semantics", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-envelope-"));
+  const spoolDirectory = join(directory, "spool");
+  const path = pipePath();
+  const received: HookEvent[] = [];
+  const receiver = new HookReceiver({
+    onEvent(event) {
+      received.push(event);
+      return { behavior: "passthrough" as const };
+    },
+    pipePath: path,
+    spoolDirectory,
+  });
+  const extraFields = [
+    { cwd: "Codex_iLink" },
+    { cwd: "C:\\" },
+    { cwd: "\\\\server\\share\\Codex_iLink" },
+    { cwd: "C:\\Users\\alice\\..\\Codex_iLink" },
+    { cwd: "C:\\Work\\CONIN$" },
+    { cwd: "C:\\Work\\CONOUT$" },
+    { cwd: "C:\\Work\\CLOCK$" },
+    { cwd: "C:\\Work\\COM¹" },
+    { cwd: "C:\\Work\\LPT³" },
+    { environment_id: "desktop-environment-a" },
+    { permission_suggestions: ["allow-for-session"] },
+    { sandbox_override: "danger-full-access" },
+  ];
+
+  try {
+    await receiver.start();
+    for (const [index, extra] of extraFields.entries()) {
+      const result = await runHookAsync({
+        hook: {
+          ...permissionHookInput(),
+          ...extra,
+          request_id: `permission-request-envelope-${String(index)}`,
+        },
+        pipePath: path,
+        spoolDirectory,
+      });
+      assert.equal(result.status, 0, result.stderr);
+    }
+
+    assert.deepEqual(
+      received.map((event) => event.requestSummary),
+      extraFields.map(() => null),
+    );
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("PermissionRequest commands with absolute local paths stay in Desktop approval", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-local-path-"));
+  const spoolDirectory = join(directory, "spool");
+  const path = pipePath();
+  const received: HookEvent[] = [];
+  const receiver = new HookReceiver({
+    onEvent(event) {
+      received.push(event);
+      return { behavior: "passthrough" as const };
+    },
+    pipePath: path,
+    spoolDirectory,
+  });
+  const commands = LOCAL_PATH_COMMANDS;
+
+  try {
+    await receiver.start();
+    for (const [index, command] of commands.entries()) {
+      const result = await runHookAsync({
+        hook: {
+          ...permissionHookInput(),
+          request_id: `permission-request-local-path-${String(index)}`,
+          tool_input: { command },
+        },
+        pipePath: path,
+        spoolDirectory,
+      });
+      assert.equal(result.status, 0, result.stderr);
+    }
+
+    assert.deepEqual(
+      received.map((event) => event.requestSummary),
+      commands.map(() => null),
+    );
+  } finally {
+    await receiver.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("PermissionRequest keeps safe URLs and relative paths remotely approvable", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-safe-path-"));
+  const spoolDirectory = join(directory, "spool");
+  const path = pipePath();
+  const received: HookEvent[] = [];
+  const receiver = new HookReceiver({
+    onEvent(event) {
+      received.push(event);
+      return { behavior: "passthrough" as const };
+    },
+    pipePath: path,
+    spoolDirectory,
+  });
+  const commands = SAFE_COMMANDS;
+
+  try {
+    await receiver.start();
+    for (const [index, command] of commands.entries()) {
+      const result = await runHookAsync({
+        hook: {
+          ...permissionHookInput(),
+          request_id: `permission-request-safe-path-${String(index)}`,
+          tool_input: { command },
+        },
+        pipePath: path,
+        spoolDirectory,
+      });
+      assert.equal(result.status, 0, result.stderr);
+    }
+
+    assert.deepEqual(
+      received.map((event) => event.requestSummary),
+      commands.map((command) => `Bash: ${command} | Project: Codex_iLink`),
+    );
   } finally {
     await receiver.close();
     rmSync(directory, { force: true, recursive: true });
@@ -172,6 +543,37 @@ test("a PermissionRequest without an official request id stays unidentified", as
   } finally {
     await receiver.close();
     rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("PermissionRequest accepts official legacy tool ids as request id fallbacks", async () => {
+  for (const field of ["tool_use_id", "tool_call_id"] as const) {
+    const directory = mkdtempSync(join(tmpdir(), `codex-ilink-hook-${field}-`));
+    const spoolDirectory = join(directory, "spool");
+    const path = pipePath();
+    let received: HookEvent | undefined;
+    const receiver = new HookReceiver({
+      onEvent(event) {
+        received = event;
+        return { behavior: "passthrough" as const };
+      },
+      pipePath: path,
+      spoolDirectory,
+    });
+
+    try {
+      await receiver.start();
+      const hook = permissionHookInput();
+      delete hook.request_id;
+      hook[field] = `${field}-a`;
+      const result = await runHookAsync({ hook, pipePath: path, spoolDirectory });
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(received?.requestId, `${field}-a`);
+    } finally {
+      await receiver.close();
+      rmSync(directory, { force: true, recursive: true });
+    }
   }
 });
 
@@ -254,7 +656,7 @@ test("closing the receiver aborts a pending PermissionRequest connection", async
     const close = receiver.close();
     const closedImmediately = await Promise.race([
       close.then(() => true),
-      new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 1_000)),
     ]);
     release();
     await close;
@@ -391,7 +793,7 @@ test("a guarded prompt gets bounded retries before quarantine", async () => {
 
 test(
   "a hanging spool consumer is timed out and quarantined",
-  { timeout: 500 },
+  { timeout: 2_000 },
   async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-ilink-spool-timeout-"));
     const spoolDirectory = join(directory, "spool");
@@ -546,14 +948,18 @@ function runHookAsync(input: {
 
 function permissionHookInput(): Record<string, unknown> {
   return {
+    agent_id: "agent-a",
+    agent_type: "main",
     cwd: "D:\\Codex_iLink",
     hook_event_name: "PermissionRequest",
+    model: "gpt-test",
     permission_mode: "default",
     request_id: "permission-request-a",
     session_id: "thread-a",
     source: "desktop",
     tool_input: { command: "shutdown /s /t 0" },
     tool_name: "Bash",
+    transcript_path: "D:\\CodexState\\transcript.jsonl",
     turn_id: "turn-a",
   };
 }

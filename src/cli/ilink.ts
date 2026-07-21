@@ -116,10 +116,23 @@ export async function configureCodexPlugin(input: {
         "移除旧 Codex iLink Guard 失败",
       );
     }
-    requireCodexCommandSuccess(
-      input.runCodex(["plugin", "marketplace", "remove", "codex-ilink"]),
-      "移除旧 Codex iLink Marketplace 失败",
-    );
+    const removeMarketplace = input.runCodex([
+      "plugin",
+      "marketplace",
+      "remove",
+      "codex-ilink",
+    ]);
+    if (marketplaceIsNotConfigured(removeMarketplace, "codex-ilink")) {
+      requireCodexCommandSuccess(
+        input.runCodex(["plugin", "marketplace", "remove", "personal"]),
+        "移除旧版 personal Codex iLink Marketplace 失败",
+      );
+    } else {
+      requireCodexCommandSuccess(
+        removeMarketplace,
+        "移除旧 Codex iLink Marketplace 失败",
+      );
+    }
     requireCodexCommandSuccess(
       input.runCodex(["plugin", "marketplace", "add", input.packageRoot]),
       "添加 Codex iLink Marketplace 失败",
@@ -180,6 +193,20 @@ function requireCodexCommandSuccess(
   if (result.status === 0) return;
   const detail = result.stderr.trim() || result.stdout.trim();
   throw new Error(detail ? `${summary}：${detail}` : summary);
+}
+
+function marketplaceIsNotConfigured(
+  result: CodexCommandResult,
+  marketplace: string,
+): boolean {
+  if (result.status === 0) return false;
+  const message = `${result.stderr}\n${result.stdout}`.toLowerCase();
+  const normalized = marketplace.toLowerCase();
+  return ["`", "'", '\"'].some((quote) =>
+    message.includes(
+      `marketplace ${quote}${normalized}${quote} is not configured or installed`,
+    ),
+  );
 }
 
 export async function runSetupInstallation(
@@ -506,11 +533,15 @@ function installedPluginVersion(packageRoot: string): string {
   return manifest.version;
 }
 
-function runCodexCommand(
+export function runCodexCommand(
   executable: string,
   args: readonly string[],
+  environment: NodeJS.ProcessEnv = process.env,
 ): CodexCommandResult {
+  const workingDirectory = runtimePaths(environment).dataDirectory;
+  mkdirSync(workingDirectory, { recursive: true });
   const result = spawnSync(executable, [...args], {
+    cwd: workingDirectory,
     encoding: "utf8",
     shell: false,
     windowsHide: true,

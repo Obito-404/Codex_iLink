@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,6 +16,7 @@ import {
   CLI_HELP,
   configureCodexPlugin,
   runCli,
+  runCodexCommand,
   runSetupInstallation,
   type CliCommands,
   type SetupActions,
@@ -252,6 +254,71 @@ test("setup replaces a Codex iLink marketplace that points to an older installat
     ["plugin", "marketplace", "add", "C:\\npm\\node_modules\\codex-ilink"],
     ["plugin", "add", "codex-ilink-probe@codex-ilink"],
   ]);
+});
+
+test("setup migrates the legacy personal alias for a Codex iLink marketplace", async () => {
+  const calls: string[][] = [];
+  await configureCodexPlugin({
+    packageRoot: "C:\\npm\\node_modules\\codex-ilink",
+    pluginVersion: "0.1.4",
+    runCodex: (args) => {
+      calls.push([...args]);
+      const command = args.join(" ");
+      if (command === "plugin marketplace list") {
+        return {
+          status: 0,
+          stderr: "",
+          stdout: "MARKETPLACE ROOT\ncodex-ilink D:\\old\\codex-ilink\n",
+        };
+      }
+      if (command === "plugin list") {
+        return {
+          status: 0,
+          stderr: "",
+          stdout:
+            "PLUGIN STATUS VERSION PATH\n" +
+            "codex-ilink-probe@codex-ilink installed, enabled 0.1.3 D:\\old\\plugin\n",
+        };
+      }
+      if (command === "plugin marketplace remove codex-ilink") {
+        return {
+          status: 1,
+          stderr:
+            "Error: marketplace `codex-ilink` is not configured or installed",
+          stdout: "",
+        };
+      }
+      return { status: 0, stderr: "", stdout: "" };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["plugin", "marketplace", "list"],
+    ["plugin", "list"],
+    ["plugin", "remove", "codex-ilink-probe@codex-ilink"],
+    ["plugin", "marketplace", "remove", "codex-ilink"],
+    ["plugin", "marketplace", "remove", "personal"],
+    ["plugin", "marketplace", "add", "C:\\npm\\node_modules\\codex-ilink"],
+    ["plugin", "add", "codex-ilink-probe@codex-ilink"],
+  ]);
+});
+
+test("Codex plugin commands use an existing runtime data directory as cwd", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-codex-cwd-"));
+  const expected = join(directory, "Codex_iLink");
+  try {
+    const result = runCodexCommand(
+      process.execPath,
+      ["-e", "process.stdout.write(process.cwd())"],
+      { ...process.env, LOCALAPPDATA: directory },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, expected);
+    assert.equal(existsSync(expected), true);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
 });
 
 test("setup refreshes an older Guard plugin from the current npm package", async () => {

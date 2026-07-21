@@ -490,12 +490,10 @@ function approvalSummary(
   const reason = stringField(params, "reason");
   const command = stringField(params, "command");
   if (
-    [reason, command].some(
-      (value) =>
-        value !== null &&
-        (containsCredentialContext(value) ||
-          containsNonDisplayableLocalPath(value)),
-    )
+    (reason !== null &&
+      (containsCredentialContext(reason) ||
+        containsNonDisplayableLocalPath(reason))) ||
+    (command !== null && containsNonDisplayableCommand(command))
   ) {
     return null;
   }
@@ -735,6 +733,56 @@ function redactionCouldHideExecution(value: string): boolean {
   return /\$\(|`|[&|;<>^()]|%[^%]+%|![^!]+!/u.test(value);
 }
 
+function containsNonDisplayableCommand(value: string): boolean {
+  // The approval payload does not identify the shell. Dynamic evaluation is
+  // therefore unverifiable, while lexical escape variants are checked as
+  // additional candidates and fall back to the native client on any match.
+  if (containsUnverifiableShellExpansion(value)) return true;
+  return shellDetectionCandidates(value).some(
+    (candidate) =>
+      containsCredentialContext(candidate) ||
+      containsNonDisplayableLocalPath(candidate),
+  );
+}
+
+function containsUnverifiableShellExpansion(value: string): boolean {
+  return (
+    /[$`]|%[A-Za-z_][A-Za-z0-9_]*(?::[^%\r\n]*)?%|![A-Za-z_][A-Za-z0-9_]*(?::[^!\r\n]*)?!/u.test(
+      value,
+    ) ||
+    /(?:^|[\s"'=([{,;])~(?=$|[\\/])/u.test(value) ||
+    /(?:^|[;&|])\s*[.&]\s*\(/u.test(value) ||
+    /(?:^|[\s;&|])[^\s"'{}]*\{[^{}\s"',]*,[^{}\s"',]*\}[^\s"'{}]*(?=\s|$)/u.test(
+      value,
+    ) ||
+    /\b(?:iex|invoke-expression|start-process)\b/iu.test(value) ||
+    /\b(?:system|exec|spawn|popen)\s*\(/iu.test(value) ||
+    /(?:^|[\s;&|])(?:bash|bun|cmd|deno|fish|lua|luajit|node|perl|php|powershell|pwsh|py|python(?:\d+(?:\.\d+)*)?|ruby|rscript|sh|zsh)(?:\.exe)?\b[^\r\n]*(?:\s-(?:c|e|command|encodedcommand)\b|\s--(?:eval|execute)\b|\s\/[ck]\b)/iu.test(
+      value,
+    )
+  );
+}
+
+function shellDetectionCandidates(value: string): string[] {
+  const candidates = [value];
+  const withoutCaretEscapes = value.replace(/\^/gu, "");
+  candidates.push(withoutCaretEscapes);
+  const withoutLiteralConcatenation = withoutCaretEscapes.replace(
+    /["']\s*\+\s*["']/gu,
+    "",
+  );
+  candidates.push(withoutLiteralConcatenation);
+  const withoutQuotes = withoutLiteralConcatenation.replace(/["']/gu, "");
+  candidates.push(withoutQuotes);
+  candidates.push(
+    withoutQuotes.replace(
+      /(?<=[\p{L}\p{N}_-])\\(?=[\p{L}\p{N}_-])/gu,
+      "",
+    ),
+  );
+  return [...new Set(candidates)];
+}
+
 function containsPotentialSecret(value: string): boolean {
   return (
     containsCredentialSyntax(value) ||
@@ -753,6 +801,7 @@ function containsCredentialSyntax(value: string): boolean {
   const credentialHeader =
     /\b(?:proxy-)?authorization\s*[:=]|\bx[-_](?:auth|api[-_]?key)\s*[:=]/iu;
   return (
+    containsGenericCredentialArgument(value) ||
     credentialHeader.test(value) ||
     /(?:^|\s)--proxy-user(?:=|\s+)/u.test(value) ||
     executableUsesArgument(
@@ -810,6 +859,15 @@ function containsCredentialSyntax(value: string): boolean {
       "sqlplus|rman|expdp|impdp|sqlldr",
       /(?:^|\s)(?:"[^"\r\n\s/]+\/[^"\r\n\s]+"|'[^'\r\n\s/]+\/[^'\r\n\s]+'|[^\s"'&|;<>/]+\/[^\s"'&|;<>]+)/mu,
     )
+  );
+}
+
+function containsGenericCredentialArgument(value: string): boolean {
+  // Attached non-numeric -p/-P values are credential-like across clients.
+  // Separated flags remain tool-specific because -p is also widely used for
+  // ports, directories, patches, and published container ports.
+  return /(?:^|\s)-[pP](?:=)?(?:"(?=[^"\r\n]*[\p{L}_])[^"\r\n]+"|'(?=[^'\r\n]*[\p{L}_])[^'\r\n]+'|(?=[^\s"'&|;<>]*[\p{L}_])[^\s"'&|;<>]+)/mu.test(
+    value,
   );
 }
 

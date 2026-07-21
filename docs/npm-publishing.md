@@ -63,7 +63,7 @@ npm run release:check
 再用候选版本和标签显式检查通道策略，例如：
 
 ```powershell
-node scripts/release-policy.mjs --version 0.1.0-rc.3 --tag v0.1.0-rc.3 --json
+node scripts/release-policy.mjs --version 0.1.0-rc.4 --tag v0.1.0-rc.4 --json
 ```
 
 输出必须显示预期的 `githubPrerelease`、`npmTag` 和 `requiresAuthenticode`。版本无效或标签不精确匹配时脚本返回失败。
@@ -91,7 +91,7 @@ npm pack --ignore-scripts
 
 ```powershell
 $smoke = Join-Path $env:TEMP "codex-ilink-smoke"
-npm install --global --prefix $smoke .\codex-ilink-0.1.0-rc.3.tgz
+npm install --global --prefix $smoke .\codex-ilink-0.1.0-rc.4.tgz
 & "$smoke\ilink.cmd" --help
 & "$smoke\ilink.cmd" doctor
 & "$smoke\ilink.cmd" setup
@@ -132,8 +132,8 @@ Get-FileHash -Algorithm SHA256 ".\artifacts\codex-ilink-x86_64-pc-windows-msvc.e
 确认 `package.json` 版本、验收结果和目标通道后，推送精确标签：
 
 ```powershell
-git tag v0.1.0-rc.3
-git push origin v0.1.0-rc.3
+git tag v0.1.0-rc.4
+git push origin v0.1.0-rc.4
 ```
 
 `.github/workflows/release.yml` 在干净的 Windows x64 runner 上按顺序执行：
@@ -178,7 +178,7 @@ ilink setup
 
 ```powershell
 $installer = irm https://raw.githubusercontent.com/Obito-404/Codex_iLink/main/scripts/install.ps1
-& ([scriptblock]::Create($installer)) -Channel preview -Version 0.1.0-rc.3
+& ([scriptblock]::Create($installer)) -Channel preview -Version 0.1.0-rc.4
 ```
 
 预览安装必须提供不带 `v` 前缀的完整预发布版本，校验 SHA-256，并在签名无效时显示警告。稳定版安装默认使用 `-Channel stable`，且 Authenticode 无效时直接失败。稳定发布后还要从 GitHub 下载 exe 与 `.sha256`，重新验证 SHA-256 和 Authenticode，再完成一次真实安装冒烟。

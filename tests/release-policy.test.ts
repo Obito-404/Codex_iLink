@@ -130,7 +130,7 @@ test("the workflow CLI reads package.json and writes typed GitHub outputs", () =
       env: {
         ...process.env,
         GITHUB_OUTPUT: output,
-        RELEASE_TAG: "v0.1.0-rc.3",
+        RELEASE_TAG: "v0.1.0-rc.4",
       },
       windowsHide: true,
     });
@@ -139,8 +139,8 @@ test("the workflow CLI reads package.json and writes typed GitHub outputs", () =
     assert.equal(
       readFileSync(output, "utf8"),
       [
-        "version=0.1.0-rc.3",
-        "tag=v0.1.0-rc.3",
+        "version=0.1.0-rc.4",
+        "tag=v0.1.0-rc.4",
         "github_prerelease=true",
         "npm_tag=next",
         "requires_authenticode=false",

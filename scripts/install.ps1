@@ -11,7 +11,7 @@ Set-StrictMode -Version Latest
 
 if ($Channel -eq "preview") {
   if ([string]::IsNullOrWhiteSpace($Version)) {
-    throw "Preview installation requires an explicit -Version (for example 0.1.0-rc.3)."
+    throw "Preview installation requires an explicit -Version (for example 0.1.0-rc.4)."
   }
   $previewVersionPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*$'
   if ($Version -notmatch $previewVersionPattern) {

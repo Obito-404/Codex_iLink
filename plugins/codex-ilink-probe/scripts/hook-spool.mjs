@@ -266,7 +266,6 @@ function sanitizeSummary(value) {
 
 function containsNonDisplayableCredential(value) {
   return (
-    containsGenericCredentialArgument(value) ||
     /\b(?:(?:proxy-)?authorization|x-auth(?:entication)?(?:-[a-z0-9-]+)?|x-api-key)\s*[:=]/iu.test(
       value,
     ) ||
@@ -298,15 +297,6 @@ function containsNonDisplayableCredential(value) {
       "sqlplus|rman|expdp|impdp|sqlldr",
       /(?:^|\s)(?:"[^"\r\n\s/]+\/[^"\r\n\s]+"|'[^'\r\n\s/]+\/[^'\r\n\s]+'|[^\s"'&|;<>/]+\/[^\s"'&|;<>]+)/mu,
     )
-  );
-}
-
-function containsGenericCredentialArgument(value) {
-  // Attached non-numeric -p/-P values are credential-like across clients.
-  // Separated flags remain tool-specific because -p is also widely used for
-  // ports, directories, patches, and published container ports.
-  return /(?:^|\s)-[pP](?:=)?(?:"(?=[^"\r\n]*[\p{L}_])[^"\r\n]+"|'(?=[^'\r\n]*[\p{L}_])[^'\r\n]+'|(?=[^\s"'&|;<>]*[\p{L}_])[^\s"'&|;<>]+)/mu.test(
-    value,
   );
 }
 

@@ -801,7 +801,6 @@ function containsCredentialSyntax(value: string): boolean {
   const credentialHeader =
     /\b(?:proxy-)?authorization\s*[:=]|\bx[-_](?:auth|api[-_]?key)\s*[:=]/iu;
   return (
-    containsGenericCredentialArgument(value) ||
     credentialHeader.test(value) ||
     /(?:^|\s)--proxy-user(?:=|\s+)/u.test(value) ||
     executableUsesArgument(
@@ -859,15 +858,6 @@ function containsCredentialSyntax(value: string): boolean {
       "sqlplus|rman|expdp|impdp|sqlldr",
       /(?:^|\s)(?:"[^"\r\n\s/]+\/[^"\r\n\s]+"|'[^'\r\n\s/]+\/[^'\r\n\s]+'|[^\s"'&|;<>/]+\/[^\s"'&|;<>]+)/mu,
     )
-  );
-}
-
-function containsGenericCredentialArgument(value: string): boolean {
-  // Attached non-numeric -p/-P values are credential-like across clients.
-  // Separated flags remain tool-specific because -p is also widely used for
-  // ports, directories, patches, and published container ports.
-  return /(?:^|\s)-[pP](?:=)?(?:"(?=[^"\r\n]*[\p{L}_])[^"\r\n]+"|'(?=[^'\r\n]*[\p{L}_])[^'\r\n]+'|(?=[^\s"'&|;<>]*[\p{L}_])[^\s"'&|;<>]+)/mu.test(
-    value,
   );
 }
 

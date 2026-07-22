@@ -1003,7 +1003,6 @@ function phaseLabel(phase: HostStatus["phase"]): string {
   return "停止中";
 }
 
-
 function isILinkAuthenticationExpired(status: HostStatus | null): boolean {
   return (
     status?.ilinkAuthPausedUntilMs !== undefined &&

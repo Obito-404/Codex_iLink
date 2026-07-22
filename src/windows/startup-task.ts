@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { dirname, isAbsolute } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export const STARTUP_TASK_NAME = "Codex iLink Bridge";
 const TASK_DISABLED_EXIT_CODE = 3;
@@ -8,9 +8,9 @@ const ENABLE_SCRIPT = String.raw`
 $ErrorActionPreference = "Stop"
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction ` +
-  String.raw`-Execute $env:CODEX_ILINK_STARTUP_EXECUTABLE ` +
-  String.raw`-Argument $env:CODEX_ILINK_STARTUP_ARGUMENTS ` +
-  String.raw`-WorkingDirectory $env:CODEX_ILINK_STARTUP_WORKING_DIRECTORY
+  String.raw`-Execute $env:CODEX_ILINK_STARTUP_ACTION_EXECUTABLE ` +
+  String.raw`-Argument $env:CODEX_ILINK_STARTUP_ACTION_ARGUMENTS ` +
+  String.raw`-WorkingDirectory $env:CODEX_ILINK_STARTUP_ACTION_WORKING_DIRECTORY
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries ` +
@@ -69,10 +69,12 @@ export function enableWindowsStartupTask(
   if (launch.args.some((argument) => argument.includes("\0"))) {
     throw new Error("E_STARTUP_TASK_INVALID_ARGUMENT");
   }
+  const sourceEnvironment = options.environment ?? process.env;
+  const action = hiddenStartupAction(launch, sourceEnvironment);
   const environment = startupEnvironment(options.environment, {
-    CODEX_ILINK_STARTUP_ARGUMENTS: serializeWindowsArguments(launch.args),
-    CODEX_ILINK_STARTUP_EXECUTABLE: launch.executable,
-    CODEX_ILINK_STARTUP_WORKING_DIRECTORY: dirname(launch.executable),
+    CODEX_ILINK_STARTUP_ACTION_ARGUMENTS: action.args,
+    CODEX_ILINK_STARTUP_ACTION_EXECUTABLE: action.executable,
+    CODEX_ILINK_STARTUP_ACTION_WORKING_DIRECTORY: dirname(launch.executable),
   });
   requireSuccess(
     (options.runPowerShell ?? runPowerShell)({
@@ -81,6 +83,55 @@ export function enableWindowsStartupTask(
     }),
     "ENABLE",
   );
+}
+
+function hiddenStartupAction(
+  launch: { args: readonly string[]; executable: string },
+  environment: NodeJS.ProcessEnv,
+): { args: string; executable: string } {
+  const systemRoot = environmentValue(environment, "SystemRoot");
+  if (!systemRoot || !isAbsolute(systemRoot) || systemRoot.includes("\0")) {
+    throw new Error("E_STARTUP_TASK_INVALID_SYSTEM_ROOT");
+  }
+  const executable = join(
+    systemRoot,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+  const command = String.raw`
+$ErrorActionPreference = "Stop"
+$executable = ${decodeBase64Expression(launch.executable)}
+$arguments = ${decodeBase64Expression(serializeWindowsArguments(launch.args))}
+$workingDirectory = ${decodeBase64Expression(dirname(launch.executable))}
+$process = Start-Process -FilePath $executable -ArgumentList $arguments ` +
+    String.raw`-WorkingDirectory $workingDirectory -WindowStyle Hidden -PassThru
+$process.WaitForExit()
+exit $process.ExitCode
+`;
+  const encodedCommand = Buffer.from(command, "utf16le").toString("base64");
+  return {
+    args:
+      "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass " +
+      `-WindowStyle Hidden -EncodedCommand ${encodedCommand}`,
+    executable,
+  };
+}
+
+function decodeBase64Expression(value: string): string {
+  const encoded = Buffer.from(value, "utf8").toString("base64");
+  return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("${encoded}"))`;
+}
+
+function environmentValue(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+): string | undefined {
+  const normalized = name.toLowerCase();
+  return Object.entries(environment).find(
+    ([key]) => key.toLowerCase() === normalized,
+  )?.[1];
 }
 
 export function disableWindowsStartupTask(

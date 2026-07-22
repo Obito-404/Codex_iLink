@@ -121,6 +121,9 @@ test("the published package targets only the supported Windows x64 platform", ()
 });
 
 test("the workflow CLI reads package.json and writes typed GitHub outputs", () => {
+  const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+  const version = String(packageJson.version);
+  const prerelease = version.includes("-");
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-release-policy-"));
   const output = join(directory, "github-output.txt");
   try {
@@ -130,7 +133,7 @@ test("the workflow CLI reads package.json and writes typed GitHub outputs", () =
       env: {
         ...process.env,
         GITHUB_OUTPUT: output,
-        RELEASE_TAG: "v0.1.0-rc.4",
+        RELEASE_TAG: `v${version}`,
       },
       windowsHide: true,
     });
@@ -139,11 +142,11 @@ test("the workflow CLI reads package.json and writes typed GitHub outputs", () =
     assert.equal(
       readFileSync(output, "utf8"),
       [
-        "version=0.1.0-rc.4",
-        "tag=v0.1.0-rc.4",
-        "github_prerelease=true",
-        "npm_tag=next",
-        "requires_authenticode=false",
+        `version=${version}`,
+        `tag=v${version}`,
+        `github_prerelease=${String(prerelease)}`,
+        `npm_tag=${prerelease ? "next" : "latest"}`,
+        `requires_authenticode=${String(!prerelease)}`,
         "",
       ].join("\n"),
     );

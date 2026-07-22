@@ -55,6 +55,7 @@ const packageJson = JSON.parse(
 const runtimeFiles = [
   runtimeFile("package.json"),
   runtimeFile(".agents/plugins/marketplace.json"),
+  runtimeFile("dist/windows/startup-host.vbs"),
   ...collectRuntimeFiles("plugins"),
   ...collectRuntimeFiles("dist/bridge/migrations"),
 ].sort((left, right) => left.path.localeCompare(right.path));

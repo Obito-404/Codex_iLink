@@ -56,6 +56,10 @@ export function runtimeEntrypoint(): string {
   );
 }
 
+export function runtimeStartupHostScript(): string {
+  return join(runtimePackageRoot(), "dist", "windows", "startup-host.vbs");
+}
+
 export function runtimePackageRoot(): string {
   const configured = process.env.CODEX_ILINK_PACKAGE_ROOT;
   if (configured) return realpathOrResolved(configured);

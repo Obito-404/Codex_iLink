@@ -21,6 +21,7 @@ import {
   isStandaloneExecutable,
   runtimeEntrypoint,
   runtimePackageRoot,
+  runtimeStartupHostScript,
 } from "../runtime/package-assets.ts";
 import {
   protectForCurrentUser,
@@ -505,7 +506,11 @@ async function setupCommand(io: CliIo): Promise<number> {
         pluginVersion,
         runCodex: (args) => runCodexCommand(codexExecutable, args),
       }),
-    configureStartup: async () => enableWindowsStartupTask(daemonLaunch()),
+    configureStartup: async () =>
+      enableWindowsStartupTask({
+        ...daemonLaunch(),
+        hostScript: runtimeStartupHostScript(),
+      }),
     hasUsableSession: () => hasUsableILinkSession(),
     login: () => loginCommand(io),
     start: () => startCommand(io),
@@ -835,7 +840,10 @@ async function startupCommand(
     return 2;
   }
   if (action === "enable") {
-    enableWindowsStartupTask(daemonLaunch());
+    enableWindowsStartupTask({
+      ...daemonLaunch(),
+      hostScript: runtimeStartupHostScript(),
+    });
     io.log("已启用登录后自动启动。");
     return 0;
   }

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import {
@@ -24,6 +26,8 @@ test("startup registration wraps the exact daemon launch in a hidden supervised 
         "__run",
       ],
       executable: "C:\\Program Files\\nodejs\\node.exe",
+      hostScript:
+        "C:\\Program Files\\Codex iLink\\dist\\windows\\startup-host.vbs",
     },
     { environment: { SYSTEMROOT: "C:\\Windows" }, runPowerShell },
   );
@@ -32,44 +36,38 @@ test("startup registration wraps the exact daemon launch in a hidden supervised 
   assert.equal(calls[0]?.environment.CODEX_ILINK_STARTUP_TASK, STARTUP_TASK_NAME);
   assert.equal(
     calls[0]?.environment.CODEX_ILINK_STARTUP_ACTION_EXECUTABLE,
-    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "C:\\Windows\\System32\\wscript.exe",
   );
+  const argumentLine =
+    '--disable-warning=ExperimentalWarning "C:\\Program Files\\Codex iLink\\main.js" __run';
   const actionArguments =
     calls[0]?.environment.CODEX_ILINK_STARTUP_ACTION_ARGUMENTS ?? "";
-  assert.match(
+  assert.equal(
     actionArguments,
-    /^-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ([A-Za-z0-9+/]+={0,2})$/u,
-  );
-  const encodedCommand = actionArguments.split(" ").at(-1) ?? "";
-  const command = Buffer.from(encodedCommand, "base64").toString("utf16le");
-  assert.match(command, /Start-Process/u);
-  assert.match(command, /-WindowStyle Hidden/u);
-  assert.match(command, /\$process\.WaitForExit\(\)/u);
-  assert.match(command, /exit \$process\.ExitCode/u);
-  assert.match(
-    command,
-    new RegExp(
-      Buffer.from("C:\\Program Files\\nodejs\\node.exe", "utf8").toString(
-        "base64",
-      ),
-      "u",
-    ),
-  );
-  assert.match(
-    command,
-    new RegExp(
-      Buffer.from(
-        '--disable-warning=ExperimentalWarning "C:\\Program Files\\Codex iLink\\main.js" __run',
-        "utf8",
-      ).toString("base64"),
-      "u",
-    ),
+    '//B //NoLogo "C:\\Program Files\\Codex iLink\\dist\\windows\\startup-host.vbs" ' +
+      `${utf16Hex("C:\\Program Files\\nodejs\\node.exe")} ${utf16Hex(argumentLine)}`,
   );
   assert.equal(
     calls[0]?.environment.CODEX_ILINK_STARTUP_ACTION_WORKING_DIRECTORY,
     "C:\\Program Files\\nodejs",
   );
   assert.doesNotMatch(calls[0]?.script ?? "", /Program Files/u);
+});
+
+test("windowless startup host waits for the daemon and returns its exit code", () => {
+  const result = spawnSync(
+    resolve(process.env.SystemRoot ?? "C:\\Windows", "System32", "wscript.exe"),
+    [
+      "//B",
+      "//NoLogo",
+      resolve("src/windows/startup-host.vbs"),
+      utf16Hex(process.execPath),
+      utf16Hex('-e process.exit(process.argv[1].length) "hello world"'),
+    ],
+    { shell: false, timeout: 10_000, windowsHide: true },
+  );
+
+  assert.equal(result.status, 11, result.error?.message);
 });
 
 test("startup inspection distinguishes enabled and absent tasks", () => {
@@ -93,7 +91,11 @@ test("startup registration and removal fail closed on task scheduler errors", ()
   assert.throws(
     () =>
       enableWindowsStartupTask(
-        { args: ["__run"], executable: "C:\\Codex iLink\\ilink.exe" },
+        {
+          args: ["__run"],
+          executable: "C:\\Codex iLink\\ilink.exe",
+          hostScript: "C:\\Codex iLink\\startup-host.vbs",
+        },
         { runPowerShell },
       ),
     /E_STARTUP_TASK_ENABLE:access denied/u,
@@ -103,3 +105,11 @@ test("startup registration and removal fail closed on task scheduler errors", ()
     /E_STARTUP_TASK_DISABLE:access denied/u,
   );
 });
+
+function utf16Hex(value: string): string {
+  let encoded = "";
+  for (let index = 0; index < value.length; index += 1) {
+    encoded += value.charCodeAt(index).toString(16).padStart(4, "0");
+  }
+  return encoded;
+}

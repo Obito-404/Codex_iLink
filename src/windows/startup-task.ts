@@ -60,11 +60,18 @@ type StartupTaskOptions = {
 };
 
 export function enableWindowsStartupTask(
-  launch: { args: readonly string[]; executable: string },
+  launch: {
+    args: readonly string[];
+    executable: string;
+    hostScript: string;
+  },
   options: StartupTaskOptions = {},
 ): void {
   if (!isAbsolute(launch.executable) || launch.executable.includes("\0")) {
     throw new Error("E_STARTUP_TASK_INVALID_EXECUTABLE");
+  }
+  if (!isAbsolute(launch.hostScript) || launch.hostScript.includes("\0")) {
+    throw new Error("E_STARTUP_TASK_INVALID_HOST_SCRIPT");
   }
   if (launch.args.some((argument) => argument.includes("\0"))) {
     throw new Error("E_STARTUP_TASK_INVALID_ARGUMENT");
@@ -74,7 +81,7 @@ export function enableWindowsStartupTask(
   const environment = startupEnvironment(options.environment, {
     CODEX_ILINK_STARTUP_ACTION_ARGUMENTS: action.args,
     CODEX_ILINK_STARTUP_ACTION_EXECUTABLE: action.executable,
-    CODEX_ILINK_STARTUP_ACTION_WORKING_DIRECTORY: dirname(launch.executable),
+    CODEX_ILINK_STARTUP_ACTION_WORKING_DIRECTORY: action.workingDirectory,
   });
   requireSuccess(
     (options.runPowerShell ?? runPowerShell)({
@@ -86,42 +93,37 @@ export function enableWindowsStartupTask(
 }
 
 function hiddenStartupAction(
-  launch: { args: readonly string[]; executable: string },
+  launch: {
+    args: readonly string[];
+    executable: string;
+    hostScript: string;
+  },
   environment: NodeJS.ProcessEnv,
-): { args: string; executable: string } {
+): { args: string; executable: string; workingDirectory: string } {
   const systemRoot = environmentValue(environment, "SystemRoot");
   if (!systemRoot || !isAbsolute(systemRoot) || systemRoot.includes("\0")) {
     throw new Error("E_STARTUP_TASK_INVALID_SYSTEM_ROOT");
   }
-  const executable = join(
-    systemRoot,
-    "System32",
-    "WindowsPowerShell",
-    "v1.0",
-    "powershell.exe",
-  );
-  const command = String.raw`
-$ErrorActionPreference = "Stop"
-$executable = ${decodeBase64Expression(launch.executable)}
-$arguments = ${decodeBase64Expression(serializeWindowsArguments(launch.args))}
-$workingDirectory = ${decodeBase64Expression(dirname(launch.executable))}
-$process = Start-Process -FilePath $executable -ArgumentList $arguments ` +
-    String.raw`-WorkingDirectory $workingDirectory -WindowStyle Hidden -PassThru
-$process.WaitForExit()
-exit $process.ExitCode
-`;
-  const encodedCommand = Buffer.from(command, "utf16le").toString("base64");
+  const argumentLine = serializeWindowsArguments(launch.args);
   return {
-    args:
-      "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass " +
-      `-WindowStyle Hidden -EncodedCommand ${encodedCommand}`,
-    executable,
+    args: serializeWindowsArguments([
+      "//B",
+      "//NoLogo",
+      launch.hostScript,
+      encodeUtf16Hex(launch.executable),
+      encodeUtf16Hex(argumentLine),
+    ]),
+    executable: join(systemRoot, "System32", "wscript.exe"),
+    workingDirectory: dirname(launch.executable),
   };
 }
 
-function decodeBase64Expression(value: string): string {
-  const encoded = Buffer.from(value, "utf8").toString("base64");
-  return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("${encoded}"))`;
+function encodeUtf16Hex(value: string): string {
+  let encoded = "";
+  for (let index = 0; index < value.length; index += 1) {
+    encoded += value.charCodeAt(index).toString(16).padStart(4, "0");
+  }
+  return encoded;
 }
 
 function environmentValue(

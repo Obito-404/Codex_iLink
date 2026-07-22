@@ -506,11 +506,7 @@ async function setupCommand(io: CliIo): Promise<number> {
         pluginVersion,
         runCodex: (args) => runCodexCommand(codexExecutable, args),
       }),
-    configureStartup: async () =>
-      enableWindowsStartupTask({
-        ...daemonLaunch(),
-        hostScript: runtimeStartupHostScript(),
-      }),
+    configureStartup: async () => enableWindowsStartupTask(startupLaunch()),
     hasUsableSession: () => hasUsableILinkSession(),
     login: () => loginCommand(io),
     start: () => startCommand(io),
@@ -774,6 +770,15 @@ function daemonLaunch(): { args: string[]; executable: string } {
       };
 }
 
+function startupLaunch(): ReturnType<typeof daemonLaunch> & {
+  hostScript: string;
+} {
+  return {
+    ...daemonLaunch(),
+    hostScript: runtimeStartupHostScript(),
+  };
+}
+
 async function runInternalHook(argv: readonly string[]): Promise<number> {
   const kind = argv[0];
   const script =
@@ -840,10 +845,7 @@ async function startupCommand(
     return 2;
   }
   if (action === "enable") {
-    enableWindowsStartupTask({
-      ...daemonLaunch(),
-      hostScript: runtimeStartupHostScript(),
-    });
+    enableWindowsStartupTask(startupLaunch());
     io.log("已启用登录后自动启动。");
     return 0;
   }
@@ -1000,6 +1002,7 @@ function phaseLabel(phase: HostStatus["phase"]): string {
   if (phase === "starting") return "启动中";
   return "停止中";
 }
+
 
 function isILinkAuthenticationExpired(status: HostStatus | null): boolean {
   return (

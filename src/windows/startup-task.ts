@@ -59,12 +59,14 @@ type StartupTaskOptions = {
   runPowerShell?: StartupTaskPowerShellRunner;
 };
 
+type StartupTaskLaunch = {
+  args: readonly string[];
+  executable: string;
+  hostScript: string;
+};
+
 export function enableWindowsStartupTask(
-  launch: {
-    args: readonly string[];
-    executable: string;
-    hostScript: string;
-  },
+  launch: StartupTaskLaunch,
   options: StartupTaskOptions = {},
 ): void {
   if (!isAbsolute(launch.executable) || launch.executable.includes("\0")) {
@@ -93,11 +95,7 @@ export function enableWindowsStartupTask(
 }
 
 function hiddenStartupAction(
-  launch: {
-    args: readonly string[];
-    executable: string;
-    hostScript: string;
-  },
+  launch: StartupTaskLaunch,
   environment: NodeJS.ProcessEnv,
 ): { args: string; executable: string; workingDirectory: string } {
   const systemRoot = environmentValue(environment, "SystemRoot");

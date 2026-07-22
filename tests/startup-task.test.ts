@@ -42,11 +42,16 @@ test("startup registration wraps the exact daemon launch in a hidden supervised 
     '--disable-warning=ExperimentalWarning "C:\\Program Files\\Codex iLink\\main.js" __run';
   const actionArguments =
     calls[0]?.environment.CODEX_ILINK_STARTUP_ACTION_ARGUMENTS ?? "";
+  const actionMatch =
+    /^\/\/B \/\/NoLogo "C:\\Program Files\\Codex iLink\\dist\\windows\\startup-host\.vbs" ([0-9a-f]+) ([0-9a-f]+)$/u.exec(
+      actionArguments,
+    );
+  assert.ok(actionMatch);
   assert.equal(
-    actionArguments,
-    '//B //NoLogo "C:\\Program Files\\Codex iLink\\dist\\windows\\startup-host.vbs" ' +
-      `${utf16Hex("C:\\Program Files\\nodejs\\node.exe")} ${utf16Hex(argumentLine)}`,
+    decodeUtf16Hex(actionMatch[1] ?? ""),
+    "C:\\Program Files\\nodejs\\node.exe",
   );
+  assert.equal(decodeUtf16Hex(actionMatch[2] ?? ""), argumentLine);
   assert.equal(
     calls[0]?.environment.CODEX_ILINK_STARTUP_ACTION_WORKING_DIRECTORY,
     "C:\\Program Files\\nodejs",
@@ -61,8 +66,10 @@ test("windowless startup host waits for the daemon and returns its exit code", (
       "//B",
       "//NoLogo",
       resolve("src/windows/startup-host.vbs"),
-      utf16Hex(process.execPath),
-      utf16Hex('-e process.exit(process.argv[1].length) "hello world"'),
+      encodeUtf16HexFixture(process.execPath),
+      encodeUtf16HexFixture(
+        '-e process.exit(process.argv[1].length) "hello world"',
+      ),
     ],
     { shell: false, timeout: 10_000, windowsHide: true },
   );
@@ -106,10 +113,10 @@ test("startup registration and removal fail closed on task scheduler errors", ()
   );
 });
 
-function utf16Hex(value: string): string {
-  let encoded = "";
-  for (let index = 0; index < value.length; index += 1) {
-    encoded += value.charCodeAt(index).toString(16).padStart(4, "0");
-  }
-  return encoded;
+function encodeUtf16HexFixture(value: string): string {
+  return Buffer.from(value, "utf16le").swap16().toString("hex");
+}
+
+function decodeUtf16Hex(value: string): string {
+  return Buffer.from(value, "hex").swap16().toString("utf16le");
 }

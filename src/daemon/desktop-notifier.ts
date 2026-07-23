@@ -238,7 +238,7 @@ function formatDesktopNotification(
   if (conversation) {
     result.push(
       "",
-      ...(conversation.userSummary
+      ...(origin === "desktop" && conversation.userSummary
         ? [`你问：${conversation.userSummary}`]
         : []),
       `Codex：${conversation.finalAnswer}`,

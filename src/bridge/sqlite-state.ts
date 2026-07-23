@@ -67,7 +67,17 @@ export type PendingDesktopNotification = {
   turnId: string;
 };
 
+export type TerminalNotificationJob = {
+  capturedAtMs: number;
+  cwd: string | null;
+  evidence: "managed-desktop" | "unmatched";
+  expiresAtMs: number;
+  threadId: string;
+  turnId: string;
+};
+
 const DESKTOP_OBSERVATION_TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const TERMINAL_NOTIFICATION_JOB_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const INBOUND_DEDUPE_QUERY_CHUNK_SIZE = 500;
 const TRANSPORT_METADATA_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
@@ -320,6 +330,7 @@ export class SqliteState {
 
       if (current) {
         this.#database.exec(`
+          DELETE FROM terminal_notification_jobs;
           DELETE FROM pending_desktop_notifications;
           DELETE FROM outbound_attachment_intents;
           DELETE FROM dispatch_intents;
@@ -866,6 +877,77 @@ export class SqliteState {
       )
       .run(threadId, turnId);
     return Number(result.changes) === 1;
+  }
+
+  putTerminalNotificationJob(
+    input: Omit<TerminalNotificationJob, "expiresAtMs">,
+  ): TerminalNotificationJob {
+    const expiresAtMs = input.capturedAtMs + TERMINAL_NOTIFICATION_JOB_TTL_MS;
+    this.#database
+      .prepare(
+        `INSERT INTO terminal_notification_jobs
+          (thread_id, turn_id, captured_at_ms, cwd, evidence, expires_at_ms)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (thread_id, turn_id) DO UPDATE SET
+           captured_at_ms = MAX(captured_at_ms, excluded.captured_at_ms),
+           cwd = COALESCE(excluded.cwd, cwd),
+           evidence = CASE
+             WHEN evidence = 'managed-desktop'
+               OR excluded.evidence = 'managed-desktop'
+             THEN 'managed-desktop'
+             ELSE 'unmatched'
+           END,
+           expires_at_ms = MAX(expires_at_ms, excluded.expires_at_ms)`,
+      )
+      .run(
+        input.threadId,
+        input.turnId,
+        input.capturedAtMs,
+        input.cwd,
+        input.evidence,
+        expiresAtMs,
+      );
+    const job = this.#database
+      .prepare(
+        `SELECT thread_id, turn_id, captured_at_ms, cwd, evidence, expires_at_ms
+         FROM terminal_notification_jobs
+         WHERE thread_id = ? AND turn_id = ?`,
+      )
+      .get(input.threadId, input.turnId) as TerminalNotificationJobRow | undefined;
+    if (!job) throw new Error("E_TERMINAL_NOTIFICATION_JOB_WRITE");
+    return terminalNotificationJobFromRow(job);
+  }
+
+  listTerminalNotificationJobs(nowMs: number): TerminalNotificationJob[] {
+    const rows = this.#database
+      .prepare(
+        `SELECT thread_id, turn_id, captured_at_ms, cwd, evidence, expires_at_ms
+         FROM terminal_notification_jobs
+         WHERE expires_at_ms > ?
+         ORDER BY captured_at_ms, thread_id, turn_id`,
+      )
+      .all(nowMs) as TerminalNotificationJobRow[];
+    return rows.map(terminalNotificationJobFromRow);
+  }
+
+  deleteTerminalNotificationJob(threadId: string, turnId: string): boolean {
+    const result = this.#database
+      .prepare(
+        `DELETE FROM terminal_notification_jobs
+         WHERE thread_id = ? AND turn_id = ?`,
+      )
+      .run(threadId, turnId);
+    return Number(result.changes) === 1;
+  }
+
+  pruneExpiredTerminalNotificationJobs(nowMs: number): number {
+    const result = this.#database
+      .prepare(
+        `DELETE FROM terminal_notification_jobs
+         WHERE expires_at_ms <= ?`,
+      )
+      .run(nowMs);
+    return Number(result.changes);
   }
 
   recordDesktopTurnStopTombstone(input: {
@@ -2240,6 +2322,7 @@ export class SqliteState {
       "./migrations/013-transport-retention-indexes.sql",
       "./migrations/014-drop-thread-permission-profiles.sql",
       "./migrations/015-default-thread-permissions.sql",
+      "./migrations/016-terminal-notification-jobs.sql",
     ];
     const observed = this.#database.prepare("PRAGMA user_version").get() as
       | { user_version: number }
@@ -2409,6 +2492,28 @@ function desktopTurnObservationFromRow(
   return {
     createdAtMs: row.created_at_ms,
     stopSeenAtMs: row.stop_seen_at_ms,
+    threadId: row.thread_id,
+    turnId: row.turn_id,
+  };
+}
+
+type TerminalNotificationJobRow = {
+  captured_at_ms: number;
+  cwd: string | null;
+  evidence: TerminalNotificationJob["evidence"];
+  expires_at_ms: number;
+  thread_id: string;
+  turn_id: string;
+};
+
+function terminalNotificationJobFromRow(
+  row: TerminalNotificationJobRow,
+): TerminalNotificationJob {
+  return {
+    capturedAtMs: row.captured_at_ms,
+    cwd: row.cwd,
+    evidence: row.evidence,
+    expiresAtMs: row.expires_at_ms,
     threadId: row.thread_id,
     turnId: row.turn_id,
   };

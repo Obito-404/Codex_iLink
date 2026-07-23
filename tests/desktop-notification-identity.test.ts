@@ -6,6 +6,7 @@ import {
   desktopNotificationClientId,
   desktopNotificationMessageClientIds,
   parseDesktopNotificationClientId,
+  terminalNotificationClientId,
 } from "../src/bridge/desktop-notification-identity.ts";
 import { WECHAT_FINAL_MAX_MESSAGES } from "../src/bridge/wechat-output.ts";
 
@@ -43,9 +44,31 @@ test("interrupted Desktop notifications are grouped but cannot open a reply rout
 
   assert.deepEqual(parseDesktopNotificationClientId(clientId), {
     baseClientId: clientId,
+    origin: "desktop",
     part: null,
     replyable: false,
     threadId: "thread-interrupted",
     turnId: "turn-interrupted",
+  });
+});
+
+test("automation notifications use a distinct durable identity", () => {
+  const clientId = terminalNotificationClientId(
+    "automation",
+    "thread-automation",
+    "turn-automation",
+  );
+
+  assert.equal(
+    clientId,
+    "codex-ilink:automation:thread-automation:turn-automation:final",
+  );
+  assert.deepEqual(parseDesktopNotificationClientId(clientId), {
+    baseClientId: clientId,
+    origin: "automation",
+    part: null,
+    replyable: true,
+    threadId: "thread-automation",
+    turnId: "turn-automation",
   });
 });

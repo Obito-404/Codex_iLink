@@ -5,7 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { SqliteState } from "../src/bridge/sqlite-state.ts";
-import { DesktopNotifier } from "../src/daemon/desktop-notifier.ts";
+import {
+  DesktopNotifier,
+  terminalNotificationOrigin,
+} from "../src/daemon/desktop-notifier.ts";
 import type { HookEvent } from "../src/hooks/hook-receiver.ts";
 import type { ILinkSession } from "../src/ilink/protocol.ts";
 
@@ -28,6 +31,14 @@ const stopEvent: HookEvent = {
   toolName: null,
   turnId: "turn-desktop",
 };
+
+test("terminal notification sources fail closed on unknown values", () => {
+  assert.equal(terminalNotificationOrigin("automation"), "automation");
+  assert.equal(terminalNotificationOrigin("vscode"), "desktop");
+  assert.equal(terminalNotificationOrigin("cli"), null);
+  assert.equal(terminalNotificationOrigin("future-source"), null);
+  assert.equal(terminalNotificationOrigin(undefined), null);
+});
 
 test("an away Desktop completion is retained before any iLink context exists", async () => {
   await withState(async (state) => {
@@ -109,6 +120,120 @@ test("a present user is not sent a duplicate Desktop notification", async () => 
     });
     assert.equal(await notifier.notifyTerminal(stopEvent, "completed"), "present");
     assert.deepEqual(state.listPendingOutbox(), []);
+  });
+});
+
+test("an automation completion bypasses presence and keeps a reply route identity", async () => {
+  await withState(async (state) => {
+    seedContext(state);
+    const notifier = new DesktopNotifier({
+      now: () => 21_000,
+      presence: async () => {
+        assert.fail("automation notifications must not read Desktop presence");
+      },
+      readThread: async () => {
+        assert.fail("the verified thread snapshot should be reused");
+      },
+      session,
+      state,
+    });
+
+    assert.equal(
+      await notifier.notifyTerminal(stopEvent, "completed", {
+        origin: "automation",
+        thread: {
+          cwd: "D:\\Reports",
+          name: "每日简报",
+          turns: [
+            {
+              id: "turn-desktop",
+              items: [
+                {
+                  content: [{ text: "生成今日简报", type: "text" }],
+                  type: "userMessage",
+                },
+                {
+                  phase: "final_answer",
+                  text: "今天有两个高优先级事项。",
+                  type: "agentMessage",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+      "queued",
+    );
+
+    const pending = state.listPendingOutbox();
+    assert.equal(pending.length, 1);
+    assert.match(
+      pending[0]?.body ?? "",
+      /Codex 已安排任务已完成[\s\S]*每日简报[\s\S]*今天有两个高优先级事项/u,
+    );
+    assert.match(pending[0]?.clientId ?? "", /^codex-ilink:automation:/u);
+    assert.match(pending[0]?.body ?? "", /直接回复即可继续这个会话/u);
+    assert.equal(
+      await notifier.notifyTerminal(stopEvent, "completed", {
+        origin: "automation",
+        thread: { name: "每日简报" },
+      }),
+      "already-sent",
+    );
+    assert.equal(state.listPendingOutbox().length, 1);
+  });
+});
+
+test("an automation failure is pushed without a final answer", async () => {
+  await withState(async (state) => {
+    seedContext(state);
+    const notifier = new DesktopNotifier({
+      now: () => 21_500,
+      presence: async () => "present",
+      readThread: async () => ({ thread: {} }),
+      session,
+      state,
+    });
+
+    assert.equal(
+      await notifier.notifyTerminal(stopEvent, "failed", {
+        origin: "automation",
+        thread: { cwd: "D:\\Reports", name: "跟进监控" },
+      }),
+      "queued",
+    );
+    assert.match(
+      state.listPendingOutbox()[0]?.body ?? "",
+      /Codex 已安排任务失败[\s\S]*跟进监控/u,
+    );
+  });
+});
+
+test("an interrupted automation is pushed as a non-replyable notice", async () => {
+  await withState(async (state) => {
+    seedContext(state);
+    const notifier = new DesktopNotifier({
+      now: () => 21_750,
+      presence: async () => "present",
+      readThread: async () => ({ thread: {} }),
+      session,
+      state,
+    });
+
+    assert.equal(
+      await notifier.notifyTerminal(stopEvent, "interrupted", {
+        origin: "automation",
+        thread: { cwd: "D:\\Reports", name: "每周回顾" },
+      }),
+      "queued",
+    );
+    const pending = state.listPendingOutbox()[0];
+    assert.match(
+      pending?.body ?? "",
+      /Codex 已安排任务已中断[\s\S]*每周回顾/u,
+    );
+    assert.match(pending?.clientId ?? "", /:notice$/u);
+    assert.doesNotMatch(pending?.body ?? "", /直接回复即可继续/u);
   });
 });
 

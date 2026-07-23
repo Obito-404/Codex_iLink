@@ -8,17 +8,22 @@ import {
   type InboundMediaPort,
   type ILinkSender,
 } from "../bridge/bridge.ts";
-import { SqliteState } from "../bridge/sqlite-state.ts";
+import {
+  SqliteState,
+  type TerminalNotificationJob,
+} from "../bridge/sqlite-state.ts";
 import { OutboxWorker } from "../bridge/outbox-worker.ts";
 import { SqliteTurnLeaseStore } from "../coordination/turn-lease.ts";
 import {
   DesktopNotifier,
   desktopNotificationRoute,
+  terminalNotificationOrigin,
   type DesktopTerminalStatus,
 } from "./desktop-notifier.ts";
 import {
   isFinalDesktopNotificationPart,
   parseDesktopNotificationClientId,
+  type TerminalNotificationOrigin,
 } from "../bridge/desktop-notification-identity.ts";
 import type { HookDecision, HookEvent } from "../hooks/hook-receiver.ts";
 import type { ThreadPermissionSettings } from "../codex/protocol.ts";
@@ -107,15 +112,18 @@ export type BridgeDaemonOptions = {
 
 const DEFAULT_EVENT_QUIESCE_TIMEOUT_MS = 10_000;
 const TRANSPORT_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1_000;
+const TERMINAL_NOTIFICATION_RECONCILE_BATCH_SIZE = 4;
+type TerminalNotificationEvidence = TerminalNotificationJob["evidence"];
 
 export class BridgeDaemon {
   readonly #options: BridgeDaemonOptions;
   #bridge: BridgeEngine | undefined;
   readonly #codexEventTasks = new Set<Promise<unknown>>();
-  #desktopNotifier: DesktopNotifier | undefined;
+  #terminalNotifier: DesktopNotifier | undefined;
   #outbox: OutboxWorker | undefined;
   #nextTransportMaintenanceAtMs = 0;
   #started = false;
+  #terminalNotificationJobOffset = 0;
   #unsubscribe: (() => void) | undefined;
 
   constructor(options: BridgeDaemonOptions) {
@@ -201,15 +209,13 @@ export class BridgeDaemon {
       session: this.#options.session,
       state: this.#options.state,
     });
-    this.#desktopNotifier = this.#options.presence
-      ? new DesktopNotifier({
-          now: this.#options.now,
-          presence: this.#options.presence,
-          readThread: (input) => this.#options.codex.readThread(input),
-          session: this.#options.session,
-          state: this.#options.state,
-        })
-      : undefined;
+    this.#terminalNotifier = new DesktopNotifier({
+      now: this.#options.now,
+      ...(this.#options.presence ? { presence: this.#options.presence } : {}),
+      readThread: (input) => this.#options.codex.readThread(input),
+      session: this.#options.session,
+      state: this.#options.state,
+    });
     this.#outbox = new OutboxWorker({
       ilink: this.#options.ilink,
       now: this.#options.now,
@@ -224,6 +230,7 @@ export class BridgeDaemon {
               source.threadId,
               source.turnId,
               confirmedAtMs,
+              source.origin,
             )
           : null;
       },
@@ -250,6 +257,7 @@ export class BridgeDaemon {
     await this.#notifyILinkLifecycle("notifyStart");
     await this.#options.hookReceiver.start();
     await this.#options.hookReceiver.drainSpool();
+    await this.#reconcileTerminalNotificationJobs();
     await this.#allowStartupAuthPause(() => this.#outbox?.drain());
     await this.#reconcilePendingDesktopNotifications();
     await this.#allowStartupAuthPause(() => this.#outbox?.drain());
@@ -282,6 +290,7 @@ export class BridgeDaemon {
       pollNowMs,
     );
     await this.#options.hookReceiver.drainSpool();
+    await this.#reconcileTerminalNotificationJobs(signal);
     await this.#bridge.reconcilePendingWork();
     await this.#reconcilePendingDesktopNotifications();
     await this.#syncActiveTaskCount();
@@ -318,6 +327,12 @@ export class BridgeDaemon {
     event: HookEvent,
     signal = new AbortController().signal,
   ): Promise<HookDecision | void> {
+    const controller = this.#options.state.getController();
+    if (controller && event.capturedAtMs <= controller.boundAtMs) {
+      return event.eventName === "PermissionRequest"
+        ? { behavior: "passthrough" }
+        : undefined;
+    }
     if (event.eventName === "UserPromptSubmit") {
       if (!event.turnId || event.source !== "codex-ilink-guard") return;
       const lease = this.#options.leases.getLease(event.sessionId);
@@ -386,6 +401,25 @@ export class BridgeDaemon {
     if (event.eventName !== "Stop" || !event.turnId) return;
     if (signal.aborted) return;
     if (this.#options.state.getDispatchIntentByTurnId(event.turnId)) return;
+    const existingLease = this.#options.leases.getLease(event.sessionId);
+    const existingObservation =
+      this.#options.state.getDesktopTurnObservation(event.sessionId);
+    let evidence: TerminalNotificationEvidence =
+      (existingLease?.owner === "desktop" &&
+        existingLease.turnId === event.turnId &&
+        existingLease.operationId === event.turnId) ||
+      existingObservation?.turnId === event.turnId
+        ? "managed-desktop"
+        : "unmatched";
+    const jobInput = {
+      capturedAtMs: event.capturedAtMs,
+      cwd: event.cwd,
+      threadId: event.sessionId,
+      turnId: event.turnId,
+    };
+    // Persist before touching arbitration state; a second upsert below can
+    // only promote evidence after the exact lease/observation Stop succeeds.
+    this.#options.state.putTerminalNotificationJob({ ...jobInput, evidence });
     const leaseStopped = this.#options.leases.markDesktopStop({
       stoppedAtMs: event.capturedAtMs,
       threadId: event.sessionId,
@@ -397,24 +431,26 @@ export class BridgeDaemon {
       threadId: event.sessionId,
       turnId: event.turnId,
     });
-    if (!leaseStopped && !observationStopped) {
+    if (leaseStopped || observationStopped) evidence = "managed-desktop";
+    if (evidence === "managed-desktop") {
+      this.#options.state.putTerminalNotificationJob({ ...jobInput, evidence });
+    }
+    if (evidence === "unmatched") {
       this.#options.state.recordDesktopTurnStopTombstone({
         stoppedAtMs: event.capturedAtMs,
         threadId: event.sessionId,
         turnId: event.turnId,
       });
-      await this.#reconcileDesktopStop(
+      await this.#reconcileTerminalStop(
         { ...event, turnId: event.turnId },
         0,
-        true,
         signal,
       );
       return;
     }
-    await this.#reconcileDesktopStop(
+    await this.#reconcileTerminalStop(
       { ...event, turnId: event.turnId },
       0,
-      false,
       signal,
     );
   }
@@ -457,7 +493,7 @@ export class BridgeDaemon {
       this.#options.state.disableArbitration(this.#options.bridgeInstanceId),
     );
     this.#bridge = undefined;
-    this.#desktopNotifier = undefined;
+    this.#terminalNotifier = undefined;
     this.#outbox = undefined;
     this.#started = false;
     if (cleanupErrors.length > 0) {
@@ -496,10 +532,9 @@ export class BridgeDaemon {
     }
   }
 
-  async #reconcileDesktopStop(
+  async #reconcileTerminalStop(
     event: HookEvent & { turnId: string },
     attempt: number,
-    requireDesktopSource = false,
     signal?: AbortSignal,
   ): Promise<void> {
     const threadId = event.sessionId;
@@ -524,15 +559,25 @@ export class BridgeDaemon {
               !Array.isArray(value),
           )
           .find((value) => value.id === turnId);
-        const status = desktopTerminalStatus(turn?.status);
+        const status = terminalNotificationStatus(turn?.status);
         if (status) {
-          if (requireDesktopSource && read.thread.source !== "vscode") return;
-          await this.#notifyDesktopTerminalOnce(
-            event,
-            status,
-            read.thread,
-            signal,
-          );
+          const controller = this.#options.state.getController();
+          const startedAtMs = terminalTurnStartedAtMs(turn?.startedAt);
+          const origin =
+            controller &&
+            startedAtMs !== null &&
+            startedAtMs > controller.boundAtMs
+              ? terminalNotificationOrigin(read.thread.source)
+              : null;
+          if (origin) {
+            await this.#notifyTerminalOnce(
+              event,
+              status,
+              origin,
+              read.thread,
+              signal,
+            );
+          }
           if (signal?.aborted) return;
           const releasedLease = this.#options.leases.releaseStoppedDesktop({
             threadId,
@@ -549,6 +594,7 @@ export class BridgeDaemon {
             } finally {
               await this.#syncActiveTaskCount();
             }
+            this.#options.state.deleteTerminalNotificationJob(threadId, turnId);
             return;
           }
           const currentLease = this.#options.leases.getLease(threadId);
@@ -561,6 +607,7 @@ export class BridgeDaemon {
               currentLease.operationId !== turnId) &&
             currentObservation?.turnId !== turnId
           ) {
+            this.#options.state.deleteTerminalNotificationJob(threadId, turnId);
             return;
           }
         }
@@ -575,16 +622,18 @@ export class BridgeDaemon {
     throw new Error("E_DESKTOP_STOP_NOT_DURABLE", { cause: lastError });
   }
 
-  async #notifyDesktopTerminalOnce(
+  async #notifyTerminalOnce(
     event: HookEvent & { turnId: string },
     status: DesktopTerminalStatus,
+    origin: TerminalNotificationOrigin,
     thread: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<void> {
     if (signal?.aborted) return;
-    const notifier = this.#desktopNotifier;
+    const notifier = this.#terminalNotifier;
     if (!notifier) return;
-    const observePresence = this.#options.presenceObservation;
+    const observePresence =
+      origin === "desktop" ? this.#options.presenceObservation : undefined;
     let confirmedAway = false;
     if (observePresence) {
       let observation: PresenceObservation;
@@ -606,6 +655,7 @@ export class BridgeDaemon {
     }
     const result = await notifier.notifyTerminal(event, status, {
       ...(confirmedAway ? { presence: "away" as const } : {}),
+      origin,
       ...(signal ? { signal } : {}),
       thread,
     });
@@ -628,8 +678,76 @@ export class BridgeDaemon {
     });
   }
 
+  async #reconcileTerminalNotificationJobs(signal?: AbortSignal): Promise<void> {
+    const jobs = this.#options.state.listTerminalNotificationJobs(
+      this.#options.now(),
+    );
+    if (jobs.length === 0) {
+      this.#terminalNotificationJobOffset = 0;
+      return;
+    }
+    const start = this.#terminalNotificationJobOffset % jobs.length;
+    const batchSize = Math.min(
+      TERMINAL_NOTIFICATION_RECONCILE_BATCH_SIZE,
+      jobs.length,
+    );
+    const batch = Array.from(
+      { length: batchSize },
+      (_, index) => jobs[(start + index) % jobs.length],
+    ).filter((job): job is TerminalNotificationJob => Boolean(job));
+    this.#terminalNotificationJobOffset = (start + batchSize) % jobs.length;
+    await Promise.all(
+      batch.map((job) => this.#reconcileTerminalNotificationJob(job, signal)),
+    );
+  }
+
+  async #reconcileTerminalNotificationJob(
+    job: TerminalNotificationJob,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (signal?.aborted) return;
+    try {
+      if (job.evidence === "managed-desktop") {
+        this.#options.leases.markDesktopStop({
+          stoppedAtMs: job.capturedAtMs,
+          threadId: job.threadId,
+          turnId: job.turnId,
+        });
+        this.#options.state.markDesktopTurnObservationStopped({
+          stoppedAtMs: job.capturedAtMs,
+          threadId: job.threadId,
+          turnId: job.turnId,
+        });
+      } else {
+        this.#options.state.recordDesktopTurnStopTombstone({
+          stoppedAtMs: job.capturedAtMs,
+          threadId: job.threadId,
+          turnId: job.turnId,
+        });
+      }
+      await this.#reconcileTerminalStop(
+        {
+          capturedAtMs: job.capturedAtMs,
+          cwd: job.cwd,
+          eventName: "Stop",
+          model: null,
+          permissionMode: null,
+          schemaVersion: 1,
+          sessionId: job.threadId,
+          source: null,
+          toolName: null,
+          turnId: job.turnId,
+        },
+        20,
+        signal,
+      );
+    } catch {
+      // The durable job remains for the next startup or polling pass.
+    }
+  }
+
   async #reconcilePendingDesktopNotifications(): Promise<void> {
-    const notifier = this.#desktopNotifier;
+    const notifier = this.#terminalNotifier;
     const observePresence = this.#options.presenceObservation;
     const pending = this.#options.state.listPendingDesktopNotifications();
     if (!notifier || !observePresence || pending.length === 0) return;
@@ -707,6 +825,7 @@ export class BridgeDaemon {
       nowMs + TRANSPORT_MAINTENANCE_INTERVAL_MS;
     try {
       this.#options.state.pruneExpiredTransportState(nowMs);
+      this.#options.state.pruneExpiredTerminalNotificationJobs(nowMs);
     } catch {
       // Retention is retried on the next bounded maintenance interval and
       // cannot block durable transport recovery.
@@ -714,10 +833,18 @@ export class BridgeDaemon {
   }
 }
 
-function desktopTerminalStatus(value: unknown): DesktopTerminalStatus | null {
+function terminalNotificationStatus(value: unknown): DesktopTerminalStatus | null {
   return value === "completed" || value === "failed" || value === "interrupted"
     ? value
     : null;
+}
+
+function terminalTurnStartedAtMs(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return null;
+  }
+  const milliseconds = value * 1_000;
+  return Number.isSafeInteger(milliseconds) ? milliseconds : null;
 }
 
 function delay(milliseconds: number): Promise<void> {

@@ -6,8 +6,9 @@ import {
 } from "../bridge/sqlite-state.ts";
 import {
   desktopNotificationCandidateClientIds,
-  desktopNotificationClientId,
   desktopNotificationMessageClientIds,
+  terminalNotificationClientId,
+  type TerminalNotificationOrigin,
 } from "../bridge/desktop-notification-identity.ts";
 import {
   extractWechatLocalFileReferences,
@@ -21,7 +22,7 @@ export type DesktopTerminalStatus = "completed" | "failed" | "interrupted";
 
 export type DesktopNotifierOptions = {
   now: () => number;
-  presence: () => Promise<PresenceState>;
+  presence?: () => Promise<PresenceState>;
   readThread: (input: {
     includeTurns: boolean;
     threadId: string;
@@ -37,15 +38,24 @@ export type DesktopNotificationResult =
   | "queued";
 
 export type DesktopNotificationContext = {
+  origin?: TerminalNotificationOrigin;
   presence?: PresenceState;
   signal?: AbortSignal;
   thread?: Record<string, unknown>;
 };
 
+export function terminalNotificationOrigin(
+  value: unknown,
+): TerminalNotificationOrigin | null {
+  if (value === "automation") return "automation";
+  if (value === "vscode") return "desktop";
+  return null;
+}
+
 export class DesktopNotifier {
   readonly #inFlight = new Map<string, Promise<DesktopNotificationResult>>();
   readonly #now: () => number;
-  readonly #presence: () => Promise<PresenceState>;
+  readonly #presence: DesktopNotifierOptions["presence"];
   readonly #readThread: DesktopNotifierOptions["readThread"];
   readonly #session: ILinkSession;
   readonly #state: SqliteState;
@@ -64,7 +74,9 @@ export class DesktopNotifier {
     context: DesktopNotificationContext = {},
   ): Promise<DesktopNotificationResult> {
     if (!event.turnId) return Promise.resolve("already-sent");
-    const clientId = desktopNotificationClientId(
+    const origin = context.origin ?? "desktop";
+    const clientId = terminalNotificationClientId(
+      origin,
       event.sessionId,
       event.turnId,
       status !== "interrupted",
@@ -77,7 +89,13 @@ export class DesktopNotifier {
           : result,
       );
     }
-    const notification = this.#notify(event, status, clientId, context).finally(() => {
+    const notification = this.#notify(
+      event,
+      status,
+      origin,
+      clientId,
+      context,
+    ).finally(() => {
       if (this.#inFlight.get(clientId) === notification) {
         this.#inFlight.delete(clientId);
       }
@@ -89,22 +107,27 @@ export class DesktopNotifier {
   async #notify(
     event: HookEvent,
     status: DesktopTerminalStatus,
+    origin: TerminalNotificationOrigin,
     clientId: string,
     context: DesktopNotificationContext,
   ): Promise<DesktopNotificationResult> {
     if (context.signal?.aborted) return "cancelled";
     if (hasDesktopNotification(this.#state, clientId)) return "already-sent";
-    let presence = context.presence;
-    if (!presence) {
-      try {
-        presence = await this.#presence();
-      } catch {
-        // Unknown presence must not create noisy duplicate Desktop notifications.
-        return "present";
+    if (origin === "desktop") {
+      let presence = context.presence;
+      if (!presence) {
+        const observePresence = this.#presence;
+        if (!observePresence) return "present";
+        try {
+          presence = await observePresence();
+        } catch {
+          // Unknown presence must not create noisy duplicate Desktop notifications.
+          return "present";
+        }
       }
+      if (context.signal?.aborted) return "cancelled";
+      if (presence === "present") return "present";
     }
-    if (context.signal?.aborted) return "cancelled";
-    if (presence === "present") return "present";
 
     let thread = context.thread ?? {};
     if (!context.thread) {
@@ -120,7 +143,7 @@ export class DesktopNotifier {
       }
     }
     if (context.signal?.aborted) return "cancelled";
-    const text = formatDesktopNotification(event, status, thread);
+    const text = formatDesktopNotification(event, status, origin, thread);
     const extracted = extractWechatLocalFileReferences(text);
     const safeText = [
       extracted.text,
@@ -169,10 +192,11 @@ export function desktopNotificationRoute(
   threadId: string,
   turnId: string,
   deliveredAtMs: number,
+  origin: TerminalNotificationOrigin = "desktop",
 ): NotificationRoute {
   return {
     deliveredAtMs,
-    eventId: `desktop:${turnId}`,
+    eventId: `${origin}:${turnId}`,
     expiresAtMs: deliveredAtMs + 30 * 60 * 1_000,
     threadId,
   };
@@ -181,6 +205,7 @@ export function desktopNotificationRoute(
 function formatDesktopNotification(
   event: HookEvent,
   status: DesktopTerminalStatus,
+  origin: TerminalNotificationOrigin,
   thread: Record<string, unknown>,
 ): string {
   const icon = status === "completed" ? "✅" : status === "failed" ? "❌" : "⚠️";
@@ -195,7 +220,7 @@ function formatDesktopNotification(
       ? desktopTurnConversation(thread, event.turnId)
       : null;
   const result = [
-    `${icon} Codex Desktop 任务${label}`,
+    `${icon} Codex ${origin === "automation" ? "已安排" : "Desktop "}任务${label}`,
     `项目：${cwd}`,
     `会话：${title}`,
   ];
@@ -208,11 +233,15 @@ function formatDesktopNotification(
       `Codex：${conversation.finalAnswer}`,
     );
   }
-  result.push(
-    "",
-    "只有一条新通知时，直接回复即可继续这个会话；多条通知请先选择。",
-    "⚠️ 通过微信继续的新对话，需要重启 Codex App 后才能在桌面端看到。",
-  );
+  if (status === "interrupted") {
+    result.push("", "如需继续，请在 Codex Desktop 打开这个会话。");
+  } else {
+    result.push(
+      "",
+      "只有一条新通知时，直接回复即可继续这个会话；多条通知请先选择。",
+      "⚠️ 通过微信继续的新对话，需要重启 Codex App 后才能在桌面端看到。",
+    );
+  }
   return result.join("\n");
 }
 

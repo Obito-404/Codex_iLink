@@ -865,20 +865,35 @@ test("expired authentication in a startup Outbox keeps the Bridge running for co
   }
 });
 
-test("an unmatched CLI Stop is inspected once and still suppresses a late Prompt", async () => {
+test("pre-binding and unsupported Stops fail closed without reviving a late Prompt", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-stale-stop-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
   let reads = 0;
   state.setMainThreadId("thread-main");
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
   const daemon = new BridgeDaemon({
     bridgeInstanceId: "bridge-instance",
     codex: {
       close() {},
       onEvent() { return () => undefined; },
-      async readThread() {
+      async readThread(input) {
         reads += 1;
+        if (input.threadId === "old-automation-thread") {
+          return {
+            thread: {
+              source: "automation",
+              turns: [
+                {
+                  id: "old-automation-turn",
+                  startedAt: 0,
+                  status: "completed",
+                },
+              ],
+            },
+          };
+        }
         return {
           thread: {
             source: "cli",
@@ -914,11 +929,28 @@ test("an unmatched CLI Stop is inspected once and still suppresses a late Prompt
     reads = 0;
     await daemon.ingestHookEvent({
       ...desktopStopEvent(),
-      sessionId: "stale-thread",
-      turnId: "stale-turn",
+      capturedAtMs: 1,
+      sessionId: "pre-binding-thread",
+      turnId: "pre-binding-turn",
+    });
+    assert.equal(reads, 0);
+    assert.deepEqual(state.listTerminalNotificationJobs(2), []);
+    await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      sessionId: "old-automation-thread",
+      turnId: "old-automation-turn",
     });
     assert.equal(reads, 1);
     assert.deepEqual(state.listPendingOutbox(), []);
+    assert.deepEqual(state.listTerminalNotificationJobs(1), []);
+    await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      sessionId: "stale-thread",
+      turnId: "stale-turn",
+    });
+    assert.equal(reads, 2);
+    assert.deepEqual(state.listPendingOutbox(), []);
+    assert.deepEqual(state.listTerminalNotificationJobs(1), []);
     await daemon.ingestHookEvent(
       desktopPromptEvent("stale-thread", "stale-turn"),
     );
@@ -948,7 +980,258 @@ test("an unmatched CLI Stop is inspected once and still suppresses a late Prompt
   }
 });
 
-test("an aborted spooled Stop cannot notify or release its Desktop lease later", async () => {
+test("an unmatched automation Stop is durably retried and pushed while present", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-automation-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const sent: Array<{ clientId: string; text: string }> = [];
+  let releaseFirstRead!: () => void;
+  let markFirstReadStarted!: () => void;
+  let blockFirstRead = true;
+  const firstReadStarted = new Promise<void>((resolveStarted) => {
+    markFirstReadStarted = resolveStarted;
+  });
+  state.setMainThreadId("thread-main");
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  state.acceptInboundBatch({
+    accountId: "bot-a",
+    controllerUserId: "controller-a",
+    messages: [
+      {
+        body: "help",
+        contextToken: "ctx-automation",
+        messageId: "seed-automation",
+        receivedAtMs: 1,
+      },
+    ],
+    nextCursor: "cursor-automation",
+    updatedAtMs: 1,
+  });
+  state.clearInboundBody("bot-a", "controller-a", "seed-automation");
+
+  const daemon = new BridgeDaemon({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      close() {},
+      onEvent() { return () => undefined; },
+      async readThread(input) {
+        assert.equal(input.threadId, "thread-automation");
+        if (blockFirstRead) {
+          blockFirstRead = false;
+          markFirstReadStarted();
+          await new Promise<void>((resolveRead) => {
+            releaseFirstRead = resolveRead;
+          });
+        }
+        return {
+          thread: {
+            cwd: "D:\\Reports",
+            name: "每日简报",
+            source: "automation",
+            turns: [
+              {
+                id: "turn-automation",
+                items: [
+                  {
+                    content: [{ text: "生成每日简报", type: "text" }],
+                    type: "userMessage",
+                  },
+                  {
+                    phase: "final_answer",
+                    text: "今日简报已生成。",
+                    type: "agentMessage",
+                  },
+                ],
+                startedAt: 29,
+                status: "completed",
+              },
+            ],
+          },
+        };
+      },
+      async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
+      async setThreadName() { return {}; },
+      async startThread() { assert.fail("main thread already exists"); },
+      async startTurn() { assert.fail("no inbound messages"); },
+    },
+    hookReceiver: {
+      async close() {}, async drainSpool() { return 0; }, async start() {},
+    },
+    ilink: {
+      async getUpdates() {
+        return { cursor: "cursor-automation", kind: "timeout" as const };
+      },
+      async sendText(input) {
+        sent.push(input);
+        return { accepted: true as const, clientId: input.clientId };
+      },
+    },
+    inboxDirectory: join(directory, "Inbox"),
+    leases,
+    newId: () => "unused",
+    now: () => 30_000,
+    presence: async () => "present",
+    presenceObservation: async () => ({
+      idleMilliseconds: 0,
+      locked: false,
+      state: "present",
+    }),
+    session,
+    state,
+  });
+
+  try {
+    await daemon.start();
+    const abort = new AbortController();
+    const ingestion = daemon.ingestHookEvent(
+      {
+        ...desktopStopEvent(),
+        capturedAtMs: 29_000,
+        cwd: "D:\\Reports",
+        sessionId: "thread-automation",
+        turnId: "turn-automation",
+      },
+      abort.signal,
+    );
+    await firstReadStarted;
+    abort.abort(new Error("Hook delivery timed out"));
+    releaseFirstRead();
+    await ingestion;
+    assert.equal(sent.length, 0);
+    assert.equal(state.listTerminalNotificationJobs(30_000).length, 1);
+
+    await daemon.pollOnce();
+    await waitFor(() => sent.length === 1);
+    assert.deepEqual(state.listTerminalNotificationJobs(30_000), []);
+    assert.match(sent[0]?.clientId ?? "", /^codex-ilink:automation:/u);
+    assert.match(
+      sent[0]?.text ?? "",
+      /Codex 已安排任务已完成[\s\S]*每日简报[\s\S]*今日简报已生成/u,
+    );
+    assert.deepEqual(state.listLiveNotificationRoutes(30_001), [
+      {
+        deliveredAtMs: 30_000,
+        eventId: "automation:turn-automation",
+        expiresAtMs: 30_000 + 30 * 60 * 1_000,
+        threadId: "thread-automation",
+      },
+    ]);
+    await daemon.stop();
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("terminal notification recovery reconciles a bounded batch concurrently and rotates", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-terminal-batch-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const turnByThread = new Map([
+    ["thread-job-a", "turn-job-a"],
+    ["thread-job-b", "turn-job-b"],
+    ["thread-job-c", "turn-job-c"],
+    ["thread-job-d", "turn-job-d"],
+    ["thread-job-e", "turn-job-e"],
+  ]);
+  const firstBatchSize = 4;
+  let concurrentReads = 0;
+  let maxConcurrentReads = 0;
+  let startedReads = 0;
+  let releaseConcurrentReads!: () => void;
+  const concurrentReadsStarted = new Promise<void>((resolveStarted) => {
+    releaseConcurrentReads = resolveStarted;
+  });
+  state.setMainThreadId("thread-main");
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  for (const [threadId, turnId] of turnByThread) {
+    state.putTerminalNotificationJob({
+      capturedAtMs: 2_000,
+      cwd: "D:\\Project",
+      evidence: "unmatched",
+      threadId,
+      turnId,
+    });
+  }
+
+  const daemon = new BridgeDaemon({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      close() {},
+      onEvent() { return () => undefined; },
+      async readThread(input) {
+        startedReads += 1;
+        concurrentReads += 1;
+        maxConcurrentReads = Math.max(maxConcurrentReads, concurrentReads);
+        if (startedReads === firstBatchSize) releaseConcurrentReads();
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          if (startedReads <= firstBatchSize) {
+            await Promise.race([
+              concurrentReadsStarted,
+              new Promise<never>((_resolve, reject) => {
+                timeout = setTimeout(
+                  () => reject(new Error("terminal jobs were reconciled serially")),
+                  100,
+                );
+              }),
+            ]);
+          }
+        } finally {
+          if (timeout) clearTimeout(timeout);
+          concurrentReads -= 1;
+        }
+        return {
+          thread: {
+            source: "cli",
+            turns: [
+              {
+                id: turnByThread.get(input.threadId),
+                startedAt: 2,
+                status: "completed",
+              },
+            ],
+          },
+        };
+      },
+      async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
+      async setThreadName() { return {}; },
+      async startThread() { assert.fail("main thread already exists"); },
+      async startTurn() { assert.fail("no inbound messages"); },
+    },
+    hookReceiver: {
+      async close() {}, async drainSpool() { return 0; }, async start() {},
+    },
+    ilink: {
+      async getUpdates() { return { cursor: "", kind: "timeout" as const }; },
+      async sendText() { assert.fail("CLI jobs cannot notify"); },
+    },
+    inboxDirectory: join(directory, "Inbox"),
+    leases,
+    newId: () => "unused",
+    now: () => 3_000,
+    session,
+    state,
+  });
+
+  try {
+    await daemon.start();
+    assert.equal(maxConcurrentReads, firstBatchSize);
+    assert.equal(state.listTerminalNotificationJobs(3_000).length, 1);
+    await daemon.pollOnce();
+    assert.deepEqual(state.listTerminalNotificationJobs(3_000), []);
+    await daemon.stop();
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("an aborted spooled Stop defers notification and lease release to reconciliation", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-aborted-stop-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -964,6 +1247,7 @@ test("an aborted spooled Stop cannot notify or release its Desktop lease later",
   });
   let sent = 0;
   state.setMainThreadId("thread-main");
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
   leases.tryAcquire({
     createdAtMs: 1,
     instanceId: "desktop",
@@ -982,7 +1266,7 @@ test("an aborted spooled Stop cannot notify or release its Desktop lease later",
         return {
           thread: {
             source: "vscode",
-            turns: [{ id: "desktop-turn", status: "completed" }],
+            turns: [{ id: "desktop-turn", startedAt: 1, status: "completed" }],
           },
         };
       },
@@ -1026,6 +1310,7 @@ test("an aborted spooled Stop cannot notify or release its Desktop lease later",
     await reconciliation;
     assert.equal(sent, 0);
     assert.equal(leases.getLease("thread-desktop")?.turnId, "desktop-turn");
+    assert.equal(state.listTerminalNotificationJobs(10_000).length, 1);
     await daemon.stop();
   } finally {
     leases.close();
@@ -1085,6 +1370,7 @@ test("an away Desktop completion from an unselected project is sent without chan
                     type: "agentMessage",
                   },
                 ],
+                startedAt: 1,
                 status: "completed",
               },
             ],
@@ -1321,9 +1607,11 @@ test("an away Desktop Stop opens its reply route after delivery without replacin
         return input.includeTurns
           ? {
               thread: {
+                source: "vscode",
                 turns: [
                   {
                     id: "desktop-turn",
+                    startedAt: 1,
                     status: desktopTerminal ? "completed" : "inProgress",
                   },
                 ],
@@ -1441,6 +1729,7 @@ test("a recently active Desktop completion is sent after five idle minutes witho
           thread: {
             cwd: "D:\\Project",
             name: "离开后完成",
+            source: "vscode",
             turns: [
               {
                 id: "desktop-turn",
@@ -1455,6 +1744,7 @@ test("a recently active Desktop completion is sent after five idle minutes witho
                     type: "agentMessage",
                   },
                 ],
+                startedAt: 1,
                 status: "completed",
               },
             ],

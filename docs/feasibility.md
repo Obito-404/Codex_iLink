@@ -26,10 +26,11 @@
 - Windows 最后输入 API 可读取当前用户键鼠空闲时间。
 - 腾讯 `openclaw-weixin` 源码包含扫码登录、`get_updates_buf` 长轮询、`message_id`、`context_token` 和文本发送。
 - 已完成真实 iLink 扫码并绑定唯一微信用户。
-- 离开时 Desktop 终态通知、送达后 5 分钟回复路由、活动任务电源保持，以及最终回复每条最多 2000 UTF-8 字节、最多 3 条的截断策略均已实现。
+- 离开时 Desktop 终态通知、已安排任务不受 Presence 抑制的终态通知、Stop 到 Outbox 之间可恢复的 SQLite Job、送达后回复路由、活动任务电源保持，以及最终回复每条最多 2000 UTF-8 字节、最多 3 条的截断策略均已实现。已安排任务当前按公开 `thread/read` 返回的 `source=automation` 识别，仍需真实计划任务与微信实机验收。
 
 ## 尚未验证
 
+- `thread/read.source=automation` 当前是线程级标签；计划首跑、复跑与同线程 Desktop 手工续跑的 UserPrompt/Stop Hook `source` 是否存在稳定互斥值尚未验证。现阶段手工续跑可能按已安排任务立即推送，不能把该标签用于授权。
 - 已实现的原子租约 + `UserPromptSubmit continue:false` 仲裁仍需完成真实 Desktop/Bridge 同时抢占验收，并验证异常退出后的保守租约恢复。
 - 固定 iLink `client_id` 重放是否具有服务端幂等语义；确认前只能保证入站去重，出站通知可能极少量重复。
 - 真实微信文本收发、断线游标恢复、长期账号会话和主动通知可达性。

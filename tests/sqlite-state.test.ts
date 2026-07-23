@@ -95,7 +95,7 @@ try {
     const reopened = new SqliteState(path);
     assert.deepEqual(reopened.storageDiagnostics(), {
       journalMode: "wal",
-      schemaVersion: 15,
+      schemaVersion: 16,
       synchronous: "full",
     });
     assert.deepEqual(reopened.listQueuedTurns(), [
@@ -222,7 +222,7 @@ test("schema v11 attachment intents migrate as untrusted legacy paths", () => {
     database.close();
 
     migrated = new SqliteState(path);
-    assert.equal(migrated.storageDiagnostics().schemaVersion, 15);
+    assert.equal(migrated.storageDiagnostics().schemaVersion, 16);
     assert.equal(
       migrated.listOutboundAttachmentIntents("legacy-turn")[0]
         ?.snapshotProvenance,
@@ -298,7 +298,7 @@ test("schema v13 adds bounded transport indexes without losing state", () => {
     database.close();
 
     state = new SqliteState(path);
-    assert.equal(state.storageDiagnostics().schemaVersion, 15);
+    assert.equal(state.storageDiagnostics().schemaVersion, 16);
     assert.equal(state.listInboundMessages()[0]?.messageId, "message-index");
     state.close();
     state = null;
@@ -707,7 +707,7 @@ test("controller identity and database configuration survive reopening", () => {
     const first = new SqliteState(path);
     assert.deepEqual(first.storageDiagnostics(), {
       journalMode: "wal",
-      schemaVersion: 15,
+      schemaVersion: 16,
       synchronous: "full",
     });
     assert.deepEqual(
@@ -772,7 +772,7 @@ test("schema v14 removes legacy local permission profiles", () => {
     database.close();
 
     migrated = new SqliteState(path);
-    assert.equal(migrated.storageDiagnostics().schemaVersion, 15);
+    assert.equal(migrated.storageDiagnostics().schemaVersion, 16);
     migrated.close();
     migrated = null;
 
@@ -1636,6 +1636,45 @@ test("Desktop observations require an exact Stop before release", () => {
   }
 });
 
+test("terminal notification jobs persist Stop evidence until durable handoff", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-terminal-job-"));
+  const state = new SqliteState(join(directory, "state.db"));
+
+  try {
+    state.putTerminalNotificationJob({
+      capturedAtMs: 10,
+      cwd: null,
+      evidence: "unmatched",
+      threadId: "thread-job",
+      turnId: "turn-job",
+    });
+    const promoted = state.putTerminalNotificationJob({
+      capturedAtMs: 11,
+      cwd: "D:\\Project",
+      evidence: "managed-desktop",
+      threadId: "thread-job",
+      turnId: "turn-job",
+    });
+    assert.deepEqual(promoted, {
+      capturedAtMs: 11,
+      cwd: "D:\\Project",
+      evidence: "managed-desktop",
+      expiresAtMs: 11 + 7 * 24 * 60 * 60 * 1_000,
+      threadId: "thread-job",
+      turnId: "turn-job",
+    });
+    assert.deepEqual(state.listTerminalNotificationJobs(12), [promoted]);
+    assert.equal(
+      state.pruneExpiredTerminalNotificationJobs(promoted.expiresAtMs),
+      1,
+    );
+    assert.deepEqual(state.listTerminalNotificationJobs(promoted.expiresAtMs), []);
+  } finally {
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("guarded threads include only live WeChat routing and work", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-state-guarded-"));
   const state = new SqliteState(join(directory, "state.db"));
@@ -2348,7 +2387,7 @@ test("schema v6 deletes legacy plain-text scheduler payloads", () => {
     database.close();
 
     state = new SqliteState(path);
-    assert.equal(state.storageDiagnostics().schemaVersion, 15);
+    assert.equal(state.storageDiagnostics().schemaVersion, 16);
     assert.deepEqual(state.listQueuedTurns(), []);
     assert.equal(state.getDispatchIntent("legacy-operation"), null);
     assert.equal(state.countActiveDispatches(), 0);
@@ -2510,7 +2549,7 @@ test("schema v15 keeps legacy permission defaults inert", () => {
     database.close();
 
     reopened = new SqliteState(path);
-    assert.equal(reopened.storageDiagnostics().schemaVersion, 15);
+    assert.equal(reopened.storageDiagnostics().schemaVersion, 16);
     reopened.resetUserTimingSettings(1_000);
     reopened.close();
     reopened = null;
@@ -2728,6 +2767,13 @@ test("re-binding a new iLink identity clears old delivery state but preserves us
       threadId: "thread-desktop-old",
       turnId: "turn-desktop-old",
     });
+    state.putTerminalNotificationJob({
+      capturedAtMs: 114,
+      cwd: "D:\\Project",
+      evidence: "unmatched",
+      threadId: "thread-terminal-old",
+      turnId: "turn-terminal-old",
+    });
 
     state.replaceILinkBinding({
       controller: {
@@ -2771,6 +2817,7 @@ test("re-binding a new iLink identity clears old delivery state but preserves us
       turnId: "turn-desktop-old",
     });
     assert.deepEqual(state.listPendingDesktopNotifications(), []);
+    assert.deepEqual(state.listTerminalNotificationJobs(200), []);
     assert.equal(
       state.markDesktopTurnObservationStopped({
         stoppedAtMs: 201,
@@ -3070,6 +3117,7 @@ function applyMigrations(
     "transport-retention-indexes",
     "drop-thread-permission-profiles",
     "default-thread-permissions",
+    "terminal-notification-jobs",
   ];
   const migrations = join(process.cwd(), "src", "bridge", "migrations");
   for (let version = firstVersion; version <= lastVersion; version += 1) {

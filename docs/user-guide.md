@@ -145,7 +145,7 @@ ilink config reset
 
 会。Codex Desktop 负责按时间触发任务；任务完成、失败或中断后，Codex iLink 会核验来源和终态，再通过持久 Outbox 推送到微信。它不受“人在电脑前”规则抑制；完成或失败通知在只有一条时，还可以在 30 分钟内直接回复来源会话。
 
-电脑、Codex Desktop 和 Bridge 必须保持运行。此能力使用 Codex 官方 Hook 与 App Server 扩展面，但微信 iLink 投递是本项目实现，不是 OpenAI 内置微信功能。升级 Codex Desktop 后建议实测一次，因为当前版本用 App Server 的线程级 `source=automation` 识别已安排任务，未知来源会保守地不推送；在这类线程里从 Desktop 手工续跑，也可能被当作已安排任务立即推送。
+电脑、Codex Desktop 和 Bridge 必须保持运行。此能力使用 Codex 官方 Hook 与 App Server 扩展面，但微信 iLink 投递是本项目实现，不是 OpenAI 内置微信功能。升级 Codex Desktop 后建议实测一次，因为当前版本用 App Server 的线程级 `threadSource=automation`（同时 `source=vscode`）识别已安排任务，未知来源会保守地不推送；在这类线程里从 Desktop 手工续跑，也可能被当作已安排任务立即推送。
 
 ### `ilink` 命令不存在
 

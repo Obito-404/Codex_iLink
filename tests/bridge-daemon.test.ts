@@ -871,8 +871,24 @@ test("pre-binding and unsupported Stops fail closed without reviving a late Prom
   const state = new SqliteState(databasePath);
   const leases = new SqliteTurnLeaseStore(databasePath);
   let reads = 0;
+  const sent: string[] = [];
   state.setMainThreadId("thread-main");
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  state.acceptInboundBatch({
+    accountId: "bot-a",
+    controllerUserId: "controller-a",
+    messages: [
+      {
+        body: "help",
+        contextToken: "ctx-null-source",
+        messageId: "seed-null-source",
+        receivedAtMs: 1,
+      },
+    ],
+    nextCursor: "cursor-null-source",
+    updatedAtMs: 1,
+  });
+  state.clearInboundBody("bot-a", "controller-a", "seed-null-source");
   const daemon = new BridgeDaemon({
     bridgeInstanceId: "bridge-instance",
     codex: {
@@ -888,6 +904,21 @@ test("pre-binding and unsupported Stops fail closed without reviving a late Prom
                 {
                   id: "old-automation-turn",
                   startedAt: 0,
+                  status: "completed",
+                },
+              ],
+            },
+          };
+        }
+        if (input.threadId === "null-source-thread") {
+          return {
+            thread: {
+              source: "vscode",
+              threadSource: null,
+              turns: [
+                {
+                  id: "null-source-turn",
+                  startedAt: 2,
                   status: "completed",
                 },
               ],
@@ -913,7 +944,10 @@ test("pre-binding and unsupported Stops fail closed without reviving a late Prom
     },
     ilink: {
       async getUpdates() { return { cursor: "", kind: "timeout" as const }; },
-      async sendText() { assert.fail("nothing to send"); },
+      async sendText(input) {
+        sent.push(input.text);
+        return { accepted: true as const, clientId: input.clientId };
+      },
     },
     inboxDirectory: join(directory, "Inbox"),
     leases,
@@ -951,6 +985,17 @@ test("pre-binding and unsupported Stops fail closed without reviving a late Prom
     assert.equal(reads, 2);
     assert.deepEqual(state.listPendingOutbox(), []);
     assert.deepEqual(state.listTerminalNotificationJobs(1), []);
+    await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      sessionId: "null-source-thread",
+      turnId: "null-source-turn",
+    });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    assert.equal(reads, 3);
+    assert.deepEqual(sent, []);
+    assert.deepEqual(state.listPendingOutbox(), []);
+    assert.deepEqual(state.listLiveNotificationRoutes(3), []);
+    assert.deepEqual(state.listTerminalNotificationJobs(3), []);
     await daemon.ingestHookEvent(
       desktopPromptEvent("stale-thread", "stale-turn"),
     );
@@ -980,6 +1025,83 @@ test("pre-binding and unsupported Stops fail closed without reviving a late Prom
   }
 });
 
+test("an aborted managed Desktop Stop does not resume after its read fails", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-aborted-read-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  let ensureCalls = 0;
+  let markReadStarted!: () => void;
+  let rejectRead!: (error: Error) => void;
+  const readStarted = new Promise<void>((resolveStarted) => {
+    markReadStarted = resolveStarted;
+  });
+  state.setMainThreadId("thread-main");
+  const daemon = new BridgeDaemon({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      close() {},
+      async ensureThread() {
+        ensureCalls += 1;
+      },
+      onEvent() { return () => undefined; },
+      async readThread() {
+        markReadStarted();
+        return new Promise<never>((_resolve, reject) => {
+          rejectRead = reject;
+        });
+      },
+      async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
+      async setThreadName() { return {}; },
+      async startThread() { assert.fail("main thread already exists"); },
+      async startTurn() { assert.fail("no inbound messages"); },
+    },
+    hookReceiver: {
+      async close() {}, async drainSpool() { return 0; }, async start() {},
+    },
+    ilink: {
+      async getUpdates() { return { cursor: "", kind: "timeout" as const }; },
+      async sendText() { assert.fail("nothing to send"); },
+    },
+    inboxDirectory: join(directory, "Inbox"),
+    leases,
+    newId: () => "unused",
+    now: () => 3,
+    session,
+    state,
+  });
+
+  try {
+    await daemon.start();
+    assert.equal(
+      leases.tryAcquire({
+        createdAtMs: 1,
+        instanceId: "desktop",
+        operationId: "desktop-turn",
+        owner: "desktop",
+        threadId: "thread-desktop",
+        turnId: "desktop-turn",
+      }).acquired,
+      true,
+    );
+    const abort = new AbortController();
+    const reconciliation = daemon.ingestHookEvent(desktopStopEvent(), abort.signal);
+    await readStarted;
+    abort.abort(new Error("Hook delivery timed out"));
+    rejectRead(new Error("read failed after abort"));
+    await reconciliation;
+    assert.equal(ensureCalls, 0);
+    const jobs = state.listTerminalNotificationJobs(3);
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0]?.evidence, "managed-desktop");
+    await daemon.stop();
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("an unmatched automation Stop is durably retried and pushed while present", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-automation-"));
   const databasePath = join(directory, "state.sqlite");
@@ -989,6 +1111,8 @@ test("an unmatched automation Stop is durably retried and pushed while present",
   let releaseFirstRead!: () => void;
   let markFirstReadStarted!: () => void;
   let blockFirstRead = true;
+  let ensured = false;
+  let recoveryReadCount = 0;
   const firstReadStarted = new Promise<void>((resolveStarted) => {
     markFirstReadStarted = resolveStarted;
   });
@@ -1014,6 +1138,10 @@ test("an unmatched automation Stop is durably retried and pushed while present",
     bridgeInstanceId: "bridge-instance",
     codex: {
       close() {},
+      async ensureThread(threadId) {
+        assert.equal(threadId, "thread-automation");
+        ensured = true;
+      },
       onEvent() { return () => undefined; },
       async readThread(input) {
         assert.equal(input.threadId, "thread-automation");
@@ -1023,12 +1151,18 @@ test("an unmatched automation Stop is durably retried and pushed while present",
           await new Promise<void>((resolveRead) => {
             releaseFirstRead = resolveRead;
           });
+        } else {
+          recoveryReadCount += 1;
+          if (recoveryReadCount === 1) {
+            throw new Error("thread temporarily unavailable");
+          }
         }
         return {
           thread: {
             cwd: "D:\\Reports",
             name: "每日简报",
-            source: "automation",
+            source: "vscode",
+            threadSource: ensured ? null : "automation",
             turns: [
               {
                 id: "turn-automation",
@@ -1044,7 +1178,7 @@ test("an unmatched automation Stop is durably retried and pushed while present",
                   },
                 ],
                 startedAt: 29,
-                status: "completed",
+                status: recoveryReadCount <= 3 ? "interrupted" : "completed",
               },
             ],
           },
@@ -1102,9 +1236,14 @@ test("an unmatched automation Stop is durably retried and pushed while present",
     assert.equal(state.listTerminalNotificationJobs(30_000).length, 1);
 
     await daemon.pollOnce();
+    assert.equal(sent.length, 0);
+    assert.equal(state.listTerminalNotificationJobs(30_000).length, 1);
+    assert.equal(ensured, false);
+    await daemon.pollOnce();
     await waitFor(() => sent.length === 1);
     assert.deepEqual(state.listTerminalNotificationJobs(30_000), []);
     assert.match(sent[0]?.clientId ?? "", /^codex-ilink:automation:/u);
+    assert.match(sent[0]?.clientId ?? "", /:final$/u);
     assert.match(
       sent[0]?.text ?? "",
       /Codex 已安排任务已完成[\s\S]*每日简报[\s\S]*今日简报已生成/u,
@@ -1117,6 +1256,105 @@ test("an unmatched automation Stop is durably retried and pushed while present",
         threadId: "thread-automation",
       },
     ]);
+    assert.equal(ensured, false);
+    await daemon.stop();
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("five consecutive interrupted reads send one automation notice", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-interrupted-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const sent: Array<{ clientId: string; text: string }> = [];
+  let reads = 0;
+  state.setMainThreadId("thread-main");
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  state.acceptInboundBatch({
+    accountId: "bot-a",
+    controllerUserId: "controller-a",
+    messages: [
+      {
+        body: "help",
+        contextToken: "ctx-interrupted",
+        messageId: "seed-interrupted",
+        receivedAtMs: 1,
+      },
+    ],
+    nextCursor: "cursor-interrupted",
+    updatedAtMs: 1,
+  });
+  state.clearInboundBody("bot-a", "controller-a", "seed-interrupted");
+
+  const daemon = new BridgeDaemon({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      close() {},
+      onEvent() { return () => undefined; },
+      async readThread() {
+        reads += 1;
+        return {
+          thread: {
+            cwd: "D:\\Reports",
+            name: "每日简报",
+            source: "vscode",
+            threadSource: "automation",
+            turns: [
+              {
+                id: "turn-interrupted",
+                startedAt: 29,
+                status: "interrupted",
+              },
+            ],
+          },
+        };
+      },
+      async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
+      async setThreadName() { return {}; },
+      async startThread() { assert.fail("main thread already exists"); },
+      async startTurn() { assert.fail("no inbound messages"); },
+    },
+    hookReceiver: {
+      async close() {}, async drainSpool() { return 0; }, async start() {},
+    },
+    ilink: {
+      async getUpdates() {
+        return { cursor: "cursor-interrupted", kind: "timeout" as const };
+      },
+      async sendText(input) {
+        sent.push(input);
+        return { accepted: true as const, clientId: input.clientId };
+      },
+    },
+    inboxDirectory: join(directory, "Inbox"),
+    leases,
+    newId: () => "unused",
+    now: () => 30_000,
+    presence: async () => "present",
+    session,
+    state,
+  });
+
+  try {
+    await daemon.start();
+    await daemon.ingestHookEvent({
+      ...desktopStopEvent(),
+      capturedAtMs: 29_000,
+      cwd: "D:\\Reports",
+      sessionId: "thread-interrupted",
+      turnId: "turn-interrupted",
+    });
+    await waitFor(() => sent.length === 1);
+    assert.equal(reads, 5);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]?.clientId ?? "", /:notice$/u);
+    assert.match(sent[0]?.text ?? "", /Codex 已安排任务已中断/u);
+    assert.deepEqual(state.listLiveNotificationRoutes(30_001), []);
+    assert.deepEqual(state.listTerminalNotificationJobs(30_000), []);
     await daemon.stop();
   } finally {
     leases.close();
@@ -1560,6 +1798,7 @@ test("an away Desktop Stop opens its reply route after delivery without replacin
   const leases = new SqliteTurnLeaseStore(databasePath);
   let deliveryAvailable = false;
   let desktopTerminal = false;
+  let ensureCalls = 0;
   let nowMs = 30_000;
   state.setMainThreadId("thread-main");
   state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
@@ -1584,30 +1823,20 @@ test("an away Desktop Stop opens its reply route after delivery without replacin
     threadId: "thread-existing-binding",
     updatedAtMs: 1,
   });
-  leases.tryAcquire({
-    createdAtMs: 2,
-    instanceId: "desktop",
-    operationId: "desktop-turn",
-    owner: "desktop",
-    threadId: "thread-desktop",
-    turnId: "desktop-turn",
-  });
-  leases.markDesktopStop({
-    stoppedAtMs: 3,
-    threadId: "thread-desktop",
-    turnId: "desktop-turn",
-  });
-
   const daemon = new BridgeDaemon({
     bridgeInstanceId: "bridge-instance",
     codex: {
       close() {},
+      async ensureThread() {
+        ensureCalls += 1;
+      },
       onEvent() { return () => undefined; },
       async readThread(input) {
         return input.includeTurns
           ? {
               thread: {
                 source: "vscode",
+                threadSource: null,
                 turns: [
                   {
                     id: "desktop-turn",
@@ -1645,6 +1874,19 @@ test("an away Desktop Stop opens its reply route after delivery without replacin
 
   try {
     await daemon.start();
+    leases.tryAcquire({
+      createdAtMs: 2,
+      instanceId: "desktop",
+      operationId: "desktop-turn",
+      owner: "desktop",
+      threadId: "thread-desktop",
+      turnId: "desktop-turn",
+    });
+    leases.markDesktopStop({
+      stoppedAtMs: 3,
+      threadId: "thread-desktop",
+      turnId: "desktop-turn",
+    });
     let persisted = false;
     const reconciliation = daemon.ingestHookEvent(desktopStopEvent()).then(() => {
       persisted = true;
@@ -1673,6 +1915,7 @@ test("an away Desktop Stop opens its reply route after delivery without replacin
       threadId: "thread-existing-binding",
       updatedAtMs: 1,
     });
+    assert.equal(ensureCalls, 0, "an existing inProgress turn must not be resumed");
     await daemon.stop();
   } finally {
     leases.close();

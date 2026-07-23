@@ -4,7 +4,7 @@
 
 “Codex Desktop 插件 Hooks + 当前用户 Bridge + 常驻 App Server + 微信 iLink”可以实现微信与 Desktop 共用持久化会话，但不能做成纯插件单体。插件只感知本机 Codex 生命周期，Bridge 负责长轮询、路由和持久化，App Server 执行微信回合。
 
-当前结论是“核心链路可行，关键仲裁已实现，最终实机抢占待验收”。`idle + Busy` 已被实测证明不能阻止两个独立 App Server 双写并错组历史；当前实现已改用 Desktop Hook 与 Bridge 共用的原子 SQLite 租约，并由 `UserPromptSubmit` 执行 fail-closed 仲裁。新版 Hook 捕获、同任务持久化继续和真实微信扫码绑定均已通过，剩余重点是真实 Desktop/Bridge 同时抢占与微信收发、主动推送闭环。
+当前结论是“核心链路可行，关键仲裁已实现，最终实机抢占待验收”。`idle + Busy` 已被实测证明不能阻止两个独立 App Server 双写并错组历史；当前实现已改用 Desktop Hook 与 Bridge 共用的原子 SQLite 租约，并由 `UserPromptSubmit` 执行 fail-closed 仲裁。新版 Hook 捕获、同任务持久化继续、真实微信扫码绑定及已安排任务到 iLink 确认的主动推送链路均已通过，剩余重点是真实 Desktop/Bridge 同时抢占、微信客户端目视确认和断线恢复。
 
 ## 已验证
 
@@ -26,14 +26,14 @@
 - Windows 最后输入 API 可读取当前用户键鼠空闲时间。
 - 腾讯 `openclaw-weixin` 源码包含扫码登录、`get_updates_buf` 长轮询、`message_id`、`context_token` 和文本发送。
 - 已完成真实 iLink 扫码并绑定唯一微信用户。
-- 离开时 Desktop 终态通知、已安排任务不受 Presence 抑制的终态通知、Stop 到 Outbox 之间可恢复的 SQLite Job、送达后回复路由、活动任务电源保持，以及最终回复每条最多 2000 UTF-8 字节、最多 3 条的截断策略均已实现。已安排任务当前按公开 `thread/read` 返回的 `source=automation` 识别，仍需真实计划任务与微信实机验收。
+- 离开时 Desktop 终态通知、已安排任务不受 Presence 抑制的终态通知、Stop 到 Outbox 之间可恢复的 SQLite Job、送达后回复路由、活动任务电源保持，以及最终回复每条最多 2000 UTF-8 字节、最多 3 条的截断策略均已实现。当前公开 `thread/read` 对已安排任务返回 `source=vscode` 与 `threadSource=automation`；真实计划触发、Stop、最终 Outbox、iLink 确认和回复路由已验证，仍需微信客户端目视确认及失败/中断矩阵验收。
 
 ## 尚未验证
 
-- `thread/read.source=automation` 当前是线程级标签；计划首跑、复跑与同线程 Desktop 手工续跑的 UserPrompt/Stop Hook `source` 是否存在稳定互斥值尚未验证。现阶段手工续跑可能按已安排任务立即推送，不能把该标签用于授权。
+- `thread/read.threadSource=automation` 当前是线程级标签；计划首跑、复跑与同线程 Desktop 手工续跑的 UserPrompt/Stop Hook `source` 是否存在稳定互斥值尚未验证。现阶段手工续跑可能按已安排任务立即推送，不能把该标签用于授权。
 - 已实现的原子租约 + `UserPromptSubmit continue:false` 仲裁仍需完成真实 Desktop/Bridge 同时抢占验收，并验证异常退出后的保守租约恢复。
 - 固定 iLink `client_id` 重放是否具有服务端幂等语义；确认前只能保证入站去重，出站通知可能极少量重复。
-- 真实微信文本收发、断线游标恢复、长期账号会话和主动通知可达性。
+- 微信客户端目视送达、断线游标恢复、长期账号会话，以及主动通知长期运行时的可达性。
 - 独立 App Server 对项目 Skills、MCP、连接器、Computer Use、设备证明等 Desktop 能力的实际复用范围。
 - App Server 在审批等待期间崩溃后的恢复能力；规格按失效并拒绝旧审批设计。
 - Windows 锁屏事件、空闲判断和电源请求在目标机器长期运行时的稳定性。
@@ -53,7 +53,7 @@
 - 腾讯维护的 [openclaw-weixin](https://github.com/Tencent/openclaw-weixin) 提供扫码授权、HTTP 长轮询、游标、发送消息和媒体能力；本项目第一版只采用文本。
 - 回复应带回最近入站消息提供的 `context_token`。账号会话、Token、网络或上下文失效时，消息进入 Outbox。
 - API 请求含客户端生成的 `client_id`，但参考实现没有证明服务端去重保证；真实收发验收必须覆盖相同 ID 重放。
-- 用户本人真实扫码绑定已完成；文本收发和主动通知端到端测试仍待完成。
+- 用户本人真实扫码绑定，以及已安排任务通知到 iLink `confirmed` 的端到端链路已完成；微信客户端目视、断线恢复与长期稳定性仍待验收。
 
 ## 更成熟的替代方案
 

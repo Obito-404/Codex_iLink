@@ -35,6 +35,15 @@ const stopEvent: HookEvent = {
 test("terminal notification sources fail closed on unknown values", () => {
   assert.equal(terminalNotificationOrigin("automation"), "automation");
   assert.equal(terminalNotificationOrigin("vscode"), "desktop");
+  assert.equal(
+    terminalNotificationOrigin("vscode", "automation"),
+    "automation",
+  );
+  assert.equal(terminalNotificationOrigin("vscode", "user"), "desktop");
+  assert.equal(terminalNotificationOrigin("vscode", "subagent"), null);
+  assert.equal(terminalNotificationOrigin("cli", "automation"), null);
+  assert.equal(terminalNotificationOrigin("vscode", null), null);
+  assert.equal(terminalNotificationOrigin("automation", null), null);
   assert.equal(terminalNotificationOrigin("cli"), null);
   assert.equal(terminalNotificationOrigin("future-source"), null);
   assert.equal(terminalNotificationOrigin(undefined), null);

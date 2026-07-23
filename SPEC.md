@@ -53,7 +53,7 @@ flowchart LR
 
 - 打包 `SessionStart`、`UserPromptSubmit`、`Stop` 和 `PermissionRequest` Hooks。
 - 普通生命周期 Hook 只发送 `session_id`、`turn_id`、`cwd`、事件名、模型和权限模式等元数据，不发送完整 Transcript。`PermissionRequest` 额外发送本次请求 ID、绑定完整 Hook 输入（含 `cwd + tool_name + tool_input`）的 SHA-256 指纹，以及最多 500 个 Unicode 字符的可核验摘要，仅走在线 Pipe，不写 Spool。摘要只接受严格白名单 envelope、可验证 Windows `cwd` 的末级项目名、白名单命令工具的唯一字符串 `command` 字段，或能完整解析且不超过 8 个操作的 `apply_patch`；不发送完整本机路径。命令只要包含完整本机绝对路径，就整条回退原生审批，不会脱敏后继续发送微信。未知工具、额外语义字段、绝对/非规范 patch 路径、隐藏/截断操作、控制字符、格式字符、检测到的凭证或伪造回复提示一律不进入微信审批。
-- Hook 优先通过当前用户专属 Named Pipe 通知 Bridge；Pipe 不可用时把同一份元数据写入有界本地 Spool，Bridge 在启动及每轮运行期轮询中 single-flight 排空。单次消费上限为 5 秒；普通生命周期事件失败后直接移入 `dead-letter`，门禁 `UserPromptSubmit` 因承载仲裁状态最多尝试 3 次，耗尽后再隔离。失败事件不会无限重放阻塞微信轮询，并且一次排空最多处理一个失败事件。`UserPromptSubmit` 不在门禁判定前发送生命周期事件；只有当前微信所选项目或已受管任务的 Prompt 需要 observation、但因 SQLite 瞬时写锁无法直接入库时，门禁 Hook 才写入带受控来源标记的 Spool。其他 Desktop 项目立即 fail-open，不记录活动观察或门禁 Spool；其 Stop 完成事件仍通过独立的 fail-open 生命周期通道进入 Pipe 或 Spool，用于离开通知。Bridge 收到 Stop 后先持久化最小终态通知 Job，再由公开 `thread/read(includeTurns=true)` 核验精确回合终态、来源和 `turn.startedAt`：当前 `source=vscode` 进入普通 Desktop 通知，`source=automation` 进入已安排任务通知，CLI、未知来源、缺失开始时间或开始时间不晚于当前控制者绑定时刻均失败关闭。App Server 暂不可读或 Hook 消费超时时，Job 保留并在启动、轮询时继续对账；每轮最多并发核验 4 个并公平轮转，避免多个慢 Job 线性阻塞微信收发；成功转入延迟候选或 Outbox 后删除。Bridge 在 iLink 长轮询返回后及每条已接受微信消息执行前排空 Hook，避免同批 `/s <n>` 与正文越过该观察。
+- Hook 优先通过当前用户专属 Named Pipe 通知 Bridge；Pipe 不可用时把同一份元数据写入有界本地 Spool，Bridge 在启动及每轮运行期轮询中 single-flight 排空。单次消费上限为 5 秒；普通生命周期事件失败后直接移入 `dead-letter`，门禁 `UserPromptSubmit` 因承载仲裁状态最多尝试 3 次，耗尽后再隔离。失败事件不会无限重放阻塞微信轮询，并且一次排空最多处理一个失败事件。`UserPromptSubmit` 不在门禁判定前发送生命周期事件；只有当前微信所选项目或已受管任务的 Prompt 需要 observation、但因 SQLite 瞬时写锁无法直接入库时，门禁 Hook 才写入带受控来源标记的 Spool。其他 Desktop 项目立即 fail-open，不记录活动观察或门禁 Spool；其 Stop 完成事件仍通过独立的 fail-open 生命周期通道进入 Pipe 或 Spool，用于离开通知。Bridge 收到 Stop 后先持久化最小终态通知 Job，再由公开 `thread/read(includeTurns=true)` 核验精确回合终态、来源和 `turn.startedAt`：当前 `source=vscode + threadSource=user`（或旧版缺少 `threadSource`）进入普通 Desktop 通知，`source=vscode + threadSource=automation` 进入已安排任务通知，旧版 `source=automation` 保持兼容；显式 `threadSource=null` 对未匹配 Stop 失败关闭，只有精确匹配本地受管 Desktop 证据且 `source=vscode` 时才保守回退为普通 Desktop；CLI、未知/冲突来源、缺失开始时间或开始时间不晚于当前控制者绑定时刻均失败关闭。终态核验必须先只读 `thread/read`；只有已有受管 Desktop 证据且目标回合缺失或线程不可读时才 `thread/resume`，已存在的非终态回合不得 Resume；未匹配的 Stop 保留 Job 重试，避免 Resume 丢失计划来源。独立 App Server 的瞬时 `interrupted` 必须连续稳定约 1 秒才成立，期间若收敛为 `completed` 或 `failed` 则使用最终状态。App Server 暂不可读或 Hook 消费超时时，Job 保留并在启动、轮询时继续对账；每轮最多并发核验 4 个并公平轮转，避免多个慢 Job 线性阻塞微信收发；成功转入延迟候选或 Outbox 后删除。Bridge 在 iLink 长轮询返回后及每条已接受微信消息执行前排空 Hook，避免同批 `/s <n>` 与正文越过该观察。
 - 除 `PermissionRequest` 外，生命周期通知的 Pipe、Spool 合计等待上限 500ms；两者都失败时放行，不阻塞 Desktop。`UserPromptSubmit` 的共享会话写入仲裁是安全边界，不使用这条 fail-open 路径。
 - `PermissionRequest` 通过 Pipe 保持在线回调：`auto_review` 或请求无法完整、安全展示时 stdout 为空并回退 Codex/Desktop；`user + on-request` 审批生成不可复用短码，微信 `y/n` 后输出 `hookSpecificOutput.decision.behavior=allow|deny`。Pipe 离线、无微信上下文或 Hook 断开时不落盘、不复用决定。
 - Bridge 启动的 App Server 带受控来源标记，Hook 据此区分 Bridge 回合和其他本机 Codex 回合，避免重复通知。
@@ -206,8 +206,8 @@ flowchart LR
 - Desktop 回合完成时尚未达到离开阈值且完成后没有新输入，Bridge 只持久化终态通知候选并持续复查；达到离开条件后发送，完成后出现新输入则取消候选。
 - 微信发起的回合无论用户是否在场，都把最终回复发送到微信。
 - Desktop（当前 App Server `source=vscode`）发起的普通完成通知不受微信当前项目选择限制，只在离开时推送；CLI 任务不推送。通知包含项目和会话名称、最后一条用户消息的短摘要、该回合最终回答、“只有一条新通知时可直接回复”的说明，以及“微信续聊后需重启 Codex App 才能在 Desktop 看到”的提醒。
-- Codex 已安排任务（当前 App Server `source=automation`）完成、失败或中断后不经过 Presence 抑制，立即以独立稳定 `client_id` 写入 Outbox 并推送微信；完成或失败通知全部分段确认后，可在 30 分钟内回复来源会话，中断通知只提示回到 Desktop。计划的创建、触发和执行仍由 Codex Desktop 官方自动化负责，Bridge 不扫描 UI、不读取私有数据库，也不替代计划任务事实源；本机项目任务仍要求电脑、Desktop 与 Bridge 保持运行。公共文档未承诺 `automation` 字面值跨版本不变，因此未知来源失败关闭并列入版本升级实机回归。
-- 当前公开 `thread/read` 只提供线程级 `source`，没有经验证的逐回合计划触发标记；因此在 `source=automation` 的同一线程内从 Desktop 手工续跑，可能仍被归类为已安排任务并立即推送。该限制不得作为授权判断依据，必须在 E7 保存原始 Hook `source` 并实测首跑、复跑和手工续跑；只有出现稳定、互斥的逐回合标记后才能收紧分类。
+- Codex 已安排任务（当前 App Server `source=vscode + threadSource=automation`）完成、失败或中断后不经过 Presence 抑制，立即以独立稳定 `client_id` 写入 Outbox 并推送微信；完成或失败通知全部分段确认后，可在 30 分钟内回复来源会话，中断通知只提示回到 Desktop。计划的创建、触发和执行仍由 Codex Desktop 官方自动化负责，Bridge 不扫描 UI、不读取私有数据库，也不替代计划任务事实源；本机项目任务仍要求电脑、Desktop 与 Bridge 保持运行。公共文档未承诺 `automation` 字面值跨版本不变，因此未知来源失败关闭并列入版本升级实机回归。
+- 当前公开 `thread/read.threadSource` 只提供线程级来源，没有经验证的逐回合计划触发标记；因此在 `threadSource=automation` 的同一线程内从 Desktop 手工续跑，可能仍被归类为已安排任务并立即推送。该限制不得作为授权判断依据，必须在 E7 保存原始 Hook `source` 并实测首跑、复跑和手工续跑；只有出现稳定、互斥的逐回合标记后才能收紧分类。
 - Desktop 失败或等待审批在离开时推送；在场时由 Desktop 呈现。
 - 全部分段成功送达的 Desktop 或已安排任务完成/失败通知创建 30 分钟通知回复窗口；通知中明确显示项目和会话标题。
 - Bridge 回合的审批无论是否在场都发送微信。初始通知失败使用稳定 `client_id` 指数退避；请求仍存活且未处理时在 60 秒和 5 分钟分别发送一次提醒，提醒各自使用稳定 `client_id`，30 分钟后自动拒绝。
@@ -333,7 +333,7 @@ flowchart LR
 7. **已实现**：SQLite 队列、去重、Dispatch Intent、Outbox、最多 3 个并行微信回合，以及最终回复最多 3 条、每条 2000 UTF-8 字节的边界。
 8. **已实现，待长期实机验收**：Presence、无新输入的延迟离开通知、已安排任务不受 Presence 抑制的终态通知、最后一轮摘要与最终回答、通知送达后 30 分钟回复路由与活动任务电源保持。
 9. **已实现，待真实微信验收**：Bridge App Server 审批往返、通知退避重试、60 秒/5 分钟提醒、30 分钟过期及审批中重启失效处理。
-10. **文本闭环已通过，其他路径待真实微信验收**：已完成真实 iLink 扫码绑定及文本收发；固定 `client_id` 跨普通重试和重启复用、服务端幂等表现及主动通知仍待验证并记录。
+10. **文本闭环与计划通知服务端确认已通过，其他路径待真实微信验收**：已完成真实 iLink 扫码绑定、文本收发及已安排任务通知到 iLink `confirmed`；固定 `client_id` 跨普通重试和重启复用的服务端幂等表现，以及主动通知的微信客户端目视、失败/中断矩阵和长期稳定性仍待验证并记录。
 11. **已实现，待真实微信验收**：入站图片 `localImage`、文件/视频 `mention`、语音转写文本、100 MiB 限制、受信 CDN、AES 解密、版本化队列恢复和明确媒体错误。
 12. **待外部实机与凭证**：完整 Desktop → 微信主动通知 → 同会话回复 → Desktop 可见的端到端验收。
 13. **正式发布阻断项**：Windows 10/11 x64、真实微信、共享会话抢占、固定 `client_id`、媒体、审批、主动通知和完整 E2E 必须在 [`docs/release-acceptance.md`](./docs/release-acceptance.md) 逐项签字；完成前只能发布明确标记的预览版，不能发布到 `latest`。

@@ -45,10 +45,18 @@ export type DesktopNotificationContext = {
 };
 
 export function terminalNotificationOrigin(
-  value: unknown,
+  source: unknown,
+  threadSource?: unknown,
 ): TerminalNotificationOrigin | null {
-  if (value === "automation") return "automation";
-  if (value === "vscode") return "desktop";
+  if (threadSource === "automation") {
+    return source === "vscode" || source === "automation" ? "automation" : null;
+  }
+  if (threadSource === "user") {
+    return source === "vscode" ? "desktop" : null;
+  }
+  if (threadSource !== undefined) return null;
+  if (source === "automation") return "automation";
+  if (source === "vscode") return "desktop";
   return null;
 }
 

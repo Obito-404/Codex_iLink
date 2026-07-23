@@ -113,6 +113,7 @@ export type BridgeDaemonOptions = {
 const DEFAULT_EVENT_QUIESCE_TIMEOUT_MS = 10_000;
 const TRANSPORT_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1_000;
 const TERMINAL_NOTIFICATION_RECONCILE_BATCH_SIZE = 4;
+const INTERRUPTED_CONFIRMATION_READS = 5;
 type TerminalNotificationEvidence = TerminalNotificationJob["evidence"];
 
 export class BridgeDaemon {
@@ -443,6 +444,7 @@ export class BridgeDaemon {
       });
       await this.#reconcileTerminalStop(
         { ...event, turnId: event.turnId },
+        evidence,
         0,
         signal,
       );
@@ -450,6 +452,7 @@ export class BridgeDaemon {
     }
     await this.#reconcileTerminalStop(
       { ...event, turnId: event.turnId },
+      evidence,
       0,
       signal,
     );
@@ -534,22 +537,51 @@ export class BridgeDaemon {
 
   async #reconcileTerminalStop(
     event: HookEvent & { turnId: string },
+    evidence: TerminalNotificationEvidence,
     attempt: number,
     signal?: AbortSignal,
   ): Promise<void> {
     const threadId = event.sessionId;
     const turnId = event.turnId;
+    let interruptedObservationCount = 0;
     let lastError: unknown;
+    let originHint: TerminalNotificationOrigin | null | undefined;
+    let threadEnsured = false;
+    const ensureThread = async (): Promise<void> => {
+      if (
+        signal?.aborted ||
+        evidence !== "managed-desktop" ||
+        threadEnsured ||
+        !this.#options.codex.ensureThread
+      ) {
+        return;
+      }
+      await this.#options.codex.ensureThread(threadId);
+      threadEnsured = true;
+    };
     for (let currentAttempt = attempt; currentAttempt <= 20; currentAttempt += 1) {
       if (!this.#started || signal?.aborted) return;
+      let readSucceeded = false;
       try {
-        await this.#options.codex.ensureThread?.(threadId);
-        if (signal?.aborted) return;
         const read = await this.#options.codex.readThread({
           includeTurns: true,
           threadId,
         });
+        readSucceeded = true;
         if (signal?.aborted) return;
+        if (originHint === undefined) {
+          const classifiedOrigin = terminalNotificationOrigin(
+            read.thread.source,
+            read.thread.threadSource,
+          );
+          originHint =
+            classifiedOrigin ??
+            (evidence === "managed-desktop" &&
+            read.thread.source === "vscode" &&
+            read.thread.threadSource === null
+              ? "desktop"
+              : null);
+        }
         const turns = Array.isArray(read.thread.turns) ? read.thread.turns : [];
         const turn = turns
           .filter(
@@ -560,19 +592,28 @@ export class BridgeDaemon {
           )
           .find((value) => value.id === turnId);
         const status = terminalNotificationStatus(turn?.status);
-        if (status) {
+        interruptedObservationCount =
+          status === "interrupted" ? interruptedObservationCount + 1 : 0;
+        // A separate App Server can briefly report interrupted while the
+        // Desktop automation is committing its completed terminal state.
+        const confirmedStatus =
+          status === "interrupted" &&
+          interruptedObservationCount < INTERRUPTED_CONFIRMATION_READS
+            ? null
+            : status;
+        if (confirmedStatus) {
           const controller = this.#options.state.getController();
           const startedAtMs = terminalTurnStartedAtMs(turn?.startedAt);
           const origin =
             controller &&
             startedAtMs !== null &&
             startedAtMs > controller.boundAtMs
-              ? terminalNotificationOrigin(read.thread.source)
+              ? originHint
               : null;
           if (origin) {
             await this.#notifyTerminalOnce(
               event,
-              status,
+              confirmedStatus,
               origin,
               read.thread,
               signal,
@@ -611,8 +652,18 @@ export class BridgeDaemon {
             return;
           }
         }
+        if (!turn) await ensureThread();
       } catch (error) {
+        interruptedObservationCount = 0;
         lastError = error;
+        if (!readSucceeded && !signal?.aborted) {
+          try {
+            await ensureThread();
+          } catch (ensureError) {
+            lastError = ensureError;
+          }
+        }
+        if (attempt > 0) break;
       }
       if (currentAttempt < 20) {
         await delay(250);
@@ -738,7 +789,8 @@ export class BridgeDaemon {
           toolName: null,
           turnId: job.turnId,
         },
-        20,
+        job.evidence,
+        16,
         signal,
       );
     } catch {

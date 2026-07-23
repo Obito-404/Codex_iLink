@@ -1265,6 +1265,245 @@ test("an unmatched automation Stop is durably retried and pushed while present",
   }
 });
 
+test("a user-source heartbeat completion bypasses presence and replays only once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-heartbeat-"));
+  const databasePath = join(directory, "state.sqlite");
+  const state = new SqliteState(databasePath);
+  const leases = new SqliteTurnLeaseStore(databasePath);
+  const sent: Array<{ clientId: string; text: string }> = [];
+  let presenceReads = 0;
+  let primaryHeartbeatReads = 0;
+  let runtimeSource = "vscode";
+  const heartbeatInput = `<heartbeat>
+  <automation_id>automation</automation_id>
+  <current_time_iso>2026-07-23T07:03:57.770Z</current_time_iso>
+  <instructions>
+这是一次定时推送测试。触发后请在当前任务中发送：⏰ 定时测试已触发。
+  </instructions>
+</heartbeat>`;
+  state.setMainThreadId("thread-main");
+  state.bindController({ accountId: "bot-a", boundAtMs: 1, userId: "controller-a" });
+  state.acceptInboundBatch({
+    accountId: "bot-a",
+    controllerUserId: "controller-a",
+    messages: [
+      {
+        body: "help",
+        contextToken: "ctx-heartbeat",
+        messageId: "seed-heartbeat",
+        receivedAtMs: 1,
+      },
+    ],
+    nextCursor: "cursor-heartbeat",
+    updatedAtMs: 1,
+  });
+  state.clearInboundBody("bot-a", "controller-a", "seed-heartbeat");
+
+  const daemon = new BridgeDaemon({
+    bridgeInstanceId: "bridge-instance",
+    codex: {
+      close() {},
+      onEvent() { return () => undefined; },
+      async readThread(input) {
+        assert.equal(input.threadId, "thread-heartbeat");
+        primaryHeartbeatReads += 1;
+        return {
+          thread: {
+            cwd: "D:\\Reports",
+            name: "定时测试",
+            source: runtimeSource,
+            threadSource: "user",
+            turns: [
+              {
+                id: "turn-heartbeat",
+                items:
+                  primaryHeartbeatReads === 1
+                    ? []
+                    : [
+                      {
+                        content: [
+                          {
+                            text: heartbeatInput,
+                            type: "text",
+                          },
+                        ],
+                        type: "userMessage",
+                      },
+                      ...(primaryHeartbeatReads > 2
+                        ? [
+                            {
+                              phase: "final_answer",
+                              text: `⏰ 定时测试已触发；测试任务已自动删除。
+
+<heartbeat>
+  <automation_id>automation</automation_id>
+  <decision>NOTIFY</decision>
+  <message>⏰ 定时测试已触发。</message>
+</heartbeat>`,
+                              type: "agentMessage",
+                            },
+                          ]
+                        : []),
+                      ],
+                itemsView:
+                  primaryHeartbeatReads === 1 ? "notLoaded" : "full",
+                startedAt: 29,
+                status: "completed",
+              },
+              {
+                id: "turn-heartbeat-quiet",
+                items: [
+                  {
+                    content: [{ text: heartbeatInput, type: "text" }],
+                    type: "userMessage",
+                  },
+                  {
+                    phase: "final_answer",
+                    text: `<heartbeat>
+  <automation_id>automation</automation_id>
+  <decision>DONT_NOTIFY</decision>
+  <message>没有需要提醒的更新。</message>
+</heartbeat>`,
+                    type: "agentMessage",
+                  },
+                ],
+                startedAt: 29,
+                status: "completed",
+              },
+              {
+                id: "turn-heartbeat-failed",
+                items: [
+                  {
+                    content: [{ text: heartbeatInput, type: "text" }],
+                    type: "userMessage",
+                  },
+                ],
+                startedAt: 29,
+                status: "failed",
+              },
+              {
+                id: "turn-heartbeat-cli",
+                items: [
+                  {
+                    content: [{ text: heartbeatInput, type: "text" }],
+                    type: "userMessage",
+                  },
+                  {
+                    phase: "final_answer",
+                    text: `<heartbeat>
+  <automation_id>automation</automation_id>
+  <decision>NOTIFY</decision>
+  <message>CLI 不应推送</message>
+</heartbeat>`,
+                    type: "agentMessage",
+                  },
+                ],
+                startedAt: 29,
+                status: "completed",
+              },
+            ],
+          },
+        };
+      },
+      async resumeThread(threadId: string) { return { thread: { id: threadId } }; },
+      async setThreadName() { return {}; },
+      async startThread() { assert.fail("main thread already exists"); },
+      async startTurn() { assert.fail("no inbound messages"); },
+    },
+    hookReceiver: {
+      async close() {}, async drainSpool() { return 0; }, async start() {},
+    },
+    ilink: {
+      async getUpdates() {
+        return { cursor: "cursor-heartbeat", kind: "timeout" as const };
+      },
+      async sendText(input) {
+        sent.push(input);
+        return { accepted: true as const, clientId: input.clientId };
+      },
+    },
+    inboxDirectory: join(directory, "Inbox"),
+    leases,
+    newId: () => "unused",
+    now: () => 30_000,
+    presence: async () => "present",
+    presenceObservation: async () => {
+      presenceReads += 1;
+      return {
+        idleMilliseconds: 0,
+        locked: false,
+        state: "present" as const,
+      };
+    },
+    session,
+    state,
+  });
+  const event = {
+    ...desktopStopEvent(),
+    capturedAtMs: 29_000,
+    cwd: "D:\\Reports",
+    sessionId: "thread-heartbeat",
+    turnId: "turn-heartbeat",
+  };
+
+  try {
+    await daemon.start();
+    await daemon.ingestHookEvent(event);
+    await waitFor(() => sent.length === 1);
+    assert.equal(presenceReads, 0);
+    assert.equal(
+      sent[0]?.clientId,
+      "codex-ilink:automation:thread-heartbeat:turn-heartbeat:final",
+    );
+    assert.equal(sent[0]?.text, "⏰ 定时测试已触发。");
+    assert.deepEqual(state.listTerminalNotificationJobs(30_000), []);
+    assert.deepEqual(state.listLiveNotificationRoutes(30_001), [
+      {
+        deliveredAtMs: 30_000,
+        eventId: "automation:turn-heartbeat",
+        expiresAtMs: 30_000 + 30 * 60 * 1_000,
+        threadId: "thread-heartbeat",
+      },
+    ]);
+
+    await daemon.ingestHookEvent(event);
+    assert.equal(sent.length, 1);
+    assert.deepEqual(state.listTerminalNotificationJobs(30_000), []);
+
+    await daemon.ingestHookEvent({
+      ...event,
+      turnId: "turn-heartbeat-quiet",
+    });
+    assert.equal(sent.length, 1);
+    assert.equal(presenceReads, 0);
+    assert.deepEqual(state.listTerminalNotificationJobs(30_000), []);
+
+    await daemon.ingestHookEvent({
+      ...event,
+      turnId: "turn-heartbeat-failed",
+    });
+    await waitFor(() => sent.length === 2);
+    assert.equal(presenceReads, 0);
+    assert.match(
+      sent[1]?.text ?? "",
+      /Codex 已安排任务失败[\s\S]*定时测试/u,
+    );
+
+    runtimeSource = "cli";
+    await daemon.ingestHookEvent({
+      ...event,
+      turnId: "turn-heartbeat-cli",
+    });
+    assert.equal(sent.length, 2);
+    assert.deepEqual(state.listTerminalNotificationJobs(30_000), []);
+    await daemon.stop();
+  } finally {
+    leases.close();
+    state.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("five consecutive interrupted reads send one automation notice", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-interrupted-"));
   const databasePath = join(directory, "state.sqlite");

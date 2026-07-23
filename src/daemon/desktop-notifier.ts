@@ -38,6 +38,7 @@ export type DesktopNotificationResult =
   | "queued";
 
 export type DesktopNotificationContext = {
+  messageOverride?: string;
   origin?: TerminalNotificationOrigin;
   presence?: PresenceState;
   signal?: AbortSignal;
@@ -151,7 +152,9 @@ export class DesktopNotifier {
       }
     }
     if (context.signal?.aborted) return "cancelled";
-    const text = formatDesktopNotification(event, status, origin, thread);
+    const text =
+      context.messageOverride ??
+      formatDesktopNotification(event, status, origin, thread);
     const extracted = extractWechatLocalFileReferences(text);
     const safeText = [
       extracted.text,

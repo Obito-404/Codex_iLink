@@ -20,6 +20,7 @@ import {
   terminalNotificationOrigin,
   type DesktopTerminalStatus,
 } from "./desktop-notifier.ts";
+import { heartbeatTerminalDecision } from "./heartbeat-notification.ts";
 import {
   isFinalDesktopNotificationPart,
   parseDesktopNotificationClientId,
@@ -604,11 +605,31 @@ export class BridgeDaemon {
         if (confirmedStatus) {
           const controller = this.#options.state.getController();
           const startedAtMs = terminalTurnStartedAtMs(turn?.startedAt);
+          const heartbeat =
+            read.thread.source === "vscode" &&
+            read.thread.threadSource === "user"
+              ? heartbeatTerminalDecision(turn, confirmedStatus)
+              : null;
+          if (heartbeat?.kind === "pending") {
+            lastError = new Error("E_HEARTBEAT_DECISION_NOT_DURABLE");
+            if (currentAttempt < 20) {
+              await delay(250);
+              if (signal?.aborted) return;
+              continue;
+            }
+            break;
+          }
+          const notificationOrigin =
+            heartbeat === null
+              ? originHint
+              : heartbeat.kind === "notify"
+                ? "automation"
+                : null;
           const origin =
             controller &&
             startedAtMs !== null &&
             startedAtMs > controller.boundAtMs
-              ? originHint
+              ? notificationOrigin
               : null;
           if (origin) {
             await this.#notifyTerminalOnce(
@@ -617,6 +638,7 @@ export class BridgeDaemon {
               origin,
               read.thread,
               signal,
+              heartbeat?.kind === "notify" ? heartbeat.message : undefined,
             );
           }
           if (signal?.aborted) return;
@@ -679,6 +701,7 @@ export class BridgeDaemon {
     origin: TerminalNotificationOrigin,
     thread: Record<string, unknown>,
     signal?: AbortSignal,
+    messageOverride?: string,
   ): Promise<void> {
     if (signal?.aborted) return;
     const notifier = this.#terminalNotifier;
@@ -706,6 +729,7 @@ export class BridgeDaemon {
     }
     const result = await notifier.notifyTerminal(event, status, {
       ...(confirmedAway ? { presence: "away" as const } : {}),
+      ...(messageOverride ? { messageOverride } : {}),
       origin,
       ...(signal ? { signal } : {}),
       thread,

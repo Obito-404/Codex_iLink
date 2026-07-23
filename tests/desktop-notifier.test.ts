@@ -193,6 +193,40 @@ test("an automation completion bypasses presence and keeps a reply route identit
   });
 });
 
+test("a heartbeat automation queues only its declared notification message", async () => {
+  await withState(async (state) => {
+    seedContext(state);
+    const notifier = new DesktopNotifier({
+      now: () => 21_250,
+      presence: async () => {
+        assert.fail("heartbeat notifications must not read Desktop presence");
+      },
+      readThread: async () => {
+        assert.fail("the verified thread snapshot should be reused");
+      },
+      session,
+      state,
+    });
+
+    assert.equal(
+      await notifier.notifyTerminal(stopEvent, "completed", {
+        messageOverride: "⏰ 定时测试已触发。",
+        origin: "automation",
+        thread: {
+          cwd: "D:\\Reports",
+          name: "定时测试",
+        },
+      }),
+      "queued",
+    );
+
+    const pending = state.listPendingOutbox();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]?.body, "⏰ 定时测试已触发。");
+    assert.match(pending[0]?.clientId ?? "", /^codex-ilink:automation:/u);
+  });
+});
+
 test("an automation failure is pushed without a final answer", async () => {
   await withState(async (state) => {
     seedContext(state);

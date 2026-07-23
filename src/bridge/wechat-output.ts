@@ -34,6 +34,7 @@ export function formatWechatFinalReply(
   text: string,
   options: { maxMessages?: number } = {},
 ): string[] {
+  text = stripDesktopInboxItemDirectives(text);
   text = extractWechatLocalFileReferences(text).text;
   if (text.length === 0) return [];
   const maxMessages = options.maxMessages ?? WECHAT_FINAL_MAX_MESSAGES;
@@ -59,6 +60,45 @@ export function formatWechatFinalReply(
   ).prefix;
   messages[messages.length - 1] = `${shortened}${TRUNCATION_NOTICE}`;
   return messages;
+}
+
+function stripDesktopInboxItemDirectives(text: string): string {
+  const lines: string[] = [];
+  let activeFence: { length: number; marker: "`" | "~" } | null = null;
+  for (const line of text.split(/\r?\n/gu)) {
+    const fence = markdownFence(line);
+    if (activeFence) {
+      lines.push(line);
+      if (
+        fence?.marker === activeFence.marker &&
+        fence.length >= activeFence.length &&
+        fence.rest.trim().length === 0
+      ) {
+        activeFence = null;
+      }
+      continue;
+    }
+    if (fence) {
+      activeFence = { length: fence.length, marker: fence.marker };
+      lines.push(line);
+      continue;
+    }
+    if (!/^::inbox-item\{.*\}\s*$/u.test(line)) lines.push(line);
+  }
+  return lines.join("\n").replace(/\n{3,}/gu, "\n\n").trim();
+}
+
+function markdownFence(
+  line: string,
+): { length: number; marker: "`" | "~"; rest: string } | null {
+  const match = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+  const run = match?.[1];
+  if (!run) return null;
+  const marker = run[0];
+  if (marker !== "`" && marker !== "~") return null;
+  const rest = match?.[2] ?? "";
+  if (marker === "`" && rest.includes("`")) return null;
+  return { length: run.length, marker, rest };
 }
 
 function takeUtf8Prefix(

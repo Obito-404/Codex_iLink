@@ -163,7 +163,9 @@ test("an automation completion bypasses presence and keeps a reply route identit
                 },
                 {
                   phase: "final_answer",
-                  text: "今天有两个高优先级事项。",
+                  text: `今天有两个高优先级事项。
+
+::inbox-item{title="晨间简报等待数据连接" summary="请选择 Google 或 Microsoft 邮箱与日历"}`,
                   type: "agentMessage",
                 },
               ],
@@ -180,6 +182,7 @@ test("an automation completion bypasses presence and keeps a reply route identit
       pending[0]?.body ?? "",
       /Codex 已安排任务已完成[\s\S]*每日简报[\s\S]*今天有两个高优先级事项/u,
     );
+    assert.doesNotMatch(pending[0]?.body ?? "", /inbox-item/u);
     assert.match(pending[0]?.clientId ?? "", /^codex-ilink:automation:/u);
     assert.match(pending[0]?.body ?? "", /直接回复即可继续这个会话/u);
     assert.equal(

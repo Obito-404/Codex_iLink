@@ -39,3 +39,35 @@ test("Codex escaped Windows separators normalize back to one local path", () => 
     "C:\\Users\\obito_li\\Desktop\\报销\\到账凭证.png",
   );
 });
+
+test("Desktop inbox item directives are omitted from WeChat text", () => {
+  const messages = formatWechatFinalReply(
+    `今日晨间简报暂无法生成：尚未连接邮箱与日历。
+
+请选择 Google 或 Microsoft 邮箱与日历。📅
+
+::inbox-item{title="晨间简报等待数据连接" summary="请选择 Google 或 Microsoft 邮箱与日历"}`,
+  );
+
+  assert.equal(
+    messages.join(""),
+    `今日晨间简报暂无法生成：尚未连接邮箱与日历。
+
+请选择 Google 或 Microsoft 邮箱与日历。📅`,
+  );
+  assert.doesNotMatch(messages.join(""), /inbox-item/u);
+});
+
+test("inbox item examples inside Markdown code remain visible", () => {
+  const directive =
+    '::inbox-item{title="示例标题" summary="这是代码示例"}';
+  const fenced = `\`\`\`text
+${directive}
+\`\`\``;
+  const indented = `示例：
+
+    ${directive}`;
+
+  assert.equal(formatWechatFinalReply(fenced).join(""), fenced);
+  assert.equal(formatWechatFinalReply(indented).join(""), indented);
+});

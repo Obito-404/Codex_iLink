@@ -79,16 +79,29 @@ export function heartbeatTerminalDecision(
   }
 
   const output = parseHeartbeatOutput(finalAnswer);
-  if (!output || output.automationId !== heartbeat.automationId) {
+  if (output) {
+    if (output.automationId !== heartbeat.automationId) {
+      return { kind: "invalid" };
+    }
+    if (output.decision === "DONT_NOTIFY") {
+      return { automationId: heartbeat.automationId, kind: "quiet" };
+    }
+    return {
+      automationId: heartbeat.automationId,
+      kind: "notify",
+      message: output.message,
+    };
+  }
+  if (startsWithHeartbeatEnvelope(finalAnswer)) {
     return { kind: "invalid" };
   }
-  if (output.decision === "DONT_NOTIFY") {
-    return { automationId: heartbeat.automationId, kind: "quiet" };
+  if (finalAnswer.trim().length === 0) {
+    return { kind: "invalid" };
   }
   return {
     automationId: heartbeat.automationId,
     kind: "notify",
-    message: output.message,
+    message: finalAnswer,
   };
 }
 

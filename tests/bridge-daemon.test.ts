@@ -1265,7 +1265,7 @@ test("an unmatched automation Stop is durably retried and pushed while present",
   }
 });
 
-test("a user-source heartbeat completion bypasses presence and replays only once", async () => {
+test("a user-source plain heartbeat completion bypasses presence and replays only once", async () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-daemon-heartbeat-"));
   const databasePath = join(directory, "state.sqlite");
   const state = new SqliteState(databasePath);
@@ -1333,13 +1333,7 @@ test("a user-source heartbeat completion bypasses presence and replays only once
                         ? [
                             {
                               phase: "final_answer",
-                              text: `⏰ 定时测试已触发；测试任务已自动删除。
-
-<heartbeat>
-  <automation_id>automation</automation_id>
-  <decision>NOTIFY</decision>
-  <message>⏰ 定时测试已触发。</message>
-</heartbeat>`,
+                              text: "⏰ 定时测试已触发。",
                               type: "agentMessage",
                             },
                           ]

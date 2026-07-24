@@ -51,6 +51,30 @@ test("UserPromptSubmit emits telemetry only after the guard decides to fail open
   );
 });
 
+test("Stop hooks allow enough time for lifecycle delivery and turn reconciliation", () => {
+  const manifest = JSON.parse(readFileSync(hooksManifest, "utf8")) as {
+    hooks?: {
+      Stop?: Array<{
+        hooks?: Array<{ command?: string; timeout?: number }>;
+      }>;
+    };
+  };
+  const commands = (manifest.hooks?.Stop ?? []).flatMap(
+    (group) => group.hooks ?? [],
+  );
+
+  assert.equal(
+    commands.find((hook) => hook.command === "ilink __hook lifecycle")
+      ?.timeout,
+    5,
+  );
+  assert.equal(
+    commands.find((hook) => hook.command === "ilink __hook turn Stop")
+      ?.timeout,
+    5,
+  );
+});
+
 test("Desktop Stop is reconciled only after the exact turn is terminal", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-lease-"));
   const databasePath = join(directory, "coordination.sqlite");

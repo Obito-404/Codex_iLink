@@ -31,7 +31,7 @@
             "type": "command",
             "command": "ilink __hook lifecycle",
             "commandWindows": "ilink __hook lifecycle",
-            "timeout": 1
+            "timeout": 5
           },
           {
             "type": "command",

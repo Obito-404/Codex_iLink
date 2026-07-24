@@ -61,6 +61,37 @@ test("keeps a completed DONT_NOTIFY heartbeat quiet", () => {
   );
 });
 
+test("uses a plain completed heartbeat answer as the notification message", () => {
+  const finalAnswer = `
+## AI HOT 过去 24 小时早报
+
+- 第一条重要更新
+- 第二条重要更新
+`;
+
+  assert.deepEqual(
+    heartbeatTerminalDecision(heartbeatTurn(finalAnswer), "completed"),
+    {
+      automationId: "automation",
+      kind: "notify",
+      message: finalAnswer,
+    },
+  );
+});
+
+test("does not apply the structured message limit to a plain heartbeat answer", () => {
+  const finalAnswer = "更".repeat(16_001);
+
+  assert.deepEqual(
+    heartbeatTerminalDecision(heartbeatTurn(finalAnswer), "completed"),
+    {
+      automationId: "automation",
+      kind: "notify",
+      message: finalAnswer,
+    },
+  );
+});
+
 test("does not classify ordinary prose that merely contains a heartbeat tag", () => {
   assert.equal(
     heartbeatTerminalDecision(
@@ -167,7 +198,6 @@ test("fails closed when the output id, decision, or final answer is invalid", ()
   <decision>MAYBE</decision>
   <message>不应推送</message>
 </heartbeat>`,
-    "回答里没有 heartbeat 决策。",
   ]) {
     assert.deepEqual(
       heartbeatTerminalDecision(heartbeatTurn(answer), "completed"),

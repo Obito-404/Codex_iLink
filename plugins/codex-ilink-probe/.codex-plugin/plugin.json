@@ -1,6 +1,6 @@
 {
   "name": "codex-ilink-probe",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Coordinates Codex Desktop and Codex iLink turns with a local atomic lease.",
   "author": {
     "name": "Codex iLink"

@@ -85,7 +85,7 @@ flowchart LR
 - 当前微信所选项目中尚未受管的 Desktop 任务不参与门禁并始终放行，只在同一 SQLite 写序列中记录最小活动 turn 观察。若之后通过 `/s <n>` 进入该任务，微信回合会等待观察到精确 `Stop` 且对应 turn 可读为终态；该观察不进入 `/st` 活动任务，也不触发系统保活。其他 Desktop 项目始终放行且不记录活动观察；全项目 Stop 只用于离开通知，不改变项目选择或并发门禁。
 - App Server 的 `thread/read` 等状态读取超时只拒绝该次请求，不终止仍可能持有活动工具回合的进程；后续轮询在同一连接上重试。已接受回合超过约 2 分钟仍无终态时，只向微信持久化发送一次“仍在执行”提示，不释放租约、不取消任务、不自动重试输入。
 - Bridge 未运行、仲裁关闭时，Desktop Hook 在与仲裁开关相同的 `BEGIN IMMEDIATE` 临界区内 fail-open UPSERT 当前回合；仲裁启用与 Prompt 记录因此有确定先后，Bridge 启动时不会遗漏已在途的 Desktop 回合。状态库尚不存在时由 Hook 先创建最小租约表。
-- Bridge App Server 使用受控环境标记；它触发的 `UserPromptSubmit` Hook 只验证已有 Bridge 租约，不重复竞争。Desktop 租约只有在精确 `Stop` 已落库且对应 turn 可读为终态时才能释放；独立 App Server 的 `thread/read` 可能把仍活动的 Desktop turn 显示为 `interrupted`，不得单独作为释放证据。Bridge `turn/completed` 同样只能释放自己持有且令牌匹配的租约。
+- Bridge App Server 使用受控环境标记；它触发的 `UserPromptSubmit` Hook 只验证已有 Bridge 租约，不重复竞争。Desktop 租约只有在精确 `Stop` 已落库且对应 turn 可读为终态时才能释放；唯一的缺失 `Stop` 兼容路径是同一会话的新 Desktop Prompt 从文件名绑定当前 `thread_id` 的本地 Hook transcript 有界完整 JSONL 尾部读到精确匹配旧 `turn_id`、`reason=interrupted` 的顶层结构化 `turn_aborted`，并在同一事务中以完整旧令牌 CAS 为新 Desktop 令牌。该路径不得接管 Bridge 租约，读取或格式异常时继续阻止；独立 App Server 的 `thread/read` 可能把仍活动的 Desktop turn 显示为 `interrupted`，不得单独作为释放证据。Bridge `turn/completed` 同样只能释放自己持有且令牌匹配的租约。
 - 不同会话最多并行 3 个微信回合。
 - 使用 `thread/unarchive`、`thread/name/set`、`turn/start`、`thread/read` 等公开接口，不读取 Desktop 私有数据库。
 

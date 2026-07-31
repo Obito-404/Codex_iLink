@@ -298,7 +298,7 @@ Hook 不执行：
 - 网络退避；
 - 长时间读取 App Server；
 - 按自然语言关键词推断“定时任务”；
-- 解析不稳定 transcript 作为生产契约。
+- 解析不稳定 transcript 作为通知分类或通用事实源；唯一例外是 ADR-0011 的租约兼容恢复：只对当前会话本地 rollout 的有界完整 JSONL 尾部读取精确匹配旧 `turn_id` 的结构化 `turn_aborted`，任何路径、格式或读取异常都继续失败关闭。
 
 ## 5. 与当前 Codex_iLink 实现的差距
 

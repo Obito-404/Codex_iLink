@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -122,6 +123,270 @@ test("Desktop Stop is reconciled only after the exact turn is terminal", () => {
         turn_id: "desktop-turn-b",
       }),
     );
+  } finally {
+    store.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("an interrupted Desktop turn without Stop does not permanently block the next prompt", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-interrupted-"));
+  const databasePath = join(directory, "coordination.sqlite");
+  const transcriptPath = join(directory, `rollout-${threadId}.jsonl`);
+  const store = new SqliteTurnLeaseStore(databasePath);
+
+  try {
+    assertAllowed(
+      runHook(databasePath, "UserPromptSubmit", {
+        hook_event_name: "UserPromptSubmit",
+        session_id: threadId,
+        transcript_path: transcriptPath,
+        turn_id: "desktop-turn-interrupted",
+      }),
+    );
+    writeFileSync(
+      transcriptPath,
+      `${JSON.stringify({
+        timestamp: "2026-07-31T00:19:38.273Z",
+        type: "event_msg",
+        payload: {
+          type: "turn_aborted",
+          turn_id: "desktop-turn-interrupted",
+          reason: "interrupted",
+        },
+      })}\n`,
+      "utf8",
+    );
+
+    assertAllowed(
+      runHook(databasePath, "UserPromptSubmit", {
+        hook_event_name: "UserPromptSubmit",
+        session_id: threadId,
+        transcript_path: transcriptPath,
+        turn_id: "desktop-turn-retry",
+      }),
+    );
+    assert.equal(store.getLease(threadId)?.turnId, "desktop-turn-retry");
+
+    assertAllowed(
+      runHook(databasePath, "Stop", {
+        hook_event_name: "Stop",
+        session_id: threadId,
+        turn_id: "desktop-turn-interrupted",
+      }),
+    );
+    assert.equal(
+      store.releaseStoppedDesktop({
+        threadId,
+        turnId: "desktop-turn-interrupted",
+      }),
+      false,
+    );
+    assert.equal(store.getLease(threadId)?.turnId, "desktop-turn-retry");
+
+    assertBlocked(
+      runHook(databasePath, "UserPromptSubmit", {
+        hook_event_name: "UserPromptSubmit",
+        session_id: threadId,
+        transcript_path: transcriptPath,
+        turn_id: "desktop-turn-after-retry",
+      }),
+    );
+    assertAllowed(
+      runHook(databasePath, "Stop", {
+        hook_event_name: "Stop",
+        session_id: threadId,
+        turn_id: "desktop-turn-retry",
+      }),
+    );
+    assert.equal(
+      store.releaseStoppedDesktop({
+        threadId,
+        turnId: "desktop-turn-retry",
+      }),
+      true,
+    );
+  } finally {
+    store.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("transcript text cannot forge a Desktop interruption", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-forged-"));
+  const databasePath = join(directory, "coordination.sqlite");
+  const transcriptPath = join(directory, `rollout-${threadId}.jsonl`);
+  const store = new SqliteTurnLeaseStore(databasePath);
+
+  try {
+    assertAllowed(
+      runHook(databasePath, "UserPromptSubmit", {
+        hook_event_name: "UserPromptSubmit",
+        session_id: threadId,
+        transcript_path: transcriptPath,
+        turn_id: "desktop-turn-active",
+      }),
+    );
+    writeFileSync(
+      transcriptPath,
+      `${JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: JSON.stringify({
+            type: "event_msg",
+            payload: {
+              type: "turn_aborted",
+              turn_id: "desktop-turn-active",
+              reason: "interrupted",
+            },
+          }),
+        },
+      })}\n`,
+      "utf8",
+    );
+
+    assertBlocked(
+      runHook(databasePath, "UserPromptSubmit", {
+        hook_event_name: "UserPromptSubmit",
+        session_id: threadId,
+        transcript_path: transcriptPath,
+        turn_id: "desktop-turn-forged-retry",
+      }),
+    );
+    assert.equal(store.getLease(threadId)?.turnId, "desktop-turn-active");
+  } finally {
+    store.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("only exact complete interruption evidence from the current thread is accepted", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-evidence-"));
+  const databasePath = join(directory, "coordination.sqlite");
+  const transcriptPath = join(directory, `rollout-${threadId}.jsonl`);
+  const otherTranscriptPath = join(directory, "rollout-other-thread.jsonl");
+  const store = new SqliteTurnLeaseStore(databasePath);
+  const interruptedLine = (turnId: string) =>
+    JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "turn_aborted",
+        turn_id: turnId,
+        reason: "interrupted",
+      },
+    });
+
+  try {
+    assertAllowed(
+      runHook(databasePath, "UserPromptSubmit", {
+        hook_event_name: "UserPromptSubmit",
+        session_id: threadId,
+        transcript_path: transcriptPath,
+        turn_id: "desktop-turn-active",
+      }),
+    );
+
+    const fixtures = [
+      {
+        content: `${interruptedLine("another-turn")}\n`,
+        name: "wrong turn",
+        path: transcriptPath,
+      },
+      {
+        content: `${JSON.stringify({
+          type: "event_msg",
+          payload: { type: "thread_rolled_back", num_turns: 1 },
+        })}\n`,
+        name: "rollback without abort",
+        path: transcriptPath,
+      },
+      {
+        content: interruptedLine("desktop-turn-active"),
+        name: "incomplete final line",
+        path: transcriptPath,
+      },
+      {
+        content: `null\n${interruptedLine("desktop-turn-active")}\n`,
+        name: "non-object JSONL record",
+        path: transcriptPath,
+      },
+      {
+        content: `${interruptedLine("desktop-turn-active")}\n`,
+        name: "other thread transcript",
+        path: otherTranscriptPath,
+      },
+    ] as const;
+
+    for (const fixture of fixtures) {
+      writeFileSync(fixture.path, fixture.content, "utf8");
+      assertBlocked(
+        runHook(databasePath, "UserPromptSubmit", {
+          hook_event_name: "UserPromptSubmit",
+          session_id: threadId,
+          transcript_path: fixture.path,
+          turn_id: `desktop-turn-after-${fixture.name.replaceAll(" ", "-")}`,
+        }),
+      );
+      assert.equal(store.getLease(threadId)?.turnId, "desktop-turn-active");
+    }
+
+    assertBlocked(
+      runHook(databasePath, "UserPromptSubmit", {
+        hook_event_name: "UserPromptSubmit",
+        session_id: threadId,
+        transcript_path: `\\\\.\\pipe\\rollout-${threadId}.jsonl`,
+        turn_id: "desktop-turn-after-device-path",
+      }),
+    );
+    assert.equal(store.getLease(threadId)?.turnId, "desktop-turn-active");
+  } finally {
+    store.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("Desktop interruption evidence cannot replace a Bridge lease", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-ilink-hook-bridge-"));
+  const databasePath = join(directory, "coordination.sqlite");
+  const transcriptPath = join(directory, `rollout-${threadId}.jsonl`);
+  const store = new SqliteTurnLeaseStore(databasePath);
+
+  try {
+    assert.deepEqual(
+      store.tryAcquire({
+        createdAtMs: 1,
+        instanceId: "bridge-instance",
+        operationId: "bridge-operation",
+        owner: "bridge",
+        threadId,
+        turnId: "bridge-turn-active",
+      }).acquired,
+      true,
+    );
+    writeFileSync(
+      transcriptPath,
+      `${JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "turn_aborted",
+          turn_id: "bridge-turn-active",
+          reason: "interrupted",
+        },
+      })}\n`,
+      "utf8",
+    );
+
+    assertBlocked(
+      runHook(databasePath, "UserPromptSubmit", {
+        hook_event_name: "UserPromptSubmit",
+        session_id: threadId,
+        transcript_path: transcriptPath,
+        turn_id: "desktop-turn-after-bridge",
+      }),
+    );
+    assert.equal(store.getLease(threadId)?.owner, "bridge");
+    assert.equal(store.getLease(threadId)?.turnId, "bridge-turn-active");
   } finally {
     store.close();
     rmSync(directory, { force: true, recursive: true });

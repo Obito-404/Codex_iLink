@@ -1,11 +1,20 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { spoolHookEvent } from "./hook-spool.mjs";
 
 const SAFE_THREAD_ID = /^[A-Za-z0-9-]+$/u;
 const GUARD_OBSERVATION_SOURCE = "codex-ilink-guard";
+const TRANSCRIPT_TAIL_LIMIT_BYTES = 1024 * 1024;
 const UNMANAGED_BUSY_TIMEOUT_MS = 250;
 const OBSERVATION_TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const BLOCK_OUTPUT = {
@@ -129,6 +138,17 @@ function main() {
     }
 
     ensureLeaseSchema(database);
+    const interruptedDesktopLease =
+      eventName === "UserPromptSubmit" &&
+      !bridgeTurn &&
+      (forceArbitration || arbitrationEnabled(database))
+        ? findInterruptedDesktopLease(
+            database,
+            threadId,
+            turnId,
+            stringField(input, "transcript_path"),
+          )
+        : null;
     database.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
     const arbitrationIsEnabled =
@@ -148,7 +168,12 @@ function main() {
         observeDesktopActivity(database, threadId, turnId);
         allowed = true;
       } else if (arbitrationIsEnabled) {
-        allowed = acquireDesktopLease(database, threadId, turnId);
+        allowed = acquireDesktopLease(
+          database,
+          threadId,
+          turnId,
+          interruptedDesktopLease,
+        );
       } else {
         observeDesktopLease(database, threadId, turnId);
         allowed = true;
@@ -335,7 +360,7 @@ function arbitrationEnabled(database) {
   }
 }
 
-function acquireDesktopLease(database, threadId, turnId) {
+function acquireDesktopLease(database, threadId, turnId, interruptedLease) {
   const result = database
     .prepare(`
       INSERT OR IGNORE INTO turn_leases (
@@ -353,16 +378,168 @@ function acquireDesktopLease(database, threadId, turnId) {
 
   const current = database
     .prepare(`
-      SELECT owner, operation_id AS operationId, turn_id AS turnId
+      SELECT
+        owner,
+        instance_id AS instanceId,
+        operation_id AS operationId,
+        turn_id AS turnId,
+        created_at_ms AS createdAtMs,
+        stop_seen_at_ms AS stopSeenAtMs
       FROM turn_leases
       WHERE thread_id = ?
     `)
     .get(threadId);
-  return (
+  if (
     current?.owner === "desktop" &&
     current.operationId === turnId &&
     current.turnId === turnId
-  );
+  ) {
+    return true;
+  }
+  if (!interruptedLease) return false;
+
+  const replacement = database
+    .prepare(`
+      UPDATE turn_leases
+      SET
+        operation_id = ?,
+        turn_id = ?,
+        created_at_ms = ?,
+        stop_seen_at_ms = NULL
+      WHERE thread_id = ?
+        AND owner = 'desktop'
+        AND instance_id = 'desktop'
+        AND operation_id = ?
+        AND turn_id = ?
+        AND created_at_ms = ?
+        AND stop_seen_at_ms IS NULL
+    `)
+    .run(
+      turnId,
+      turnId,
+      Date.now(),
+      threadId,
+      interruptedLease.operationId,
+      interruptedLease.turnId,
+      interruptedLease.createdAtMs,
+    );
+  return Number(replacement.changes) === 1;
+}
+
+function findInterruptedDesktopLease(
+  database,
+  threadId,
+  nextTurnId,
+  transcriptPath,
+) {
+  const current = database
+    .prepare(`
+      SELECT
+        operation_id AS operationId,
+        turn_id AS turnId,
+        created_at_ms AS createdAtMs
+      FROM turn_leases
+      WHERE thread_id = ?
+        AND owner = 'desktop'
+        AND instance_id = 'desktop'
+        AND operation_id = turn_id
+        AND turn_id <> ?
+        AND stop_seen_at_ms IS NULL
+    `)
+    .get(threadId, nextTurnId);
+  if (
+    typeof current?.operationId !== "string" ||
+    typeof current.turnId !== "string" ||
+    typeof current.createdAtMs !== "number" ||
+    !transcriptShowsInterruptedTurn(transcriptPath, threadId, current.turnId)
+  ) {
+    return null;
+  }
+  return current;
+}
+
+function transcriptShowsInterruptedTurn(transcriptPath, threadId, turnId) {
+  if (!isTranscriptPathForThread(transcriptPath, threadId)) return false;
+
+  let descriptor;
+  try {
+    descriptor = openSync(transcriptPath, "r");
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile() || !Number.isSafeInteger(stats.size) || stats.size < 1) {
+      return false;
+    }
+
+    const start = Math.max(0, stats.size - TRANSCRIPT_TAIL_LIMIT_BYTES);
+    const buffer = Buffer.alloc(stats.size - start);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const count = readSync(
+        descriptor,
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        start + bytesRead,
+      );
+      if (count === 0) break;
+      bytesRead += count;
+    }
+
+    let tail = buffer.subarray(0, bytesRead).toString("utf8");
+    if (start > 0) {
+      const firstLineEnd = tail.indexOf("\n");
+      if (firstLineEnd < 0) return false;
+      tail = tail.slice(firstLineEnd + 1);
+    }
+    if (!tail.endsWith("\n")) return false;
+
+    let interrupted = false;
+    for (const line of tail.slice(0, -1).split(/\r?\n/u)) {
+      if (!line.trim()) return false;
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        return false;
+      }
+      if (!record || typeof record !== "object" || Array.isArray(record)) {
+        return false;
+      }
+      if (
+        record.type === "event_msg" &&
+        record.payload &&
+        typeof record.payload === "object" &&
+        !Array.isArray(record.payload) &&
+        record.payload.type === "turn_aborted" &&
+        record.payload.turn_id === turnId &&
+        record.payload.reason === "interrupted"
+      ) {
+        interrupted = true;
+      }
+    }
+    return interrupted;
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Recovery evidence is optional and remains fail-closed.
+      }
+    }
+  }
+}
+
+function isTranscriptPathForThread(transcriptPath, threadId) {
+  if (!transcriptPath || !isAbsolute(transcriptPath)) return false;
+  if (
+    process.platform === "win32" &&
+    !/^[A-Za-z]:[\\/]/u.test(transcriptPath)
+  ) {
+    return false;
+  }
+  const name = basename(transcriptPath);
+  return name.startsWith("rollout-") && name.endsWith(`-${threadId}.jsonl`);
 }
 
 function observeDesktopLease(database, threadId, turnId) {
